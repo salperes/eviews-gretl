@@ -341,6 +341,37 @@ class Phase1Data(unittest.TestCase):
             translate_line(r"copy(c=q) page1\gdp gdpq", c)
 
 
+class Phase2Estimators(unittest.TestCase):
+    def test_estimators(self):
+        c = Ctx()
+        self.assertEqual(translate_line("equation e1.ordered(d=n) y x z", c),
+                         ['bundle e1 = ev_mlreg("y x z", dataset, "oprobit", NA, NA)'])
+        self.assertEqual(translate_line("equation e2.censored(l=0) y c x", c),
+                         ['bundle e2 = ev_mlreg("y c x", dataset, "tobit", 0, NA)'])
+        self.assertEqual(translate_line("equation e3.count(d=n) y c x", c),
+                         ['bundle e3 = ev_mlreg("y c x", dataset, "negbin", NA, NA)'])
+        self.assertEqual(translate_line("equation e4.qreg(quant=0.9) y c x", c),
+                         ['bundle e4 = ev_mlreg("y c x", dataset, "qreg", 0.9, NA)'])
+        self.assertEqual(translate_line("equation e5.ls(w=s, wtype=ivar) y c x", c),
+                         ['bundle e5 = ev_wls("y c x", dataset, "s", "ivar")'])
+        self.assertEqual(translate_line("equation e6.liml y c x @ c z1 z2", c),
+                         ['bundle e6 = ev_tsls("y c x @ c z1 z2", dataset, null, 0, 1)'])
+        self.assertEqual(translate_line("equation e7.gmm(instwgt=hac) y c x @ c z1 z2", c),
+                         ['bundle e7 = ev_system(defarray("y"), defarray("c x"), defarray("1 2"), dataset, "gmm", '
+                          '"z1 z2", 0, null, 0)'])
+        self.assertEqual(translate_line("equation e8.gmm(cx=fd) y y(-1) x @ @dyn(y)", c),
+                         ['bundle e8 = ev_dpanel("y", "x", dataset, 1, 0, 0)'])
+        self.assertEqual(translate_line("equation e9.cointreg y x", c),
+                         ['bundle e9 = ev_cointreg("y x", dataset, "fmols", 1, 1, "const")'])
+        self.assertEqual(translate_line("equation e10.cointreg(method=dols, lead=2, lag=2) y x", c),
+                         ['bundle e10 = ev_cointreg("y x", dataset, "dols", 2, 2, "const")'])
+        self.assertEqual(translate_line("equation g1.arch(1,1,tdist) r c", c)[0],
+                         'bundle ev_gb = ev_garch("r c", dataset, "garch", 1, 1, 1, null, -1, "t")')
+        self.assertEqual(translate_line("e4.output", c), ["ev_mlprint(&e4)"])
+        with self.assertRaises(ValueError):
+            translate_line("equation e11.censored(t) y c x", c)
+
+
 class Structure(unittest.TestCase):
     def test_subroutine_and_call(self):
         prg = """call twice(gdp, 3, "out")

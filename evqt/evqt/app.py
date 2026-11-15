@@ -391,7 +391,7 @@ class EquationWindow(ObjectWindow):
         except GretlError:
             self.kind = "ls"
         self.garch = self.kind == "garch"
-        if self.kind in ("tsls", "binary", "ardl"):
+        if self.kind in ("tsls", "binary", "ardl", "mlreg", "cointreg"):
             views = [("Estimation Output", self.output)]
             if self.kind == "ardl":
                 views.append(("Cointegration and Long Run Form: Bounds Test", lambda: self.run_text(f"ev_boundsprint(&{name})")))
@@ -2031,7 +2031,13 @@ class MainWindow(QMainWindow):
                          "ARCH - Autoregressive Conditional Heteroskedasticity",
                          "TSLS - Two-Stage Least Squares",
                          "BINARY - Binary Choice (Logit, Probit)",
-                         "ARDL - Auto-regressive Distributed Lag Models"])
+                         "ARDL - Auto-regressive Distributed Lag Models",
+                         "ORDERED - Ordered Choice", "CENSORED - Censored or Truncated Data (Tobit)",
+                         "COUNT - Integer Count Data", "QREG - Quantile Regression",
+                         "LIML - Limited Information Maximum Likelihood", "GMM - Generalized Method of Moments",
+                         "COINTREG - Cointegrating Regression"])
+        mopts = QLineEdit()
+        mopts.setPlaceholderText("EViews options, e.g. d=n (probit), quant=0.25, method=dols")
         inst = QLineEdit()
         inst.setPlaceholderText("instrument list, e.g. c z1 z2")
         bdist = QComboBox()
@@ -2090,6 +2096,7 @@ class MainWindow(QMainWindow):
         form.addRow("ARDL max. dependent lags:", dlag)
         form.addRow("ARDL max. regressor lags:", rlag)
         form.addRow("ARDL model selection:", icr)
+        form.addRow("Options (ORDERED ... COINTREG):", mopts)
         if is_panel:
             form.addRow("Cross-section effects:", cxe)
             form.addRow("", perf)
@@ -2100,7 +2107,8 @@ class MainWindow(QMainWindow):
                 w.setEnabled(i == 1)
             for w in (cov, cxe, perf):
                 w.setEnabled(i == 0)
-            inst.setEnabled(i == 2)
+            inst.setEnabled(i in (2, 9, 10))
+            mopts.setEnabled(i >= 5)
             bdist.setEnabled(i == 3)
             for w in (dlag, rlag, icr):
                 w.setEnabled(i == 4)
@@ -2139,6 +2147,23 @@ class MainWindow(QMainWindow):
             self.ctx.equations[name] = "garch"
             self.ctx.last_eq = name
             self.refresh()
+            if name in self.engine.wf.bundles:
+                if window is not None:
+                    window.output()
+                else:
+                    self.open_object((name, "equation"))
+            return
+        if method.currentIndex() >= 5:
+            mi = method.currentIndex()
+            meth = ["ordered", "censored", "count", "qreg", "liml", "gmm", "cointreg"][mi - 5]
+            o = mopts.text().strip()
+            rhs = s
+            if meth in ("liml", "gmm"):
+                if not inst.text().strip():
+                    self.error(f"{meth.upper()} needs an instrument list.")
+                    return
+                rhs = f"{s} @ {inst.text().strip()}"
+            self.execute(f"equation {name}.{meth}{'(' + o + ')' if o else ''} {rhs}")
             if name in self.engine.wf.bundles:
                 if window is not None:
                     window.output()

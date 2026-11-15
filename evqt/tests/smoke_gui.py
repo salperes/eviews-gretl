@@ -416,6 +416,15 @@ w.open_object(("tab1", "table"))
 tw = w.windows["tab1"]
 check(tw.table.item(0, 0).text() == "Mean" and tw.table.item(1, 0).text() != "", "table window shows the cells")
 
+# --- Phase 2 estimators from the command window
+w.execute("smpl 1970q1 2019q4")
+w.execute("equation eqq.qreg(quant=0.25) dlog(cons) c dlog(gdp)")
+w.open_object(("eqq", "equation"))
+check("Quantile Regression" in w.windows["eqq"].text.toPlainText(), "quantile regression window")
+w.execute("equation ecr.cointreg(method=dols) log(cons) log(gdp)")
+w.open_object(("ecr", "equation"))
+check("DOLS" in w.windows["ecr"].text.toPlainText(), "cointegrating regression window (DOLS)")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
 if failures:

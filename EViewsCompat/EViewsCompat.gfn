@@ -1711,6 +1711,7 @@ errorif(!instring(&quot; ls ols wls sur tsls 2sls wtsls 3sls gmm &quot;, &quot; 
 meth = meth == &quot;ols&quot; ? &quot;ls&quot; : (meth == &quot;2sls&quot; ? &quot;tsls&quot; : meth)
 scalar n = nelem(deps)
 errorif(nelem(xspecs) != n || nelem(cnums) != n, &quot;deps, xspecs and cnums must have one entry per equation&quot;)
+set skip_missing off          # rows with missing values are dropped below, jointly
 # series of every equation, over the current sample
 matrix Yall = {}
 matrices XX = array(n)
@@ -2978,7 +2979,7 @@ return bs
 </code>
 </gretl-function>
 <gretl-function name="ev_garch" type="bundle">
- <params count="8">
+ <params count="9">
   <param name="spec" type="string">
 <description>Mean equation, e.g. y c x</description>
   </param>
@@ -3000,6 +3001,9 @@ return bs
   </param>
   <param name="nthr" type="int" min="-1" default="-1">
 <description>Threshold (asymmetric) order; -1 = EViews default</description>
+  </param>
+  <param name="dist" type="string" optional="true">
+<description>Error distribution: normal (default), t or ged</description>
   </param>
  </params>
 <code>string md = exists(model) ? tolower(model) : &quot;garch&quot;
@@ -3040,6 +3044,14 @@ else
   bundle m = gig_setup(evg_y, gtype)
 endif
 gig_set_pq(&amp;m, ngarch, narch)
+string dst = exists(dist) ? tolower(dist) : &quot;normal&quot;
+dst = dst == &quot;n&quot; ? &quot;normal&quot; : (dst == &quot;tdist&quot; ? &quot;t&quot; : dst)
+errorif(!instring(&quot; normal t ged &quot;, &quot; &quot; ~ dst ~ &quot; &quot;), &quot;dist must be normal, t or ged&quot;)
+scalar cdist = dst == &quot;t&quot; ? 1 : (dst == &quot;ged&quot; ? 2 : 0)
+errorif(cdist &gt; 0 &amp;&amp; (mt &gt; 0 || nt != (gtype == 1 ? 0 : narch)), &quot;t/GED errors are available with gig's models (no ARCH-M, threshold order = ARCH order)&quot;)
+if cdist &gt; 0
+  gig_set_dist(&amp;m, cdist)
+endif
 gig_estimate(&amp;m, 0)
 scalar failed = !inbundle(m, &quot;criteria&quot;)
 if !failed &amp;&amp; inbundle(m, &quot;errcode&quot;)
@@ -3059,6 +3071,9 @@ if gtype != 1
   pos ~= seq(nm + 2 + narch, nm + 1 + 2 * narch)
 endif
 pos ~= seq(nm + 2 + 2 * narch, nm + 1 + 2 * narch + ngarch)
+if cdist &gt; 0
+  pos ~= nm + 2 + 2 * narch + ngarch          # distribution parameter (t dof / GED shape)
+endif
 matrix act = m.active
 matrix vpos = zeros(1, cols(pos))
 loop i = 1..cols(pos)
@@ -3076,7 +3091,7 @@ endif
 # gig's GJR: h = w + a(|e| - g e)^2 + b h  -&gt;  EViews TARCH:
 # h = w + A e^2 + G e^2 (e &lt; 0) + b h, with A = a(1-g)^2, G = 4ag (delta method)
 if gtype == 3
-  matrix Jm = I(nm + nv0)
+  matrix Jm = I(rows(c))
   loop i = 1..narch
     scalar ia = nm + 1 + i
     scalar ig = nm + 1 + narch + i
@@ -3160,11 +3175,15 @@ b.model = md
 b.archm = mt
 b.spec = spec
 b.depvar = toupper(tok[1])
-b.method = meth
+b.method = cdist == 0 ? meth : strsub(meth, &quot;Normal distribution&quot;, cdist == 1 ? &quot;Student's t distribution&quot; : &quot;Generalized error distribution (GED)&quot;)
+b.dist = dst
 strings lab = array(0)
 loop i = 1..rows(c)
   lab += sprintf(&quot;C(%d)&quot;, i)
 endloop
+if cdist &gt; 0
+  lab[nelem(lab)] = cdist == 1 ? &quot;T-DIST. DOF&quot; : &quot;GED PARAMETER&quot;
+endif
 b.clabels = lab
 b.xlab = xlab
 b.nm = nmp
@@ -3522,7 +3541,7 @@ return M
 </code>
 </gretl-function>
 <gretl-function name="ev_tsls" type="bundle">
- <params count="4">
+ <params count="5">
   <param name="spec" type="string">
 <description>Equation and instruments, e.g. y c x @ c z1 z2</description>
   </param>
@@ -3533,6 +3552,9 @@ return M
 <description>ordinary or white</description>
   </param>
   <param name="quiet" type="bool" default="0"/>
+  <param name="liml" type="bool" default="0">
+<description>Limited information maximum likelihood</description>
+  </param>
  </params>
 <code>errorif(!instring(spec, &quot;@&quot;), &quot;Give the instruments after @, e.g. y c x @ c z&quot;)
 strings parts = strsplit(spec, &quot;@&quot;)
@@ -3569,7 +3591,9 @@ loop i = 1..nelem(itok)
 endloop
 errorif(nelem(Z) &lt; nelem(X), &quot;Order condition: at least as many instruments as regressors are needed&quot;)
 scalar n0 = $nobs
-if cv == &quot;white&quot;
+if liml
+  tsls evt_y X ; Z --liml --quiet
+elif cv == &quot;white&quot;
   set force_hc on
   tsls evt_y X ; Z --robust --quiet
 else
@@ -3579,7 +3603,7 @@ bundle b
 b.kind = &quot;tsls&quot;
 b.iv = 1
 b.spec = spec
-b.method = &quot;Two-Stage Least Squares&quot;
+b.method = liml ? &quot;LIML / K-Class&quot; : &quot;Two-Stage Least Squares&quot;
 b.eqline = &quot;Instrument specification:&quot; ~ itxt
 b.depvar = toupper(tok[1])
 b.labels = lab
@@ -3589,11 +3613,19 @@ b.stderr = $stderr
 b.vcv = $vcv
 b.T = $T
 b.k = $ncoeff
-b.rsq = $rsq
-b.adjrsq = 1 - (1 - $rsq) * ($T - 1) / ($T - $ncoeff)
+catch scalar r2 = $rsq          # not defined after LIML
+if $error
+  r2 = NA
+endif
+b.rsq = r2
+b.adjrsq = 1 - (1 - r2) * ($T - 1) / ($T - $ncoeff)
 b.sigma = $sigma
 b.ssr = $ess
-b.dw = $dw
+catch scalar dwv = $dw
+if $error
+  dwv = NA
+endif
+b.dw = dwv
 b.hascon = hascon
 b.adjusted = $T &lt; n0
 b.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
@@ -5252,6 +5284,547 @@ outfile &quot;@fname&quot; --quiet
 end outfile
 </code>
 </gretl-function>
+<gretl-function name="ev_mlreg" type="bundle">
+ <params count="6">
+  <param name="spec" type="string">
+<description>Equation, e.g. y c x</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="method" type="string">
+<description>ologit, oprobit, tobit, poisson, negbin or qreg</description>
+  </param>
+  <param name="p1" type="scalar" default="NA">
+<description>tobit: left limit (default 0); qreg: quantile (default 0.5)</description>
+  </param>
+  <param name="p2" type="scalar" default="NA">
+<description>tobit: right limit (default none)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>string m = tolower(method)
+errorif(!instring(&quot; ologit oprobit tobit poisson negbin qreg &quot;, &quot; &quot; ~ m ~ &quot; &quot;), &quot;unknown method &quot; ~ method)
+strings tok = strsplit(spec)
+series evm_y = ev_gen(tok[1], vars)
+list X = null
+strings lab = array(0)
+scalar hascon = 0
+loop i = 2..nelem(tok)
+  if tolower(tok[i]) == &quot;c&quot;
+    list X += const
+    lab += &quot;C&quot;
+    hascon = 1
+  else
+    string v = sprintf(&quot;evm_x%d&quot;, i)
+    series @v = ev_gen(tok[i], vars)
+    list X += @v
+    lab += toupper(tok[i])
+  endif
+endloop
+errorif((m == &quot;ologit&quot; || m == &quot;oprobit&quot;) &amp;&amp; hascon, &quot;Ordered models have no constant (the limit points take its place): drop c&quot;)
+scalar n0 = $nobs
+scalar tau = ok(p1) ? p1 : 0.5
+if m == &quot;ologit&quot;
+  logit evm_y X --quiet
+elif m == &quot;oprobit&quot;
+  probit evm_y X --quiet
+elif m == &quot;tobit&quot;
+  scalar ll = ok(p1) ? p1 : 0
+  if ok(p2)
+    tobit evm_y X --llimit=ll --rlimit=p2 --quiet
+  else
+    tobit evm_y X --llimit=ll --quiet
+  endif
+elif m == &quot;poisson&quot;
+  poisson evm_y X --quiet
+elif m == &quot;negbin&quot;
+  negbin evm_y X --quiet
+else
+  quantreg tau evm_y X --quiet
+endif
+bundle b
+b.kind = &quot;mlreg&quot;
+b.method = m
+b.spec = spec
+b.depvar = toupper(tok[1])
+matrix c = $coeff
+matrix se = $stderr
+matrix V = $vcv
+scalar k = rows(c)
+scalar kx = nelem(X)
+# extra parameters after the regressors: limit points, NB dispersion
+loop i = kx + 1..k
+  if m == &quot;ologit&quot; || m == &quot;oprobit&quot;
+    lab += sprintf(&quot;LIMIT_%d:C(%d)&quot;, i - kx, i)
+  elif m == &quot;negbin&quot;
+    lab += sprintf(&quot;ALPHA:C(%d)&quot;, i)
+  else
+    lab += sprintf(&quot;C(%d)&quot;, i)
+  endif
+endloop
+if m == &quot;tobit&quot;
+  # EViews reports the scale with the coefficients
+  lab += sprintf(&quot;SCALE:C(%d)&quot;, k + 1)
+  c |= $sigma
+  se |= NA
+  k++
+endif
+b.labels = lab
+b.coeff = c
+b.stderr = se
+b.vcv = V
+b.k = k
+b.T = $T
+b.adjusted = $T &lt; n0
+catch scalar lnl = $lnl
+if $error
+  lnl = NA
+endif
+b.lnl = lnl
+b.tstat = c ./ se
+b.zstat = m != &quot;qreg&quot;
+matrix pv = zeros(k, 1)
+loop i = 1..k
+  pv[i] = b.zstat ? 2 * cnorm(-abs(b.tstat[i])) : 2 * pvalue(t, $T - k, abs(b.tstat[i]))
+endloop
+b.pval = pv
+series evm_o = obs
+catch series evm_f = $yhat
+if $error
+  series evm_f = NA
+endif
+list L = evm_y evm_o
+matrix D = {L}
+b.y = D[, 1]
+b.tobs = D[, 2]
+set skip_missing off
+matrix F = {evm_f}
+b.yhat = ev__atrows(F, b.tobs)
+b.uhat = b.y - b.yhat
+b.sample = sprintf(&quot;%s %s&quot;, obslabel(minc(b.tobs)), obslabel(maxc(b.tobs)))
+scalar n = b.T
+b.meany = meanc(b.y)
+b.sdy = sdc(b.y) * sqrt(n / (n - 1))
+if ok(lnl)
+  b.aic = -2 * lnl / n + 2 * k / n
+  b.sc = -2 * lnl / n + k * log(n) / n
+  b.hq = -2 * lnl / n + 2 * k * log(log(n)) / n
+  b.avglnl = lnl / n
+endif
+if m == &quot;qreg&quot;
+  # pseudo R-squared (Koenker-Machado): 1 - V(tau) / V(tau | constant only)
+  b.tau = tau
+  matrix u = b.uhat
+  scalar Vt = sumc(u .* (tau - (u .&lt; 0)))
+  scalar q = quantile(b.y, tau)
+  matrix u0 = b.y - q
+  scalar V0 = sumc(u0 .* (tau - (u0 .&lt; 0)))
+  b.pseudo_r2 = 1 - Vt / V0
+  b.adj_pseudo_r2 = 1 - (1 - b.pseudo_r2) * (n - 1) / (n - k)
+  b.qdep = q
+endif
+if m == &quot;ologit&quot; || m == &quot;oprobit&quot;
+  b.ncat = rows(values(b.y))
+endif
+b.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
+if !quiet
+  ev_mlprint(&amp;b)
+endif
+return b
+</code>
+</gretl-function>
+<gretl-function name="ev_mlprint" type="void">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code>string title = b.method == &quot;ologit&quot; ? &quot;ML - Ordered Logit (Newton-Raphson)&quot; : (b.method == &quot;oprobit&quot; ? &quot;ML - Ordered Probit (Newton-Raphson)&quot; : (b.method == &quot;tobit&quot; ? &quot;ML - Censored Normal (TOBIT) (Newton-Raphson)&quot; : (b.method == &quot;poisson&quot; ? &quot;ML/QML - Poisson Count (Newton-Raphson)&quot; : (b.method == &quot;negbin&quot; ? &quot;ML - Negative Binomial Count (Newton-Raphson)&quot; : &quot;Quantile Regression&quot;))))
+printf &quot;\nDependent Variable: %s\nMethod: %s\nDate: %s\n&quot;, b.depvar, title, b.estdate
+printf &quot;Sample%s: %s\nIncluded observations: %d\n&quot;, b.adjusted ? &quot; (adjusted)&quot; : &quot;&quot;, b.sample, b.T
+if b.method == &quot;qreg&quot;
+  printf &quot;Quantile: %g\n&quot;, b.tau
+endif
+printf &quot;\n&quot;
+ev__line(78)
+printf &quot;%-26s%13s%13s%14s%12s\n&quot;, &quot;Variable&quot;, &quot;Coefficient&quot;, &quot;Std. Error&quot;, b.zstat ? &quot;z-Statistic&quot; : &quot;t-Statistic&quot;, &quot;Prob.&quot;
+ev__line(78)
+loop i = 1..b.k
+  if ok(b.stderr[i])
+    printf &quot;%-26s%13.6f%13.6f%14.6f%12.4f\n&quot;, b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+  else
+    printf &quot;%-26s%13.6f\n&quot;, b.labels[i], b.coeff[i]
+  endif
+endloop
+ev__line(78)
+if b.method == &quot;qreg&quot;
+  printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Pseudo R-squared&quot;, b.pseudo_r2, &quot;Mean dependent var&quot;, b.meany
+  printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Adjusted R-squared&quot;, b.adj_pseudo_r2, &quot;S.D. dependent var&quot;, b.sdy
+  printf &quot;%-22s%14.6f\n&quot;, &quot;Quantile dependent var&quot;, b.qdep
+else
+  printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Mean dependent var&quot;, b.meany, &quot;S.D. dependent var&quot;, b.sdy
+  printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Akaike info criterion&quot;, b.aic, &quot;Schwarz criterion&quot;, b.sc
+  printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Log likelihood&quot;, b.lnl, &quot;Hannan-Quinn criter.&quot;, b.hq
+  printf &quot;%-22s%14.6f\n&quot;, &quot;Avg. log likelihood&quot;, b.avglnl
+endif
+ev__line(78)
+</code>
+</gretl-function>
+<gretl-function name="ev_wls" type="bundle">
+ <params count="5">
+  <param name="spec" type="string">
+<description>Equation, e.g. y c x</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="wexpr" type="string">
+<description>Weight series or expression</description>
+  </param>
+  <param name="wtype" type="string" optional="true">
+<description>istdev (default), ivar, stdev or var</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>string wt = exists(wtype) ? tolower(wtype) : &quot;istdev&quot;
+errorif(!instring(&quot; istdev ivar stdev var &quot;, &quot; &quot; ~ wt ~ &quot; &quot;), &quot;wtype must be istdev, ivar, stdev or var&quot;)
+strings tok = strsplit(spec)
+series evw_y = ev_gen(tok[1], vars)
+series evw_s = ev_gen(wexpr, vars)
+# gretl wls minimises sum(w * u^2): EViews weights multiply the residuals
+series evw_w = wt == &quot;istdev&quot; ? 1 / evw_s^2 : (wt == &quot;ivar&quot; ? 1 / evw_s : (wt == &quot;stdev&quot; ? evw_s^2 : evw_s))
+list X = null
+strings lab = array(0)
+scalar hascon = 0
+loop i = 2..nelem(tok)
+  if tolower(tok[i]) == &quot;c&quot;
+    list X += const
+    lab += &quot;C&quot;
+    hascon = 1
+  else
+    string v = sprintf(&quot;evw_x%d&quot;, i)
+    series @v = ev_gen(tok[i], vars)
+    list X += @v
+    lab += toupper(tok[i])
+  endif
+endloop
+scalar n0 = $nobs
+wls evw_w evw_y X --quiet
+bundle b
+b.spec = spec
+b.method = &quot;Least Squares&quot;
+b.eqline = sprintf(&quot;Weighting series: %s\nWeight type: %s&quot;, toupper(wexpr), wt == &quot;istdev&quot; ? &quot;Inverse standard deviation&quot; : (wt == &quot;ivar&quot; ? &quot;Inverse variance&quot; : (wt == &quot;stdev&quot; ? &quot;Standard deviation&quot; : &quot;Variance&quot;)))
+b.depvar = toupper(tok[1])
+b.labels = lab
+b.covtype = &quot;ordinary&quot;
+b.coeff = $coeff
+b.stderr = $stderr
+b.vcv = $vcv
+b.T = $T
+b.k = $ncoeff
+b.rsq = $rsq
+b.adjrsq = 1 - (1 - $rsq) * ($T - 1) / ($T - $ncoeff)
+b.sigma = $sigma
+b.ssr = $ess
+b.lnl = $lnl
+b.dw = $dw
+b.hascon = hascon
+b.adjusted = $T &lt; n0
+b.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
+series evw_u = $uhat
+series evw_f = $yhat
+smpl ok(evw_u) --restrict
+b.y = {evw_y}
+b.X = {X}
+b.uhat = {evw_u}
+b.yhat = {evw_f}
+series evw_o = obs
+b.tobs = {evw_o}
+b.sample = sprintf(&quot;%s %s&quot;, obslabel($t1), obslabel($t2))
+scalar n = b.T
+scalar k = b.k
+matrix d = b.y - meanc(b.y)
+b.meany = meanc(b.y)
+b.sdy = sqrt(d'd / (n - 1))
+b.aic = -2 * b.lnl / n + 2 * k / n
+b.sc = -2 * b.lnl / n + k * log(n) / n
+b.hq = -2 * b.lnl / n + 2 * k * log(log(n)) / n
+b.F = NA
+b.Fp = NA
+if hascon &amp;&amp; k &gt; 1
+  b.F = (b.rsq / (k - 1)) / ((1 - b.rsq) / (n - k))
+  b.Fp = pvalue(F, k - 1, n - k, b.F)
+endif
+b.tstat = b.coeff ./ b.stderr
+matrix p = zeros(k, 1)
+loop i = 1..k
+  p[i] = 2 * pvalue(t, n - k, abs(b.tstat[i]))
+endloop
+b.pval = p
+if !quiet
+  ev_print(&amp;b)
+endif
+return b
+</code>
+</gretl-function>
+<gretl-function name="ev_cointreg" type="bundle">
+ <params count="7">
+  <param name="spec" type="string">
+<description>Cointegrating equation: y x1 x2 (a constant is added)</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="method" type="string" optional="true">
+<description>dols (default) or fmols</description>
+  </param>
+  <param name="nlead" type="int" min="0" default="1">
+<description>DOLS leads of the differenced regressors</description>
+  </param>
+  <param name="nlag" type="int" min="0" default="1">
+<description>DOLS lags of the differenced regressors</description>
+  </param>
+  <param name="trend" type="string" optional="true">
+<description>const (default), linear or none</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>string m = exists(method) ? tolower(method) : &quot;dols&quot;
+errorif(m != &quot;dols&quot; &amp;&amp; m != &quot;fmols&quot;, &quot;method must be dols or fmols&quot;)
+string tr = exists(trend) ? tolower(trend) : &quot;const&quot;
+strings tok = strsplit(spec)
+scalar kx = nelem(tok) - 1
+errorif(kx &lt; 1, &quot;Give the dependent variable and at least one regressor&quot;)
+set skip_missing off
+series evc_y = ev_gen(tok[1], vars)
+matrix Y = {evc_y}
+matrix X = {}
+matrix DX = {}
+loop i = 1..kx
+  series evc_x = ev_gen(tok[i+1], vars)
+  series evc_l = ev_gen(ev__lagx(tok[i+1], 1, vars), vars)
+  X ~= {evc_x}
+  DX ~= {evc_x} - {evc_l}
+endloop
+series evc_o = obs
+matrix tob = {evc_o}
+scalar T0 = rows(Y)
+matrix Dt = {}
+if tr != &quot;none&quot;
+  Dt ~= ones(T0, 1)
+endif
+if tr == &quot;linear&quot;
+  Dt ~= seq(0, T0 - 1)'
+endif
+strings lab = array(0)
+loop i = 1..kx
+  lab += toupper(tok[i+1])
+endloop
+if tr != &quot;none&quot;
+  lab += &quot;C&quot;
+endif
+if tr == &quot;linear&quot;
+  lab += &quot;@TREND&quot;
+endif
+bundle b
+if m == &quot;dols&quot;
+  # regressors in levels, deterministic terms, leads and lags of the differences
+  matrix W = X ~ Dt
+  scalar jlo = -nlead
+  loop j = jlo..nlag
+    W ~= mlag(DX, j, NA)
+  endloop
+  matrix okr = sumr(!ok(Y ~ W)) .= 0
+  matrix y = selifr(Y, okr)
+  matrix Z = selifr(W, okr)
+  tob = selifr(tob, okr)
+  matrix e = {}
+  matrix bh = mols(y, Z, &amp;e)
+  scalar n = rows(y)
+  scalar kk = cols(Z)
+  scalar s2 = e'e / (n - kk)
+  # EViews default: OLS covariance rescaled by the long-run residual variance
+  scalar bw = ev__nwbw(e)
+  scalar lr = ev__lrcov(e, bw, 0)
+  matrix V = (lr / s2) * s2 * inv(Z'Z)
+  scalar kp = kx + cols(Dt)
+  b.coeff = bh[1:kp]
+  b.vcv = V[1:kp, 1:kp]
+  b.uhat = e
+  b.ssr = e'e
+  b.lrvar = lr
+  b.bandwidth = bw
+  b.eqline = sprintf(&quot;Method: Dynamic Least Squares (DOLS)\nCointegrating equation deterministics: %s\n&quot; ~ &quot;Fixed leads and lags specification (lead=%d, lag=%d)\nLong-run variance estimate (Bartlett kernel, Newey-West bandwidth = %.4f)&quot;, tr == &quot;const&quot; ? &quot;C&quot; : (tr == &quot;linear&quot; ? &quot;C @TREND&quot; : &quot;none&quot;), nlead, nlag, bw)
+  b.T = n
+else
+  # Phillips-Hansen fully modified OLS
+  matrix okr = sumr(!ok(Y ~ X ~ DX)) .= 0
+  matrix y = selifr(Y, okr)
+  matrix Xs = selifr(X, okr)
+  matrix dX = selifr(DX, okr)
+  matrix Dd = {}
+  if rows(Dt)
+    Dd = selifr(Dt, okr)
+  endif
+  tob = selifr(tob, okr)
+  scalar n = rows(y)
+  matrix Z = Xs ~ Dd
+  matrix u1 = {}
+  matrix b0 = mols(y, Z, &amp;u1)
+  matrix U = u1 ~ dX
+  scalar bw = ev__nwbw(u1)
+  matrix Om = ev__lrcov(U, bw, 0)
+  matrix La = ev__lrcov(U, bw, 1)
+  matrix O12 = Om[1, 2:]
+  matrix O22 = Om[2:, 2:]
+  matrix ys = y - dX * inv(O22) * O12'
+  matrix l12 = La[2:, 1] - La[2:, 2:] * inv(O22) * O12'
+  matrix adjm = n * (l12 | zeros(cols(Dd), 1))
+  matrix ZZi = inv(Z'Z)
+  matrix bh = ZZi * (Z'ys - adjm)
+  scalar w12 = Om[1, 1] - O12 * inv(O22) * O12'
+  b.coeff = bh
+  b.vcv = w12 * ZZi
+  matrix e = y - Z * bh
+  b.uhat = e
+  b.ssr = e'e
+  b.lrvar = w12
+  b.bandwidth = bw
+  b.eqline = sprintf(&quot;Method: Fully Modified Least Squares (FMOLS)\nCointegrating equation deterministics: %s\n&quot; ~ &quot;Long-run covariance estimate (Bartlett kernel, Newey-West bandwidth = %.4f)&quot;, tr == &quot;const&quot; ? &quot;C&quot; : (tr == &quot;linear&quot; ? &quot;C @TREND&quot; : &quot;none&quot;), bw)
+  b.T = n
+endif
+b.kind = &quot;cointreg&quot;
+b.spec = spec
+b.depvar = toupper(tok[1])
+b.method = m == &quot;dols&quot; ? &quot;Dynamic Least Squares (DOLS)&quot; : &quot;Fully Modified Least Squares (FMOLS)&quot;
+b.labels = lab
+b.k = rows(b.coeff)
+b.stderr = sqrt(diag(b.vcv))
+b.tstat = b.coeff ./ b.stderr
+matrix pv = zeros(b.k, 1)
+loop i = 1..b.k
+  pv[i] = 2 * pvalue(t, b.T - b.k, abs(b.tstat[i]))
+endloop
+b.pval = pv
+b.tobs = tob
+b.sample = sprintf(&quot;%s %s&quot;, obslabel(minc(tob)), obslabel(maxc(tob)))
+b.adjusted = 1
+b.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
+b.meany = meanc(y)
+b.sdy = sdc(y) * sqrt(n / (n - 1))
+if !quiet
+  printf &quot;\nDependent Variable: %s\nMethod: %s\nDate: %s\n&quot;, b.depvar, b.method, b.estdate
+  printf &quot;Sample (adjusted): %s\nIncluded observations: %d after adjustments\n%s\n\n&quot;, b.sample, b.T, b.eqline
+  ev__line(78)
+  printf &quot;%-26s%13s%13s%14s%12s\n&quot;, &quot;Variable&quot;, &quot;Coefficient&quot;, &quot;Std. Error&quot;, &quot;t-Statistic&quot;, &quot;Prob.&quot;
+  ev__line(78)
+  loop i = 1..b.k
+    printf &quot;%-26s%13.6f%13.6f%14.6f%12.4f\n&quot;, b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+  endloop
+  ev__line(78)
+  printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Mean dependent var&quot;, b.meany, &quot;S.D. dependent var&quot;, b.sdy
+  printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Sum squared resid&quot;, b.ssr, &quot;Long-run variance&quot;, b.lrvar
+  ev__line(78)
+endif
+return b
+</code>
+</gretl-function>
+<gretl-function name="ev_dpanel" type="bundle">
+ <params count="7">
+  <param name="y" type="string">
+<description>Dependent variable</description>
+  </param>
+  <param name="xs" type="string" optional="true">
+<description>Other regressors, e.g. x1 x2</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="p" type="int" min="1" default="1">
+<description>Lags of the dependent variable</description>
+  </param>
+  <param name="twostep" type="bool" default="0">
+<description>Two-step GMM</description>
+  </param>
+  <param name="timedum" type="bool" default="0">
+<description>Period dummies</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>errorif($datatype != 3, &quot;Dynamic panel GMM needs a panel page&quot;)
+series evd_y = ev_gen(y, vars)
+list X = null
+strings lab = array(0)
+loop j = 1..p
+  lab += sprintf(&quot;%s(-%d)&quot;, toupper(y), j)
+endloop
+if exists(xs) &amp;&amp; strstrip(xs) != &quot;&quot;
+  strings tok = strsplit(xs)
+  loop i = 1..nelem(tok)
+    string v = sprintf(&quot;evd_x%d&quot;, i)
+    series @v = ev_gen(tok[i], vars)
+    list X += @v
+    lab += toupper(tok[i])
+  endloop
+endif
+if nelem(X) == 0
+  list X = null
+endif
+if twostep &amp;&amp; timedum
+  dpanel p ; evd_y X --two-step --time-dummies --quiet
+elif twostep
+  dpanel p ; evd_y X --two-step --quiet
+elif timedum
+  dpanel p ; evd_y X --time-dummies --quiet
+else
+  dpanel p ; evd_y X --quiet
+endif
+bundle b
+b.kind = &quot;dpanel&quot;
+b.depvar = &quot;D(&quot; ~ toupper(y) ~ &quot;)&quot;
+b.method = sprintf(&quot;Panel Generalized Method of Moments (Arellano-Bond, %s)&quot;, twostep ? &quot;2-step&quot; : &quot;1-step&quot;)
+scalar k = nelem(lab)
+b.coeff = $coeff[1:k]
+b.stderr = $stderr[1:k]
+b.vcv = $vcv[1:k, 1:k]
+b.labels = lab
+b.k = k
+b.T = $T
+b.tstat = b.coeff ./ b.stderr
+b.pval = 2 * cnorm(-abs(b.tstat))
+catch b.sargan = $sargan
+if !quiet
+  printf &quot;\nDependent Variable: %s\nMethod: %s\nTransformation: First Differences\n&quot;, b.depvar, b.method
+  printf &quot;Total panel observations: %d\n\n&quot;, b.T
+  ev__line(78)
+  printf &quot;%-26s%13s%13s%14s%12s\n&quot;, &quot;Variable&quot;, &quot;Coefficient&quot;, &quot;Std. Error&quot;, &quot;z-Statistic&quot;, &quot;Prob.&quot;
+  ev__line(78)
+  loop i = 1..k
+    printf &quot;%-26s%13.6f%13.6f%14.6f%12.4f\n&quot;, b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+  endloop
+  ev__line(78)
+endif
+return b
+</code>
+</gretl-function>
+<gretl-function name="ev_coefprint" type="void">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code># generic coefficient table (cointegrating regressions, dynamic panels)
+printf &quot;\nDependent Variable: %s\nMethod: %s\n&quot;, b.depvar, b.method
+if inbundle(b, &quot;sample&quot;)
+  printf &quot;Sample: %s\n&quot;, b.sample
+endif
+printf &quot;Included observations: %d\n\n&quot;, b.T
+ev__line(78)
+printf &quot;%-26s%13s%13s%14s%12s\n&quot;, &quot;Variable&quot;, &quot;Coefficient&quot;, &quot;Std. Error&quot;, &quot;t-Statistic&quot;, &quot;Prob.&quot;
+ev__line(78)
+loop i = 1..b.k
+  printf &quot;%-26s%13.6f%13.6f%14.6f%12.4f\n&quot;, b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+endloop
+ev__line(78)
+</code>
+</gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
  <params count="5">
   <param name="spec" type="string">
@@ -6341,6 +6914,46 @@ if i &gt; t.rows || j &gt; t.cols
   t.rows = r
   t.cols = c
 endif
+</code>
+</gretl-function>
+<gretl-function name="ev__atrows" type="matrix" private="1">
+ <params count="2">
+  <param name="F" type="matrix" const="true"/>
+  <param name="tobs" type="matrix" const="true"/>
+ </params>
+<code># rows tobs (observation numbers) of a full-sample column, relative to the sample start
+scalar o1 = $t1
+matrix r = zeros(rows(tobs), 1)
+loop i = 1..rows(tobs)
+  scalar t = tobs[i] - o1 + 1
+  r[i] = t &gt;= 1 &amp;&amp; t &lt;= rows(F) ? F[t] : NA
+endloop
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev__lrcov" type="matrix" private="1">
+ <params count="3">
+  <param name="U" type="matrix" const="true"/>
+  <param name="bw" type="scalar"/>
+  <param name="onesided" type="bool"/>
+ </params>
+<code># Bartlett-kernel long-run covariance (onesided: sum over j &gt;= 0 only)
+scalar T = rows(U)
+matrix S = U'U / T
+matrix O = S
+scalar jmax = floor(bw)
+loop j = 1..jmax
+  if j &lt; T
+    matrix G = U[j+1:T,]' * U[1:T-j,] / T     # Gamma(j) = E u_t u_{t-j}'
+    scalar w = 1 - j / (bw + 1)
+    if onesided
+      O += w * G'
+    else
+      O += w * (G + G')
+    endif
+  endif
+endloop
+return O
 </code>
 </gretl-function>
 <sample-script>

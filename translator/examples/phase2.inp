@@ -1,0 +1,47 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: Phase 2 of the gap analysis (docs/GAP_ANALIZI.md)
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+smpl full
+smpl 1970:1 2019:4
+series DG = ldiff(GDP)
+series DC = ldiff(CONS)
+
+# E9-E13: ordered, censored, count and quantile regressions
+series CAT = 1 + (DG > 0.004) + (DG > 0.009)
+bundle EORD = ev_mlreg("CAT FFR DC", dataset, "ologit", NA, NA)
+series YT = ((DG > 0) ? (100*DG) : (0))
+bundle ETOB = ev_mlreg("YT c FFR", dataset, "tobit", 0, NA)
+series CNT = round(FFR)
+bundle EPOI = ev_mlreg("CNT c DG", dataset, "poisson", NA, NA)
+bundle EQ25 = ev_mlreg("DC c DG", dataset, "qreg", 0.25, NA)
+
+# E22, E7: weighted least squares, LIML and single-equation GMM
+series WSER = 1 + abs(FFR)
+bundle EWLS = ev_wls("DC c DG", dataset, "WSER", "istdev")
+bundle ELIML = ev_tsls("DC c DG @ c FFR(-1) DG(-1) DC(-1)", dataset, null, 0, 1)
+bundle EGMM = ev_system(defarray("DC"), defarray("c DG"), defarray("1 2"), dataset, "gmm", "FFR(-1) DG(-1) DC(-1)", 0, null, -1)
+
+# E3: GARCH with Student's t errors
+series R = 100*DG
+bundle ev_gb = ev_garch("R c", dataset, "garch", 1, 1, 1, null, -1, "t")
+if ev_gb.failed
+    printf "Warning: EGT (GARCH) did not converge; previous estimates kept\n"
+else
+    bundle EGT = ev_gb
+    series EGT_H = ev_garchseries(EGT, "h")
+    series EGT_RESID = ev_garchseries(EGT, "resid")
+endif
+
+# E16: cointegrating regressions
+smpl full
+smpl 1960:1 2019:4
+series LC = log(CONS)
+series LGD = log(GDP)
+bundle EFM = ev_cointreg("LC LGD", dataset, "fmols", 1, 1, "const")
+bundle EDO = ev_cointreg("LC LGD", dataset, "dols", 2, 2, "const")
+

@@ -1,0 +1,95 @@
+# Phase 2 estimators against gretl's own commands
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+smpl 1970:1 2019:4
+# --- E9 ordered logit / probit
+series cat = 1 + (dg > 0.004) + (dg > 0.009)
+bundle o1 = ev_mlreg("cat FFR dlog(CONS)", dataset, "ologit", NA, NA, 1)
+logit cat FFR dc --quiet
+check("ordered logit coefficient = gretl logit", o1.coeff[1], $coeff[1], 1e-5)
+check("ordered logit limit point", o1.coeff[3], $coeff[3], 1e-5)
+check("ordered logit log likelihood", o1.lnl, $lnl)
+bundle o2 = ev_mlreg("cat FFR dlog(CONS)", dataset, "oprobit", NA, NA, 1)
+probit cat FFR dc --quiet
+check("ordered probit coefficient = gretl probit", o2.coeff[2], $coeff[2], 1e-5)
+# --- E10 tobit
+series yt = dg > 0 ? 100 * dg : 0
+bundle t1 = ev_mlreg("yt c FFR", dataset, "tobit", NA, NA, 1)
+tobit yt const FFR --quiet
+check("tobit coefficient = gretl tobit", t1.coeff[2], $coeff[2], 1e-5)
+check("tobit scale = sigma", t1.coeff[3], $sigma, 1e-5)
+# --- E11 count
+series cnt = round(FFR)
+bundle c1 = ev_mlreg("cnt c dlog(GDP)", dataset, "poisson", NA, NA, 1)
+poisson cnt const dg --quiet
+check("Poisson coefficient = gretl poisson", c1.coeff[2], $coeff[2], 1e-5)
+bundle c2 = ev_mlreg("cnt c dlog(GDP)", dataset, "negbin", NA, NA, 1)
+negbin cnt const dg --quiet
+check("negative binomial coefficient = gretl negbin", c2.coeff[2], $coeff[2], 1e-5)
+# --- E13 quantile regression
+bundle q1 = ev_mlreg("dlog(CONS) c dlog(GDP)", dataset, "qreg", 0.25, NA, 1)
+quantreg 0.25 dc const dg --quiet
+check("quantile regression (0.25) = gretl quantreg", q1.coeff[2], $coeff[2], 1e-6)
+check("pseudo R-squared in (0, 1)", q1.pseudo_r2 > 0 && q1.pseudo_r2 < 1, 1)
+ev_mlprint(&q1)
+# --- E22 weighted least squares
+series sw = 1 + abs(FFR)
+bundle w1 = ev_wls("dlog(CONS) c dlog(GDP)", dataset, "1 + abs(FFR)", "istdev", 1)
+series ww = 1 / sw^2
+wls ww dc const dg --quiet
+check("WLS (inverse std. dev. weights) = gretl wls", w1.coeff[2], $coeff[2])
+# --- E7 LIML
+series ffr1 = FFR(-1)
+series dg1 = dg(-1)
+series dc1 = dc(-1)
+bundle l1 = ev_tsls("dlog(CONS) c dlog(GDP) @ c FFR(-1) dlog(GDP(-1)) dlog(CONS(-1))", dataset, null, 1, 1)
+tsls dc const dg ; const ffr1 dg1 dc1 --liml --quiet
+check("LIML = gretl tsls --liml", l1.coeff[2], $coeff[2])
+# --- E3 GARCH with t errors
+series r = 100 * dg
+bundle gn = ev_garch("r c", dataset, "garch", 1, 1, 1)
+bundle gt = ev_garch("r c", dataset, "garch", 1, 1, 1, null, -1, "t")
+check("t-GARCH reports the degrees of freedom", gt.clabels[gt.k] == "T-DIST. DOF", 1)
+check("t-GARCH likelihood >= normal (nested)", gt.lnl >= gn.lnl - 1e-6, 1)
+bundle gg = ev_garch("r c", dataset, "garch", 1, 1, 1, null, -1, "ged")
+check("GED-GARCH parameter", gg.clabels[gg.k] == "GED PARAMETER" && gg.coeff[gg.k] > 0, 1)
+# --- E16 DOLS and FMOLS
+smpl full
+series lc = log(CONS)
+series lgd = log(GDP)
+smpl 1960:1 2019:4
+bundle d0 = ev_cointreg("log(CONS) log(GDP)", dataset, "dols", 0, 0, null, 1)
+smpl full
+series dlg = diff(lgd)
+smpl 1960:1 2019:4
+ols lc lgd const dlg --quiet
+check("DOLS(0,0) = OLS of y on x, c, dx", d0.coeff[1], $coeff[2])
+bundle d1 = ev_cointreg("log(CONS) log(GDP)", dataset, "dols", 2, 2, null, 1)
+check("DOLS(2,2) cointegrating coefficient near 1.07", d1.coeff[1], 1.07, 0.05)
+# FMOLS on simulated data with a known cointegrating vector y = 2 x + u
+nulldata 400
+set seed 11
+series x = cum(normal())
+series y = 1 + 2 * x + normal()
+bundle f1 = ev_cointreg("y x", dataset, "fmols", 0, 0, null, 0)
+check("FMOLS recovers beta = 2", f1.coeff[1], 2, 0.02)
+check("FMOLS standard error > 0", f1.stderr[1] > 0, 1)
+# --- E21 Arellano-Bond against gretl dpanel
+open ../../data/panel_demo.csv --quiet
+setobs ID YEAR --panel-vars
+bundle dp = ev_dpanel("LY", null, dataset, 1, 0, 0, 1)
+dpanel 1 ; LY --quiet
+check("Arellano-Bond coefficient = gretl dpanel", dp.coeff[1], $coeff[1])

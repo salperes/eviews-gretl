@@ -452,7 +452,8 @@ class GretlEngine:
 
     def equation_text(self, name: str) -> str:
         fn = {"garch": "ev_garchprint", "panel": "ev_panelprint", "binary": "ev_binaryprint",
-              "ardl": "ev_ardlprint"}.get(self.eq_kind(name), "ev_print")
+              "ardl": "ev_ardlprint", "mlreg": "ev_mlprint", "cointreg": "ev_coefprint",
+              "dpanel": "ev_coefprint"}.get(self.eq_kind(name), "ev_print")
         return "\n".join(self.run(f"{fn}(&{name})", check=True)).strip("\n")
 
     # -- panel pages --------------------------------------------------------

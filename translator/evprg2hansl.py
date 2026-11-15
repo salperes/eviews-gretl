@@ -295,7 +295,7 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
                 raise ValueError("@coefs/resid used before any equation")
             eq = ctx.last_eq
             p = re.sub(r"@coefs\s*\(\s*([^()]+?)\s*\)", rf"{eq}.coeff[\1]", p, flags=re.IGNORECASE)
-            res = f"ev_resid({eq})" if ctx.equations.get(eq) in ("ls", "panel", "tsls", "binary", "ardl") \
+            res = f"ev_resid({eq})" if ctx.equations.get(eq) in ("ls", "panel", "tsls", "binary", "ardl", "mlreg", "cointreg") \
                 else apply_case(f"{eq}_resid", ctx)
             p = re.sub(r"(?<![A-Za-z0-9_])resid(?![A-Za-z0-9_])", res, p, flags=re.IGNORECASE)
         # matrix element m(i,j) -> m[i,j]
@@ -489,6 +489,11 @@ def _ls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     sp = _spec(spec, ctx)
     ctx.eq_dep[name] = sp.split("=", 1)[0].strip() if "=" in sp else sp.split()[0]
     op = _opts(opts)
+    if "w" in op and not (ctx.panel or "cx" in op):
+        wt = op.get("wtype", "istdev").lower()
+        if "=" in sp:
+            raise ValueError("weighted explicit equations are not supported")
+        return [f'bundle {name} = ev_wls("{sp}", dataset, "{translate_expr(op["w"], ctx)}", "{wt}")']
     if ctx.panel or "cx" in op or "per" in op:
         # panel least squares: cross-section fixed/random effects, period fixed effects
         if "=" in sp:
@@ -546,7 +551,88 @@ def _ardl_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
             f'"{ic}", "{tr}")']
 
 
-EQ_METHODS = {"ls": None, "arch": None, "tsls": _tsls_call, "binary": _binary_call, "ardl": _ardl_call}
+def _liml_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    if "@" not in spec:
+        raise ValueError("liml: give the instruments after @")
+    name, sp = _new_eq(name, "tsls", spec.replace("@", " @ "), ctx)
+    sp = re.sub(r"\s+", " ", sp)
+    return [f'bundle {name} = ev_tsls("{sp}", dataset, null, 0, 1)']
+
+
+def _ml_call(kind: str):
+    def call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+        op = _opts(opts)
+        d = op.get("d", "").lower()[:1]
+        p1, p2, m = "NA", "NA", None
+        if kind == "ordered":
+            m = {"": "ologit", "l": "ologit", "n": "oprobit"}.get(d)
+        elif kind == "censored":
+            if d not in ("", "n"):
+                raise ValueError("censored: only normal errors (tobit) are supported")
+            m = "tobit"
+            p1 = op.get("l", "0") or "0"
+            p2 = op.get("r", "NA") or "NA"
+            if "t" in op:
+                raise ValueError("truncated regression is not supported")
+        elif kind == "count":
+            m = {"": "poisson", "p": "poisson", "n": "negbin"}.get(d)
+        elif kind == "qreg":
+            m = "qreg"
+            p1 = op.get("quant", "0.5")
+        if not m:
+            raise ValueError(f"{kind}: option d={d} not supported")
+        name, sp = _new_eq(name, "mlreg", spec, ctx)
+        return [f'bundle {name} = ev_mlreg("{sp}", dataset, "{m}", {p1}, {p2})']
+    return call
+
+
+def _gmm_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    op = _opts(opts)
+    if "@" not in spec:
+        raise ValueError("gmm: give the instruments after @")
+    left, right = spec.split("@", 1)
+    if op.get("cx", "").lower().startswith("fd") or "@dyn" in right.lower():
+        # dynamic panel GMM (Arellano-Bond): y y(-1) ... x @ @dyn(y)
+        toks = _spec(left, ctx).split()
+        y = toks[0]
+        p = sum(1 for t in toks[1:] if re.fullmatch(re.escape(y) + r"\(-\d+\)", t, re.IGNORECASE))
+        xs = [t for t in toks[1:] if not re.fullmatch(re.escape(y) + r"\(-\d+\)", t, re.IGNORECASE)
+              and t.lower() != "c"]
+        two = 1 if "2" in op.get("gmm", "") or "2step" in (opts or "").lower() else 0
+        per = 1 if op.get("per", "").lower().startswith("f") else 0
+        name = translate_name(name, ctx)
+        ctx.equations[name] = "dpanel"
+        ctx.last_eq = name
+        return [f'bundle {name} = ev_dpanel("{y}", "{" ".join(xs)}", dataset, {max(p, 1)}, {two}, {per})']
+    # single equation GMM: a one-equation system (White weighting; HAC with instwgt=hac)
+    name = translate_name(name, ctx)
+    sp = _spec(left, ctx).split()
+    inst = " ".join(t for t in _spec(right, ctx).split() if t.lower() != "c")   # a constant is always added
+    hac = "0" if "hac" in (opts or "").lower() else "-1"
+    nums = " ".join(str(i) for i in range(1, len(sp)))
+    ctx.equations[name] = "system"
+    ctx.last_eq = name
+    return [f'bundle {name} = ev_system(defarray("{sp[0]}"), defarray("{" ".join(sp[1:])}"), '
+            f'defarray("{nums}"), dataset, "gmm", "{inst}", 0, null, {hac})']
+
+
+def _cointreg_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    op = _opts(opts)
+    m = op.get("method", "fmols").lower()           # EViews default: FMOLS
+    if m not in ("fmols", "dols"):
+        raise ValueError(f"cointreg method={m} not supported (fmols, dols)")
+    lead = op.get("lead", "1")
+    lag = op.get("lag", "1")
+    lead = lead if lead.isdigit() else "1"
+    lag = lag if lag.isdigit() else "1"
+    tr = {"none": "none", "const": "const", "linear": "linear", "c": "const"}.get(op.get("trend", "const").lower(), "const")
+    name, sp = _new_eq(name, "cointreg", spec, ctx)
+    return [f'bundle {name} = ev_cointreg("{sp}", dataset, "{m}", {lead}, {lag}, "{tr}")']
+
+
+EQ_METHODS = {"ls": None, "arch": None, "tsls": _tsls_call, "binary": _binary_call, "ardl": _ardl_call,
+              "liml": _liml_call, "ordered": _ml_call("ordered"), "censored": _ml_call("censored"),
+              "count": _ml_call("count"), "qreg": _ml_call("qreg"), "gmm": _gmm_call, "cointreg": _cointreg_call}
 
 
 def _arch_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
@@ -559,9 +645,10 @@ def _arch_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     if thrsh and not thrsh.isdigit():
         raise ValueError("thrsh needs a number")
     unknown = [k for k in kv if k not in ("archm", "thrsh")]
+    dist = "t" if "tdist" in o else ("ged" if "ged" in o else "")
     if unknown:
         raise ValueError(f"arch option {unknown[0]}= not supported")
-    o = [x for x in o if "=" not in x]
+    o = [x for x in o if "=" not in x and x not in ("tdist", "ged", "n")]
     model = "tarch" if any(x in ("t", "tarch") for x in o) else \
         ("egarch" if any(x in ("e", "egarch") for x in o) else "garch")
     nums = [x for x in o if re.fullmatch(r"\d+", x)]
@@ -572,12 +659,15 @@ def _arch_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     sp = _spec(spec, ctx)
     ctx.eq_dep[name] = sp.split()[0]
     hn, rn = apply_case(f"{name}_h", ctx), apply_case(f"{name}_resid", ctx)
-    if model != "garch" or archm or thrsh:
+    if model != "garch" or archm or thrsh or dist:
         # TARCH / EGARCH / ARCH-M through the gig package and EViewsCompat (EViews parameterisation)
         ctx.equations[name] = "garch"
         extra = ""
-        if archm or thrsh:
-            extra = (f', "{archm}"' if archm else ", null") + (f", {thrsh}" if thrsh else "")
+        if archm or thrsh or dist:
+            extra = (f', "{archm}"' if archm else ", null") + (f", {thrsh}" if thrsh else ", -1") \
+                + (f', "{dist}"' if dist else "")
+            if not dist and not thrsh:
+                extra = extra[: extra.rindex(", -1")]
         return [f'bundle ev_gb = ev_garch("{sp}", dataset, "{model}", {na}, {ng}, 1{extra})',
                 "if ev_gb.failed",
                 f'printf "Warning: {name} ({model.upper()}) did not converge; previous estimates kept\\n"',
@@ -1224,6 +1314,8 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             raise ValueError("output of a GARCH(p,q) equation: estimated with gretl's garch command")
         return [{"vecm": f"ev_vecprint(&{o})", "var": f"ev_varprint(&{o})", "panel": f"ev_panelprint(&{o})",
                  "binary": f"ev_binaryprint(&{o})", "ardl": f"ev_ardlprint(&{o})",
+                 "mlreg": f"ev_mlprint(&{o})", "cointreg": f"ev_coefprint(&{o})", "dpanel": f"ev_coefprint(&{o})",
+                 "system": f"ev_sysprint(&{o})",
                  "garch": f"ev_garchprint(&{o})"}.get(kind, f"ev_print(&{o})")]
     if ml == "resids":
         return [f"ev_plot(&{o})"]
@@ -1274,7 +1366,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
                     out.append(f"series {base}{suf} = ev_varfseries({o}_fc, {k})")
                 return out
         raise ValueError(f"VAR view .{meth} not supported")
-    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("ls", "panel", "tsls", "binary", "ardl"):
+    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("ls", "panel", "tsls", "binary", "ardl", "mlreg", "cointreg"):
         return [f"series {translate_name(args.split()[0], ctx)} = ev_resid({o})"]
     if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("arch", "garch"):
         return [f"series {translate_name(args.split()[0], ctx)} = {apply_case(o + '_resid', ctx)}"]
@@ -1595,7 +1687,8 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         if EQ_METHODS.get(meth.lower()):
             return EQ_METHODS[meth.lower()](name, opts, spec, ctx)
         raise ValueError(f"estimation method {meth} not supported")
-    m = re.fullmatch(r"(ls|tsls|binary|ardl)(?:\(([^)]*)\))?\s+(.+)", s, flags=re.IGNORECASE)
+    m = re.fullmatch(r"(ls|tsls|binary|ardl|liml|ordered|censored|count|qreg|gmm|cointreg)(?:\(([^)]*)\))?\s+(.+)",
+                     s, flags=re.IGNORECASE)
     if m:
         ctx.eq_counter += 1
         fn = EQ_METHODS.get(m.group(1).lower()) or _ls_call

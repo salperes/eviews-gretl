@@ -1732,6 +1732,7 @@ function bundle ev_system (strings deps "Dependent variable of each equation",
     meth = meth == "ols" ? "ls" : (meth == "2sls" ? "tsls" : meth)
     scalar n = nelem(deps)
     errorif(nelem(xspecs) != n || nelem(cnums) != n, "deps, xspecs and cnums must have one entry per equation")
+    set skip_missing off          # rows with missing values are dropped below, jointly
     # series of every equation, over the current sample
     matrix Yall = {}
     matrices XX = array(n)
@@ -3178,7 +3179,8 @@ function bundle ev_garch (string spec "Mean equation, e.g. y c x",
                           int ngarch[0::1] "GARCH order",
                           bool quiet[0],
                           string archm[null] "ARCH-in-mean term: var, sd or log",
-                          int nthr[-1::-1] "Threshold (asymmetric) order; -1 = EViews default")
+                          int nthr[-1::-1] "Threshold (asymmetric) order; -1 = EViews default",
+                          string dist[null] "Error distribution: normal (default), t or ged")
     string md = exists(model) ? tolower(model) : "garch"
     errorif(!instring(" garch tarch egarch ", " " ~ md ~ " "), "model must be garch, tarch or egarch")
     if md == "garch" && nthr > 0
@@ -3217,6 +3219,15 @@ function bundle ev_garch (string spec "Mean equation, e.g. y c x",
         bundle m = gig_setup(evg_y, gtype)
     endif
     gig_set_pq(&m, ngarch, narch)
+    string dst = exists(dist) ? tolower(dist) : "normal"
+    dst = dst == "n" ? "normal" : (dst == "tdist" ? "t" : dst)
+    errorif(!instring(" normal t ged ", " " ~ dst ~ " "), "dist must be normal, t or ged")
+    scalar cdist = dst == "t" ? 1 : (dst == "ged" ? 2 : 0)
+    errorif(cdist > 0 && (mt > 0 || nt != (gtype == 1 ? 0 : narch)), \
+      "t/GED errors are available with gig's models (no ARCH-M, threshold order = ARCH order)")
+    if cdist > 0
+        gig_set_dist(&m, cdist)
+    endif
     gig_estimate(&m, 0)
     scalar failed = !inbundle(m, "criteria")
     if !failed && inbundle(m, "errcode")
@@ -3236,6 +3247,9 @@ function bundle ev_garch (string spec "Mean equation, e.g. y c x",
         pos ~= seq(nm + 2 + narch, nm + 1 + 2 * narch)
     endif
     pos ~= seq(nm + 2 + 2 * narch, nm + 1 + 2 * narch + ngarch)
+    if cdist > 0
+        pos ~= nm + 2 + 2 * narch + ngarch          # distribution parameter (t dof / GED shape)
+    endif
     matrix act = m.active
     matrix vpos = zeros(1, cols(pos))
     loop i = 1..cols(pos)
@@ -3253,7 +3267,7 @@ function bundle ev_garch (string spec "Mean equation, e.g. y c x",
     # gig's GJR: h = w + a(|e| - g e)^2 + b h  ->  EViews TARCH:
     # h = w + A e^2 + G e^2 (e < 0) + b h, with A = a(1-g)^2, G = 4ag (delta method)
     if gtype == 3
-        matrix Jm = I(nm + nv0)
+        matrix Jm = I(rows(c))
         loop i = 1..narch
             scalar ia = nm + 1 + i
             scalar ig = nm + 1 + narch + i
@@ -3337,11 +3351,15 @@ function bundle ev_garch (string spec "Mean equation, e.g. y c x",
     b.archm = mt
     b.spec = spec
     b.depvar = toupper(tok[1])
-    b.method = meth
+    b.method = cdist == 0 ? meth : strsub(meth, "Normal distribution", cdist == 1 ? "Student's t distribution" : "Generalized error distribution (GED)")
+    b.dist = dst
     strings lab = array(0)
     loop i = 1..rows(c)
         lab += sprintf("C(%d)", i)
     endloop
+    if cdist > 0
+        lab[nelem(lab)] = cdist == 1 ? "T-DIST. DOF" : "GED PARAMETER"
+    endif
     b.clabels = lab
     b.xlab = xlab
     b.nm = nmp
@@ -3430,7 +3448,8 @@ end function
 function bundle ev_tsls (string spec "Equation and instruments, e.g. y c x @ c z1 z2",
                          list vars "Series used (e.g. dataset)",
                          string cov[null] "ordinary or white",
-                         bool quiet[0])
+                         bool quiet[0],
+                         bool liml[0] "Limited information maximum likelihood")
     errorif(!instring(spec, "@"), "Give the instruments after @, e.g. y c x @ c z")
     strings parts = strsplit(spec, "@")
     strings tok = strsplit(strstrip(parts[1]))
@@ -3466,7 +3485,9 @@ function bundle ev_tsls (string spec "Equation and instruments, e.g. y c x @ c z
     endloop
     errorif(nelem(Z) < nelem(X), "Order condition: at least as many instruments as regressors are needed")
     scalar n0 = $nobs
-    if cv == "white"
+    if liml
+        tsls evt_y X ; Z --liml --quiet
+    elif cv == "white"
         set force_hc on
         tsls evt_y X ; Z --robust --quiet
     else
@@ -3476,7 +3497,7 @@ function bundle ev_tsls (string spec "Equation and instruments, e.g. y c x @ c z
     b.kind = "tsls"
     b.iv = 1
     b.spec = spec
-    b.method = "Two-Stage Least Squares"
+    b.method = liml ? "LIML / K-Class" : "Two-Stage Least Squares"
     b.eqline = "Instrument specification:" ~ itxt
     b.depvar = toupper(tok[1])
     b.labels = lab
@@ -3486,11 +3507,19 @@ function bundle ev_tsls (string spec "Equation and instruments, e.g. y c x @ c z
     b.vcv = $vcv
     b.T = $T
     b.k = $ncoeff
-    b.rsq = $rsq
-    b.adjrsq = 1 - (1 - $rsq) * ($T - 1) / ($T - $ncoeff)
+    catch scalar r2 = $rsq          # not defined after LIML
+    if $error
+        r2 = NA
+    endif
+    b.rsq = r2
+    b.adjrsq = 1 - (1 - r2) * ($T - 1) / ($T - $ncoeff)
     b.sigma = $sigma
     b.ssr = $ess
-    b.dw = $dw
+    catch scalar dwv = $dw
+    if $error
+        dwv = NA
+    endif
+    b.dw = dwv
     b.hascon = hascon
     b.adjusted = $T < n0
     b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
@@ -5148,6 +5177,543 @@ function void ev_tsave (bundle t, string fname, string fmt[null] "txt, csv or ht
     outfile "@fname" --quiet
         printf "%s", txt
     end outfile
+end function
+
+# -------------------------------------------------------------------
+# Maximum likelihood and other single-equation estimators:
+# ordered choice, censored (tobit), count, quantile regression
+# -------------------------------------------------------------------
+
+function bundle ev_mlreg (string spec "Equation, e.g. y c x",
+                          list vars "Series used (e.g. dataset)",
+                          string method "ologit, oprobit, tobit, poisson, negbin or qreg",
+                          scalar p1[NA] "tobit: left limit (default 0); qreg: quantile (default 0.5)",
+                          scalar p2[NA] "tobit: right limit (default none)",
+                          bool quiet[0])
+    string m = tolower(method)
+    errorif(!instring(" ologit oprobit tobit poisson negbin qreg ", " " ~ m ~ " "), "unknown method " ~ method)
+    strings tok = strsplit(spec)
+    series evm_y = ev_gen(tok[1], vars)
+    list X = null
+    strings lab = array(0)
+    scalar hascon = 0
+    loop i = 2..nelem(tok)
+        if tolower(tok[i]) == "c"
+            list X += const
+            lab += "C"
+            hascon = 1
+        else
+            string v = sprintf("evm_x%d", i)
+            series @v = ev_gen(tok[i], vars)
+            list X += @v
+            lab += toupper(tok[i])
+        endif
+    endloop
+    errorif((m == "ologit" || m == "oprobit") && hascon, "Ordered models have no constant (the limit points take its place): drop c")
+    scalar n0 = $nobs
+    scalar tau = ok(p1) ? p1 : 0.5
+    if m == "ologit"
+        logit evm_y X --quiet
+    elif m == "oprobit"
+        probit evm_y X --quiet
+    elif m == "tobit"
+        scalar ll = ok(p1) ? p1 : 0
+        if ok(p2)
+            tobit evm_y X --llimit=ll --rlimit=p2 --quiet
+        else
+            tobit evm_y X --llimit=ll --quiet
+        endif
+    elif m == "poisson"
+        poisson evm_y X --quiet
+    elif m == "negbin"
+        negbin evm_y X --quiet
+    else
+        quantreg tau evm_y X --quiet
+    endif
+    bundle b
+    b.kind = "mlreg"
+    b.method = m
+    b.spec = spec
+    b.depvar = toupper(tok[1])
+    matrix c = $coeff
+    matrix se = $stderr
+    matrix V = $vcv
+    scalar k = rows(c)
+    scalar kx = nelem(X)
+    # extra parameters after the regressors: limit points, NB dispersion
+    loop i = kx + 1..k
+        if m == "ologit" || m == "oprobit"
+            lab += sprintf("LIMIT_%d:C(%d)", i - kx, i)
+        elif m == "negbin"
+            lab += sprintf("ALPHA:C(%d)", i)
+        else
+            lab += sprintf("C(%d)", i)
+        endif
+    endloop
+    if m == "tobit"
+        # EViews reports the scale with the coefficients
+        lab += sprintf("SCALE:C(%d)", k + 1)
+        c |= $sigma
+        se |= NA
+        k++
+    endif
+    b.labels = lab
+    b.coeff = c
+    b.stderr = se
+    b.vcv = V
+    b.k = k
+    b.T = $T
+    b.adjusted = $T < n0
+    catch scalar lnl = $lnl
+    if $error
+        lnl = NA
+    endif
+    b.lnl = lnl
+    b.tstat = c ./ se
+    b.zstat = m != "qreg"
+    matrix pv = zeros(k, 1)
+    loop i = 1..k
+        pv[i] = b.zstat ? 2 * cnorm(-abs(b.tstat[i])) : 2 * pvalue(t, $T - k, abs(b.tstat[i]))
+    endloop
+    b.pval = pv
+    series evm_o = obs
+    catch series evm_f = $yhat
+    if $error
+        series evm_f = NA
+    endif
+    list L = evm_y evm_o
+    matrix D = {L}
+    b.y = D[, 1]
+    b.tobs = D[, 2]
+    set skip_missing off
+    matrix F = {evm_f}
+    b.yhat = ev__atrows(F, b.tobs)
+    b.uhat = b.y - b.yhat
+    b.sample = sprintf("%s %s", obslabel(minc(b.tobs)), obslabel(maxc(b.tobs)))
+    scalar n = b.T
+    b.meany = meanc(b.y)
+    b.sdy = sdc(b.y) * sqrt(n / (n - 1))
+    if ok(lnl)
+        b.aic = -2 * lnl / n + 2 * k / n
+        b.sc = -2 * lnl / n + k * log(n) / n
+        b.hq = -2 * lnl / n + 2 * k * log(log(n)) / n
+        b.avglnl = lnl / n
+    endif
+    if m == "qreg"
+        # pseudo R-squared (Koenker-Machado): 1 - V(tau) / V(tau | constant only)
+        b.tau = tau
+        matrix u = b.uhat
+        scalar Vt = sumc(u .* (tau - (u .< 0)))
+        scalar q = quantile(b.y, tau)
+        matrix u0 = b.y - q
+        scalar V0 = sumc(u0 .* (tau - (u0 .< 0)))
+        b.pseudo_r2 = 1 - Vt / V0
+        b.adj_pseudo_r2 = 1 - (1 - b.pseudo_r2) * (n - 1) / (n - k)
+        b.qdep = q
+    endif
+    if m == "ologit" || m == "oprobit"
+        b.ncat = rows(values(b.y))
+    endif
+    b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    if !quiet
+        ev_mlprint(&b)
+    endif
+    return b
+end function
+
+function matrix ev__atrows (const matrix F, const matrix tobs)
+    # rows tobs (observation numbers) of a full-sample column, relative to the sample start
+    scalar o1 = $t1
+    matrix r = zeros(rows(tobs), 1)
+    loop i = 1..rows(tobs)
+        scalar t = tobs[i] - o1 + 1
+        r[i] = t >= 1 && t <= rows(F) ? F[t] : NA
+    endloop
+    return r
+end function
+
+function void ev_mlprint (bundle *b)
+    string title = b.method == "ologit" ? "ML - Ordered Logit (Newton-Raphson)" : \
+      (b.method == "oprobit" ? "ML - Ordered Probit (Newton-Raphson)" : \
+      (b.method == "tobit" ? "ML - Censored Normal (TOBIT) (Newton-Raphson)" : \
+      (b.method == "poisson" ? "ML/QML - Poisson Count (Newton-Raphson)" : \
+      (b.method == "negbin" ? "ML - Negative Binomial Count (Newton-Raphson)" : "Quantile Regression"))))
+    printf "\nDependent Variable: %s\nMethod: %s\nDate: %s\n", b.depvar, title, b.estdate
+    printf "Sample%s: %s\nIncluded observations: %d\n", b.adjusted ? " (adjusted)" : "", b.sample, b.T
+    if b.method == "qreg"
+        printf "Quantile: %g\n", b.tau
+    endif
+    printf "\n"
+    ev__line(78)
+    printf "%-26s%13s%13s%14s%12s\n", "Variable", "Coefficient", "Std. Error", b.zstat ? "z-Statistic" : "t-Statistic", "Prob."
+    ev__line(78)
+    loop i = 1..b.k
+        if ok(b.stderr[i])
+            printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+        else
+            printf "%-26s%13.6f\n", b.labels[i], b.coeff[i]
+        endif
+    endloop
+    ev__line(78)
+    if b.method == "qreg"
+        printf "%-22s%14.6f    %-24s%14.6f\n", "Pseudo R-squared", b.pseudo_r2, "Mean dependent var", b.meany
+        printf "%-22s%14.6f    %-24s%14.6f\n", "Adjusted R-squared", b.adj_pseudo_r2, "S.D. dependent var", b.sdy
+        printf "%-22s%14.6f\n", "Quantile dependent var", b.qdep
+    else
+        printf "%-22s%14.6f    %-24s%14.6f\n", "Mean dependent var", b.meany, "S.D. dependent var", b.sdy
+        printf "%-22s%14.6f    %-24s%14.6f\n", "Akaike info criterion", b.aic, "Schwarz criterion", b.sc
+        printf "%-22s%14.6f    %-24s%14.6f\n", "Log likelihood", b.lnl, "Hannan-Quinn criter.", b.hq
+        printf "%-22s%14.6f\n", "Avg. log likelihood", b.avglnl
+    endif
+    ev__line(78)
+end function
+
+function void ev_coefprint (bundle *b)
+    # generic coefficient table (cointegrating regressions, dynamic panels)
+    printf "\nDependent Variable: %s\nMethod: %s\n", b.depvar, b.method
+    if inbundle(b, "sample")
+        printf "Sample: %s\n", b.sample
+    endif
+    printf "Included observations: %d\n\n", b.T
+    ev__line(78)
+    printf "%-26s%13s%13s%14s%12s\n", "Variable", "Coefficient", "Std. Error", "t-Statistic", "Prob."
+    ev__line(78)
+    loop i = 1..b.k
+        printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+    endloop
+    ev__line(78)
+end function
+
+# -------------------------------------------------------------------
+# Weighted least squares: ls(w=series, wtype=istdev|ivar|stdev|var)
+# -------------------------------------------------------------------
+
+function bundle ev_wls (string spec "Equation, e.g. y c x", list vars "Series used (e.g. dataset)",
+                        string wexpr "Weight series or expression",
+                        string wtype[null] "istdev (default), ivar, stdev or var",
+                        bool quiet[0])
+    string wt = exists(wtype) ? tolower(wtype) : "istdev"
+    errorif(!instring(" istdev ivar stdev var ", " " ~ wt ~ " "), "wtype must be istdev, ivar, stdev or var")
+    strings tok = strsplit(spec)
+    series evw_y = ev_gen(tok[1], vars)
+    series evw_s = ev_gen(wexpr, vars)
+    # gretl wls minimises sum(w * u^2): EViews weights multiply the residuals
+    series evw_w = wt == "istdev" ? 1 / evw_s^2 : (wt == "ivar" ? 1 / evw_s : (wt == "stdev" ? evw_s^2 : evw_s))
+    list X = null
+    strings lab = array(0)
+    scalar hascon = 0
+    loop i = 2..nelem(tok)
+        if tolower(tok[i]) == "c"
+            list X += const
+            lab += "C"
+            hascon = 1
+        else
+            string v = sprintf("evw_x%d", i)
+            series @v = ev_gen(tok[i], vars)
+            list X += @v
+            lab += toupper(tok[i])
+        endif
+    endloop
+    scalar n0 = $nobs
+    wls evw_w evw_y X --quiet
+    bundle b
+    b.spec = spec
+    b.method = "Least Squares"
+    b.eqline = sprintf("Weighting series: %s\nWeight type: %s", toupper(wexpr), \
+      wt == "istdev" ? "Inverse standard deviation" : (wt == "ivar" ? "Inverse variance" : (wt == "stdev" ? "Standard deviation" : "Variance")))
+    b.depvar = toupper(tok[1])
+    b.labels = lab
+    b.covtype = "ordinary"
+    b.coeff = $coeff
+    b.stderr = $stderr
+    b.vcv = $vcv
+    b.T = $T
+    b.k = $ncoeff
+    b.rsq = $rsq
+    b.adjrsq = 1 - (1 - $rsq) * ($T - 1) / ($T - $ncoeff)
+    b.sigma = $sigma
+    b.ssr = $ess
+    b.lnl = $lnl
+    b.dw = $dw
+    b.hascon = hascon
+    b.adjusted = $T < n0
+    b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    series evw_u = $uhat
+    series evw_f = $yhat
+    smpl ok(evw_u) --restrict
+    b.y = {evw_y}
+    b.X = {X}
+    b.uhat = {evw_u}
+    b.yhat = {evw_f}
+    series evw_o = obs
+    b.tobs = {evw_o}
+    b.sample = sprintf("%s %s", obslabel($t1), obslabel($t2))
+    scalar n = b.T
+    scalar k = b.k
+    matrix d = b.y - meanc(b.y)
+    b.meany = meanc(b.y)
+    b.sdy = sqrt(d'd / (n - 1))
+    b.aic = -2 * b.lnl / n + 2 * k / n
+    b.sc = -2 * b.lnl / n + k * log(n) / n
+    b.hq = -2 * b.lnl / n + 2 * k * log(log(n)) / n
+    b.F = NA
+    b.Fp = NA
+    if hascon && k > 1
+        b.F = (b.rsq / (k - 1)) / ((1 - b.rsq) / (n - k))
+        b.Fp = pvalue(F, k - 1, n - k, b.F)
+    endif
+    b.tstat = b.coeff ./ b.stderr
+    matrix p = zeros(k, 1)
+    loop i = 1..k
+        p[i] = 2 * pvalue(t, n - k, abs(b.tstat[i]))
+    endloop
+    b.pval = p
+    if !quiet
+        ev_print(&b)
+    endif
+    return b
+end function
+
+# -------------------------------------------------------------------
+# Cointegrating regressions: DOLS and FMOLS (equation.cointreg)
+# -------------------------------------------------------------------
+
+function matrix ev__lrcov (const matrix U, scalar bw, bool onesided)
+    # Bartlett-kernel long-run covariance (onesided: sum over j >= 0 only)
+    scalar T = rows(U)
+    matrix S = U'U / T
+    matrix O = S
+    scalar jmax = floor(bw)
+    loop j = 1..jmax
+        if j < T
+            matrix G = U[j+1:T,]' * U[1:T-j,] / T     # Gamma(j) = E u_t u_{t-j}'
+            scalar w = 1 - j / (bw + 1)
+            if onesided
+                O += w * G'
+            else
+                O += w * (G + G')
+            endif
+        endif
+    endloop
+    return O
+end function
+
+function bundle ev_cointreg (string spec "Cointegrating equation: y x1 x2 (a constant is added)",
+                             list vars "Series used (e.g. dataset)",
+                             string method[null] "dols (default) or fmols",
+                             int nlead[0::1] "DOLS leads of the differenced regressors",
+                             int nlag[0::1] "DOLS lags of the differenced regressors",
+                             string trend[null] "const (default), linear or none",
+                             bool quiet[0])
+    string m = exists(method) ? tolower(method) : "dols"
+    errorif(m != "dols" && m != "fmols", "method must be dols or fmols")
+    string tr = exists(trend) ? tolower(trend) : "const"
+    strings tok = strsplit(spec)
+    scalar kx = nelem(tok) - 1
+    errorif(kx < 1, "Give the dependent variable and at least one regressor")
+    set skip_missing off
+    series evc_y = ev_gen(tok[1], vars)
+    matrix Y = {evc_y}
+    matrix X = {}
+    matrix DX = {}
+    loop i = 1..kx
+        series evc_x = ev_gen(tok[i+1], vars)
+        series evc_l = ev_gen(ev__lagx(tok[i+1], 1, vars), vars)
+        X ~= {evc_x}
+        DX ~= {evc_x} - {evc_l}
+    endloop
+    series evc_o = obs
+    matrix tob = {evc_o}
+    scalar T0 = rows(Y)
+    matrix Dt = {}
+    if tr != "none"
+        Dt ~= ones(T0, 1)
+    endif
+    if tr == "linear"
+        Dt ~= seq(0, T0 - 1)'
+    endif
+    strings lab = array(0)
+    loop i = 1..kx
+        lab += toupper(tok[i+1])
+    endloop
+    if tr != "none"
+        lab += "C"
+    endif
+    if tr == "linear"
+        lab += "@TREND"
+    endif
+    bundle b
+    if m == "dols"
+        # regressors in levels, deterministic terms, leads and lags of the differences
+        matrix W = X ~ Dt
+        scalar jlo = -nlead
+        loop j = jlo..nlag
+            W ~= mlag(DX, j, NA)
+        endloop
+        matrix okr = sumr(!ok(Y ~ W)) .= 0
+        matrix y = selifr(Y, okr)
+        matrix Z = selifr(W, okr)
+        tob = selifr(tob, okr)
+        matrix e = {}
+        matrix bh = mols(y, Z, &e)
+        scalar n = rows(y)
+        scalar kk = cols(Z)
+        scalar s2 = e'e / (n - kk)
+        # EViews default: OLS covariance rescaled by the long-run residual variance
+        scalar bw = ev__nwbw(e)
+        scalar lr = ev__lrcov(e, bw, 0)
+        matrix V = (lr / s2) * s2 * inv(Z'Z)
+        scalar kp = kx + cols(Dt)
+        b.coeff = bh[1:kp]
+        b.vcv = V[1:kp, 1:kp]
+        b.uhat = e
+        b.ssr = e'e
+        b.lrvar = lr
+        b.bandwidth = bw
+        b.eqline = sprintf("Method: Dynamic Least Squares (DOLS)\nCointegrating equation deterministics: %s\n" ~ \
+          "Fixed leads and lags specification (lead=%d, lag=%d)\nLong-run variance estimate (Bartlett kernel, Newey-West bandwidth = %.4f)", \
+          tr == "const" ? "C" : (tr == "linear" ? "C @TREND" : "none"), nlead, nlag, bw)
+        b.T = n
+    else
+        # Phillips-Hansen fully modified OLS
+        matrix okr = sumr(!ok(Y ~ X ~ DX)) .= 0
+        matrix y = selifr(Y, okr)
+        matrix Xs = selifr(X, okr)
+        matrix dX = selifr(DX, okr)
+        matrix Dd = {}
+        if rows(Dt)
+            Dd = selifr(Dt, okr)
+        endif
+        tob = selifr(tob, okr)
+        scalar n = rows(y)
+        matrix Z = Xs ~ Dd
+        matrix u1 = {}
+        matrix b0 = mols(y, Z, &u1)
+        matrix U = u1 ~ dX
+        scalar bw = ev__nwbw(u1)
+        matrix Om = ev__lrcov(U, bw, 0)
+        matrix La = ev__lrcov(U, bw, 1)
+        matrix O12 = Om[1, 2:]
+        matrix O22 = Om[2:, 2:]
+        matrix ys = y - dX * inv(O22) * O12'
+        matrix l12 = La[2:, 1] - La[2:, 2:] * inv(O22) * O12'
+        matrix adjm = n * (l12 | zeros(cols(Dd), 1))
+        matrix ZZi = inv(Z'Z)
+        matrix bh = ZZi * (Z'ys - adjm)
+        scalar w12 = Om[1, 1] - O12 * inv(O22) * O12'
+        b.coeff = bh
+        b.vcv = w12 * ZZi
+        matrix e = y - Z * bh
+        b.uhat = e
+        b.ssr = e'e
+        b.lrvar = w12
+        b.bandwidth = bw
+        b.eqline = sprintf("Method: Fully Modified Least Squares (FMOLS)\nCointegrating equation deterministics: %s\n" ~ \
+          "Long-run covariance estimate (Bartlett kernel, Newey-West bandwidth = %.4f)", \
+          tr == "const" ? "C" : (tr == "linear" ? "C @TREND" : "none"), bw)
+        b.T = n
+    endif
+    b.kind = "cointreg"
+    b.spec = spec
+    b.depvar = toupper(tok[1])
+    b.method = m == "dols" ? "Dynamic Least Squares (DOLS)" : "Fully Modified Least Squares (FMOLS)"
+    b.labels = lab
+    b.k = rows(b.coeff)
+    b.stderr = sqrt(diag(b.vcv))
+    b.tstat = b.coeff ./ b.stderr
+    matrix pv = zeros(b.k, 1)
+    loop i = 1..b.k
+        pv[i] = 2 * pvalue(t, b.T - b.k, abs(b.tstat[i]))
+    endloop
+    b.pval = pv
+    b.tobs = tob
+    b.sample = sprintf("%s %s", obslabel(minc(tob)), obslabel(maxc(tob)))
+    b.adjusted = 1
+    b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    b.meany = meanc(y)
+    b.sdy = sdc(y) * sqrt(n / (n - 1))
+    if !quiet
+        printf "\nDependent Variable: %s\nMethod: %s\nDate: %s\n", b.depvar, b.method, b.estdate
+        printf "Sample (adjusted): %s\nIncluded observations: %d after adjustments\n%s\n\n", b.sample, b.T, b.eqline
+        ev__line(78)
+        printf "%-26s%13s%13s%14s%12s\n", "Variable", "Coefficient", "Std. Error", "t-Statistic", "Prob."
+        ev__line(78)
+        loop i = 1..b.k
+            printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+        endloop
+        ev__line(78)
+        printf "%-22s%14.6f    %-24s%14.6f\n", "Mean dependent var", b.meany, "S.D. dependent var", b.sdy
+        printf "%-22s%14.6f    %-24s%14.6f\n", "Sum squared resid", b.ssr, "Long-run variance", b.lrvar
+        ev__line(78)
+    endif
+    return b
+end function
+
+# -------------------------------------------------------------------
+# Dynamic panel GMM (Arellano-Bond), as EViews gmm(cx=fd) with @dyn instruments
+# -------------------------------------------------------------------
+
+function bundle ev_dpanel (string y "Dependent variable",
+                           string xs[null] "Other regressors, e.g. x1 x2",
+                           list vars "Series used (e.g. dataset)",
+                           int p[1::1] "Lags of the dependent variable",
+                           bool twostep[0] "Two-step GMM",
+                           bool timedum[0] "Period dummies",
+                           bool quiet[0])
+    errorif($datatype != 3, "Dynamic panel GMM needs a panel page")
+    series evd_y = ev_gen(y, vars)
+    list X = null
+    strings lab = array(0)
+    loop j = 1..p
+        lab += sprintf("%s(-%d)", toupper(y), j)
+    endloop
+    if exists(xs) && strstrip(xs) != ""
+        strings tok = strsplit(xs)
+        loop i = 1..nelem(tok)
+            string v = sprintf("evd_x%d", i)
+            series @v = ev_gen(tok[i], vars)
+            list X += @v
+            lab += toupper(tok[i])
+        endloop
+    endif
+    if nelem(X) == 0
+        list X = null
+    endif
+    if twostep && timedum
+        dpanel p ; evd_y X --two-step --time-dummies --quiet
+    elif twostep
+        dpanel p ; evd_y X --two-step --quiet
+    elif timedum
+        dpanel p ; evd_y X --time-dummies --quiet
+    else
+        dpanel p ; evd_y X --quiet
+    endif
+    bundle b
+    b.kind = "dpanel"
+    b.depvar = "D(" ~ toupper(y) ~ ")"
+    b.method = sprintf("Panel Generalized Method of Moments (Arellano-Bond, %s)", twostep ? "2-step" : "1-step")
+    scalar k = nelem(lab)
+    b.coeff = $coeff[1:k]
+    b.stderr = $stderr[1:k]
+    b.vcv = $vcv[1:k, 1:k]
+    b.labels = lab
+    b.k = k
+    b.T = $T
+    b.tstat = b.coeff ./ b.stderr
+    b.pval = 2 * cnorm(-abs(b.tstat))
+    catch b.sargan = $sargan
+    if !quiet
+        printf "\nDependent Variable: %s\nMethod: %s\nTransformation: First Differences\n", b.depvar, b.method
+        printf "Total panel observations: %d\n\n", b.T
+        ev__line(78)
+        printf "%-26s%13s%13s%14s%12s\n", "Variable", "Coefficient", "Std. Error", "z-Statistic", "Prob."
+        ev__line(78)
+        loop i = 1..k
+            printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+        endloop
+        ev__line(78)
+    endif
+    return b
 end function
 
 # -------------------------------------------------------------------
