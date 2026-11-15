@@ -4,8 +4,8 @@ set verbose off
 include EViewsCompat.gfn
 # workfile pages are kept as .gdtb files in gretl's dot directory (ev_pagedir)
 
-# EViews program: TARCH and EGARCH, subroutines and include,
-# matrix algebra, panel pages, IPS test and pageunstack
+# EViews program: TARCH, EGARCH and ARCH-M, subroutines and include,
+# matrix algebra, panel pages, IPS test, panel estimators, pageunstack and pagestack
 # --- include lib_matrix.prg
 # Subroutines used by garch_panel.prg (pulled in with include)
 
@@ -26,17 +26,44 @@ else
     series EG_H = $h
     series EG_RESID = $uhat
 endif
-bundle ET = ev_garch("R c", dataset, "tarch", 1, 1)
-series ET_H = ev_garchseries(ET, "h")
-series ET_RESID = ev_garchseries(ET, "resid")
+bundle ev_gb = ev_garch("R c", dataset, "tarch", 1, 1, 1)
+if ev_gb.failed
+    printf "Warning: ET (TARCH) did not converge; previous estimates kept\n"
+else
+    bundle ET = ev_gb
+    series ET_H = ev_garchseries(ET, "h")
+    series ET_RESID = ev_garchseries(ET, "resid")
+endif
 series HT = ET_H
 series UT = ET_RESID
 # one-step variance forecast from the TARCH coefficients (as in EViews)
 series HF = ET.coeff[2] + ET.coeff[3]*UT^2 + ET.coeff[4]*UT^2*(UT<0) + ET.coeff[5]*HT
-bundle EE = ev_garch("R c", dataset, "egarch", 1, 1)
-series EE_H = ev_garchseries(EE, "h")
-series EE_RESID = ev_garchseries(EE, "resid")
+bundle ev_gb = ev_garch("R c", dataset, "egarch", 1, 1, 1)
+if ev_gb.failed
+    printf "Warning: EE (EGARCH) did not converge; previous estimates kept\n"
+else
+    bundle EE = ev_gb
+    series EE_H = ev_garchseries(EE, "h")
+    series EE_RESID = ev_garchseries(EE, "resid")
+endif
 series HE = EE_H
+# GARCH-in-mean and a TARCH(2,1) with one threshold term
+bundle ev_gb = ev_garch("R c", dataset, "garch", 1, 1, 1, "sd")
+if ev_gb.failed
+    printf "Warning: EM (GARCH) did not converge; previous estimates kept\n"
+else
+    bundle EM = ev_gb
+    series EM_H = ev_garchseries(EM, "h")
+    series EM_RESID = ev_garchseries(EM, "resid")
+endif
+bundle ev_gb = ev_garch("R c", dataset, "garch", 2, 1, 1, null, 1)
+if ev_gb.failed
+    printf "Warning: ET2 (GARCH) did not converge; previous estimates kept\n"
+else
+    bundle ET2 = ev_gb
+    series ET2_H = ev_garchseries(ET2, "h")
+    series ET2_RESID = ev_garchseries(ET2, "resid")
+endif
 
 # matrix algebra in a subroutine from the include file
 # --- call olsmat
@@ -52,8 +79,14 @@ scalar nr = rows(XM)
 bundle EQC = ev_ls("CONS c GDP", dataset)
 scalar gap = abs(BM[2,1] - EQC.coeff[2])
 # --- call report
-scalar gap_val = gap
-print gap_val
+loop 1    # subroutine body (return = break)
+    # nothing to report for a missing value
+    if missing(gap)
+        break
+    endif
+    scalar gap_val = gap
+    print gap_val
+endloop
 # --- end of report
 matrix A = zeros(2, 2)
 matrix A = mshape({2, 1, 1, 3}, 2, 2)
@@ -68,8 +101,14 @@ series C2S = C2
 smpl full
 smpl 1960:1 2019:4
 # --- call report
-scalar check_val = check
-print check_val
+loop 1    # subroutine body (return = break)
+    # nothing to report for a missing value
+    if missing(check)
+        break
+    endif
+    scalar check_val = check
+    print check_val
+endloop
 # --- end of report
 
 # panel page: unit root tests and unstacking
@@ -78,6 +117,10 @@ scalar ev_N = $nobs
 setobs ID YEAR --panel-vars
 scalar ev_N = $nobs
 adf 2 LY --c
+# panel least squares: two-way fixed effects and random effects
+bundle EPF = ev_panel("LY c LY(-1)", dataset, "fixed", 1)
+bundle EPR = ev_panel("LY c LY(-1)", dataset, "random", 0)
+smpl full
 matrix ev_uid = ev_panelids(ID)
 matrix ev_u1 = ev_unstack(LY)
 matrix ev_ut = ev_unstack(YEAR)[,1]
@@ -94,4 +137,30 @@ endloop
 scalar ev_N = $nobs
 print LY_11
 print LY_13
+
+# stack the wide page back into a panel page
+smpl full
+strings ev_sid = ev_stackids("LY_?", dataset)
+matrix ev_s1 = ev_stack("LY_?", dataset, ev_sid)
+scalar ev_T = rows(ev_s1)
+scalar ev_NS = nelem(ev_sid)
+matrix ev_idv = seq(1, ev_NS)'
+loop ev_j = 1..ev_NS
+    scalar ev_v = atof(ev_sid[ev_j])
+    if ok(ev_v)
+        ev_idv[ev_j] = ev_v
+    endif
+endloop
+string ev_pagedir = $dotdir
+store "@ev_pagedir/wide.gdtb"
+scalar ev_NT = ev_T * ev_NS
+nulldata ev_NT --preserve
+series crossid = vec(ones(ev_T, 1) * ev_idv')
+series period = vec(seq(1, ev_T)' * ones(1, ev_NS))
+series LY_ = vec(ev_s1)
+setobs crossid period --panel-vars
+scalar ev_N = $nobs
+bundle EFE = ev_panel("LY_ c LY_(-1)", dataset, "fixed", 0)
+series UFE = ev_resid(EFE)
+print UFE
 

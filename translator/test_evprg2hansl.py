@@ -27,6 +27,7 @@ class Expr(unittest.TestCase):
         c = Ctx()
         self.assertEqual(translate_expr("a = 1 and b <> 2", c, condition=True), "a == 1 && b != 2")
         self.assertEqual(translate_expr("a >= 1 or not b", c, condition=True), "a >= 1 || ! b")
+        self.assertEqual(translate_expr("!v = na or x <> na", c, condition=True), "missing(v) || !missing(x)")
 
     def test_string_literal_untouched(self):
         self.assertEqual(translate_expr('"d(x) and y"', Ctx()), '"d(x) and y"')
@@ -161,8 +162,36 @@ class RealPrograms(unittest.TestCase):
         self.assertEqual(translate_line("eq3.makegarch h", c), ["series h = eq3_h"])
         self.assertEqual(translate_line("u = resid", c), ["series u = eq3_resid"])
         self.assertEqual(translate_line("eq3.output", c), ["ev_garchprint(&eq3)"])
+        self.assertEqual(translate_line("equation eq4.arch(1,1,archm=sd) yy c", c)[0],
+                         'bundle ev_gb = ev_garch("yy c", dataset, "garch", 1, 1, 1, "sd")')
+        self.assertEqual(translate_line("equation eq5.arch(2,1,thrsh=1) yy c", c)[0],
+                         'bundle ev_gb = ev_garch("yy c", dataset, "garch", 2, 1, 1, null, 1)')
         with self.assertRaises(ValueError):
-            translate_line("equation eq4.arch(archm=var) yy c", c)
+            translate_line("equation eq6.arch(1,1,archm=foo) yy c", c)
+
+    def test_panel_ls(self):
+        c = Ctx()
+        translate_line("pagestruct id @date(t)", c)
+        self.assertEqual(translate_line("equation ef.ls(cx=f) y c x(-1)", c),
+                         ['bundle ef = ev_panel("y c x(-1)", dataset, "fixed", 0)'])
+        self.assertEqual(translate_line("equation er.ls(cx=r, per=f) y c x", c),
+                         ['bundle er = ev_panel("y c x", dataset, "random", 1)'])
+        self.assertEqual(translate_line("equation ep.ls y c x", c),
+                         ['bundle ep = ev_panel("y c x", dataset, "none", 0)'])
+        self.assertEqual(translate_line("ef.makeresid u", c), ["series u = ev_resid(ef)"])
+        self.assertEqual(translate_line("ef.output", c), ["ev_panelprint(&ef)"])
+
+    def test_pagestack(self):
+        c = Ctx()
+        out = translate_line("pagestack(page=long) gdp_? cpi?", c)
+        self.assertIn('strings ev_sid = ev_stackids("gdp_?", dataset)', out)
+        self.assertIn("series gdp_ = vec(ev_s1)", out)
+        self.assertIn("series cpi = vec(ev_s2)", out)
+        self.assertIn("setobs crossid period --panel-vars", out)
+        self.assertEqual(c.page, "long")
+        self.assertEqual(c.panel, ("crossid", "period"))
+        with self.assertRaises(ValueError):
+            translate_line("pagestack gdp", Ctx())
 
     def test_panel(self):
         c = Ctx()
@@ -205,6 +234,22 @@ endsub
         self.assertEqual(todos, [])
         h, todos = translate("call nothere(1)\n")
         self.assertEqual(len(todos), 1)
+
+    def test_return_in_subroutine(self):
+        prg = """subroutine safe(series x)
+  if @min(x) <= 0 then
+    return
+  endif
+  series lx = log(x)
+endsub
+call safe(gdp)
+"""
+        h, todos = translate(prg)
+        self.assertEqual(todos, [])
+        self.assertIn("loop 1", h)
+        self.assertIn("break", h)
+        prg2 = "subroutine s2(series x)\nfor !i = 1 to 3\nreturn\nnext\nendsub\ncall s2(gdp)\n"
+        self.assertEqual(len(translate(prg2)[1]), 1)
 
     def test_nested_calls(self):
         prg = """subroutine a(series x)

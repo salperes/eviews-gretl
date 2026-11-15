@@ -353,9 +353,25 @@ class EquationWindow(ObjectWindow):
         super().__init__(main, f"Equation: {name.upper()}   Workfile: {main.wf_title()}")
         self.name = name
         try:
-            self.garch = main.engine.is_garch(name)
+            self.kind = main.engine.eq_kind(name)
         except GretlError:
-            self.garch = False
+            self.kind = "ls"
+        self.garch = self.kind == "garch"
+        if self.kind == "panel":
+            self.set_toolbar(_toolbar([
+                ("View", [("Estimation Output", self.output),
+                          ("Actual, Fitted, Residual Graph", self.afr)]),
+                ("Proc", [("Make Residual Series...", lambda: self.make("resid")),
+                          ("Make Fitted Series...", lambda: self.make("fit"))]),
+                ("Object", [("Delete", lambda: main.delete_object(name))]),
+                ("|", None),
+                ("Name", lambda: main.rename_object(name)),
+                ("Freeze", self.freeze),
+                ("Estimate", self.estimate),
+                ("Stats", self.output),
+            ]))
+            self.output()
+            return
         if self.garch:
             self.set_toolbar(_toolbar([
                 ("View", [("Estimation Output", self.output),
@@ -434,9 +450,10 @@ class EquationWindow(ObjectWindow):
         arch = None
         if self.garch:
             out = "".join(self.main.engine.run(
-                f'printf "%s %d %d\\n", {self.name}.model, {self.name}.narch, {self.name}.ngarch')).split()
-            if len(out) >= 3:
-                arch = (out[-3], int(out[-2]), int(out[-1]))
+                f'printf "%s %d %d %d %d\\n", {self.name}.model, {self.name}.narch, {self.name}.ngarch, '
+                f'{self.name}.archm, {self.name}.nthr')).split()
+            if len(out) >= 5:
+                arch = (out[-5], int(out[-4]), int(out[-3]), int(out[-2]), int(out[-1]))
         self.main.equation_dialog(name=self.name, spec=spec, window=self, arch=arch)
 
     def forecast(self):
@@ -882,7 +899,8 @@ class WorkfileWindow(QWidget):
             ("Proc", [("Set Sample...", main.sample_dialog),
                       ("Generate Series...", main.genr_dialog),
                       ("Structure/Resize Current Page (Panel)...", main.pagestruct_dialog),
-                      ("Reshape Current Page: Unstack in New Page...", main.unstack_dialog)]),
+                      ("Reshape Current Page: Unstack in New Page...", main.unstack_dialog),
+                      ("Reshape Current Page: Stack in New Page...", main.stack_dialog)]),
             ("Object", [("Open Selected", self.open_selected),
                         ("Rename Selected...", self.rename_selected),
                         ("Delete Selected", self.delete_selected)]),
@@ -1322,6 +1340,16 @@ class MainWindow(QMainWindow):
                     raise ValueError("use pagestruct id @date(timevar)")
                 self.engine.set_panel(m.group(1), m.group(2))
                 self.ctx.panel = (m.group(1), m.group(2))
+            elif cmd == "pagestack":
+                op = dict((k.lower(), v.strip().strip('"'))
+                          for k, v in re.findall(r'(\w+)\s*=\s*("[^"]*"|[^,]+)', opts))
+                left, at, right = " ".join(rest).partition("@")
+                pats = (right if at else left).split()
+                if not pats or any("?" not in p for p in pats):
+                    raise ValueError("use pagestack x_? y_? (? stands for the identifier)")
+                name = op.get("page") or f"untitled{len(self.engine.wf.pages) + 1}"
+                self.engine.stack_page(name, pats)
+                self.ctx.panel = ("crossid", "period")
             elif cmd == "pageunstack":
                 left, _, right = " ".join(rest).partition("@")
                 ids, series = left.split(), right.split()
@@ -1368,6 +1396,15 @@ class MainWindow(QMainWindow):
             ("Cross section ID series:", unit), ("Date series:", time)])
         if d and unit.currentText().strip() and time.currentText().strip():
             self.execute(f"pagestruct {unit.currentText().strip()} @date({time.currentText().strip()})")
+
+    def stack_dialog(self):
+        """EViews Workfile Stack dialog: pool series x_? (one per unit) into a panel page."""
+        wf = self.engine.wf
+        pats, page = QLineEdit(), QLineEdit(f"untitled{len(wf.pages) + 1}")
+        pats.setPlaceholderText("series with ? for the identifier, e.g. gdp_? cpi_?")
+        d = _form_dialog(self, "Workfile Stack", [("Series to be stacked:", pats), ("New page name:", page)])
+        if d and pats.text().strip():
+            self.execute(f"pagestack(page={page.text().strip()}) {pats.text().strip()}")
 
     def unstack_dialog(self):
         """EViews Workfile Unstack dialog: one series per cross-section unit in a new page."""
@@ -1780,11 +1817,28 @@ class MainWindow(QMainWindow):
         gord.setRange(0, 9)
         aord.setValue(1)
         gord.setValue(1)
+        archm = QComboBox()
+        archm.addItems(["None", "Std. Dev.", "Variance", "Log(Var)"])
+        thr = QSpinBox()
+        thr.setRange(-1, 9)
+        thr.setSpecialValueText("default")
+        thr.setValue(-1)
         if arch:
             method.setCurrentIndex(1)
             amodel.setCurrentIndex({"garch": 0, "tarch": 1, "egarch": 2}.get(arch[0], 0))
             aord.setValue(arch[1])
             gord.setValue(arch[2])
+            if len(arch) > 4:
+                archm.setCurrentIndex({0: 0, 1: 2, 2: 1, 3: 3}.get(arch[3], 0))
+                thr.setValue(arch[4])
+        # panel pages: EViews Panel Options tab (cross-section and period effects)
+        try:
+            is_panel = self.engine.is_panel()
+        except GretlError:
+            is_panel = False
+        cxe = QComboBox()
+        cxe.addItems(["None", "Fixed", "Random"])
+        perf = QCheckBox("Period fixed effects")
         cov = QComboBox()
         cov.addItems(["Ordinary", "White", "HAC (Newey-West)"])
         wf = self.engine.wf
@@ -1795,12 +1849,18 @@ class MainWindow(QMainWindow):
         form.addRow("ARCH model:", amodel)
         form.addRow("ARCH order:", aord)
         form.addRow("GARCH order:", gord)
+        form.addRow("Threshold order:", thr)
+        form.addRow("ARCH-M term:", archm)
+        if is_panel:
+            form.addRow("Cross-section effects:", cxe)
+            form.addRow("", perf)
         lay.addLayout(form)
 
         def _arch_rows(i):
-            for w in (amodel, aord, gord):
+            for w in (amodel, aord, gord, thr, archm):
                 w.setEnabled(i == 1)
-            cov.setEnabled(i == 0)
+            for w in (cov, cxe, perf):
+                w.setEnabled(i == 0)
         method.currentIndexChanged.connect(_arch_rows)
         _arch_rows(method.currentIndex())
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1823,10 +1883,15 @@ class MainWindow(QMainWindow):
             model = ["garch", "tarch", "egarch"][amodel.currentIndex()]
             a, g = aord.value(), gord.value()
             flag = {"garch": "", "tarch": ",t", "egarch": ",e"}[model]
+            am = ["", "sd", "var", "log"][archm.currentIndex()]
+            t = thr.value()
+            flag += (f",archm={am}" if am else "") + (f",thrsh={t}" if t >= 0 else "")
             self.log_append(f"> equation {name}.arch({a},{g}{flag}) {s}")
-            # estimated with the gig package in the EViews parameterisation
+            # estimated with the gig package (and EViewsCompat's own likelihood for
+            # ARCH-M / other threshold orders) in the EViews parameterisation
             spec_q = self.fix_case(s).replace('"', "")
-            self.execute(f'bundle {name} = ev_garch("{spec_q}", dataset, "{model}", {a}, {g}, 1)',
+            extra = (f', "{am}"' if am else ", null") + f", {t}"
+            self.execute(f'bundle {name} = ev_garch("{spec_q}", dataset, "{model}", {a}, {g}, 1{extra})',
                          hansl=True, quiet=True)
             self.ctx.equations[name] = "garch"
             self.ctx.last_eq = name
@@ -1838,6 +1903,9 @@ class MainWindow(QMainWindow):
                     self.open_object((name, "equation"))
             return
         opt = {0: "", 1: "(cov=white)", 2: "(cov=hac)"}[cov.currentIndex()]
+        if is_panel and (cxe.currentIndex() > 0 or perf.isChecked()):
+            po = [x for x in (["", "cx=f", "cx=r"][cxe.currentIndex()], "per=f" if perf.isChecked() else "") if x]
+            opt = "(" + ",".join(po) + ")"
         self.execute(f"equation {name}.ls{opt} {s}")
         if name in self.engine.wf.bundles:
             self.open_object((name, "equation"))

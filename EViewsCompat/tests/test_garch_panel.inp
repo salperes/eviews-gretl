@@ -60,3 +60,36 @@ check("unstack: T x N", rows(U) * 10 + cols(U), T * 10 + 3)
 check("unstack: column 2 is unit 2", U[5, 2], M[5, 2])
 check("panel unit ids", ids[3], 13)
 adf 2 y --c
+
+# --- ARCH-M and threshold orders (own likelihood, EViews recursion)
+open ../../data/usmacro.gdt --quiet
+series r = 100 * ldiff(GDP)
+smpl 1960:1 2019:4
+bundle g0 = ev_garch("r c", dataset, "garch", 1, 1, 1)
+bundle gm = ev_garch("r c", dataset, "garch", 1, 1, 0, "sd")
+check("GARCH-M: in-mean term listed first", gm.xlab[1] == "@SQRT(GARCH)", 1)
+check("GARCH-M: 5 coefficients", gm.k, 5)
+check("GARCH-M likelihood close to GARCH (nested, lambda free)", gm.lnl > g0.lnl - 1, 1)
+matrix c = gm.coeff
+matrix h = gm.h
+matrix e = gm.uhat
+scalar t = 100
+scalar ht = c[3] + c[4] * e[t-1]^2 + c[5] * h[t-1]
+check("GARCH-M: h(t) = w + a e(t-1)^2 + b h(t-1)", ht, h[t], 1e-8)
+matrix yv = {r}
+check("GARCH-M: e(t) = y - lambda sqrt(h) - c", yv[t] - c[1] * sqrt(h[t]) - c[2], e[t], 1e-8)
+bundle t2 = ev_garch("r c", dataset, "tarch", 2, 1, 1, null, 1)
+check("TARCH(2,1) with one threshold term: 6 coefficients", t2.k, 6)
+matrix c = t2.coeff
+matrix h = t2.h
+matrix e = t2.uhat
+ht = c[2] + c[3] * e[t-1]^2 + c[4] * e[t-2]^2 + c[5] * e[t-1]^2 * (e[t-1] < 0) + c[6] * h[t-1]
+check("TARCH thrsh=1: variance recursion", ht, h[t], 1e-8)
+bundle es = ev_garch("r c", dataset, "egarch", 1, 1, 1, null, 0)
+matrix c = es.coeff
+matrix h = es.h
+matrix e = es.uhat
+ht = exp(c[2] + c[3] * abs(e[t-1]) / sqrt(h[t-1]) + c[4] * log(h[t-1]))
+check("symmetric EGARCH (thrsh=0): recursion", ht, h[t], 1e-8)
+check("standard errors computed", sumc(ok(es.stderr)), es.k)
+ev_garchprint(&gm)

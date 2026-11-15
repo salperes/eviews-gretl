@@ -1,0 +1,48 @@
+# Panel estimators (ls(cx=f|r, per=f)) and pagestack helpers
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/panel_demo.csv --quiet
+setobs ID YEAR --panel-vars
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series ly1 = LY(-1)
+bundle fe = ev_panel("LY c LY(-1)", dataset, "f")
+panel LY const ly1 --fixed-effects --quiet
+check("fixed effects slope = gretl panel --fixed-effects", fe.coeff[2], $coeff[2])
+check("fixed effects s.e.", fe.stderr[2], $stderr[2])
+check("fixed effects R-squared", fe.r2, $rsq)
+check("cross-sections and periods", fe.ncross * 100 + fe.nper, 3 * 100 + 29)
+bundle re = ev_panel("LY c LY(-1)", dataset, "r", 0, 1)
+panel LY const ly1 --random-effects --quiet
+check("random effects slope = gretl panel --random-effects", re.coeff[2], $coeff[2])
+bundle tw = ev_panel("LY c LY(-1)", dataset, "f", 1, 1)
+panel LY const ly1 --fixed-effects --time-dummies --quiet
+check("two-way fixed effects slope", tw.coeff[2], $coeff[2])
+check("only the regressors are reported", tw.k, 2)
+bundle po = ev_panel("LY c LY(-1)", dataset, null, 0, 1)
+ols LY const ly1 --quiet
+check("pooled = OLS", po.coeff[2], $coeff[2])
+series fr = ev_resid(fe)
+check("residual series", ok(fr[5]) && abs(fr[5] - fe.uhat[4]) < 1e-12, 1)
+# pagestack helpers on an unstacked copy
+matrix U = ev_unstack(LY)
+matrix ids = ev_panelids(ID)
+nulldata 30 --preserve
+loop j = 1..3
+    string nm = sprintf("ly_%d", ids[j])
+    series @nm = U[,j]
+endloop
+series other_x = 1
+strings sid = ev_stackids("ly_?", dataset)
+check("stack ids found", nelem(sid), 3)
+check("stack id value", atof(sid[2]), 12)
+matrix S = ev_stack("LY_?", dataset)
+check("stacked matrix = unstacked matrix", maxc(maxr(abs(S - U))), 0)

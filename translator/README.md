@@ -53,22 +53,30 @@ Also: nonlinear system equations, `s.gmm(w=hac)`, `text t` + `t.append @e1 = ...
 ARCH family: `e.arch(a,g)` (gretl `garch`), `e.arch(a,g,t)` TARCH and `e.arch(a,g,e)` EGARCH
 (gig package, coefficients in the EViews parameterisation, so `@coefs(k)` matches EViews);
 `e.makegarch`, `e.makeresid`, `resid`, `e.output`. A run that does not converge prints a
-warning and keeps the previous estimates, as EViews does.
+warning and keeps the previous estimates, as EViews does. ARCH-in-mean `archm=sd|var|log`
+and threshold orders `thrsh=k` (e.g. `arch(2,1,thrsh=1)`, symmetric `arch(1,1,e,thrsh=0)`)
+are estimated by EViewsCompat's own likelihood (EViews recursion, numerical Hessian).
 Panels: `pagestruct id @date(t)` (gretl `setobs --panel-vars`), `x.uroot(ips)` (gretl's panel
 `adf` prints the Im-Pesaran-Shin test), `x.uroot(llc)` (ADF when the sample is down to one
 unit), `pageunstack(namepat="*_?", page=p) id t @ x y` (a new page with one series per unit).
 A date range in `smpl` on a panel page is not applied (a note says so); `if` conditions are.
+Panel least squares: `ls(cx=f)` fixed effects, `ls(cx=r)` random effects, `per=f` period
+fixed effects, plain `ls` on a panel page is pooled (`ev_panel`, gretl's `panel` command).
+`pagestack(page=p) x_? y?` stacks pool series into a panel page (series `crossid`,
+`period`, and `x_`, `y` named as the pattern without `?`).
 Program structure: `subroutine name(series x, scalar !n, string %s)` ... `endsub` and
 `call name(...)` (expanded inline, nested calls too), `include file[.prg]` (read from the
-program's folder).
+program's folder). `return` in a subroutine works (the body runs in a one-pass loop and
+`return` becomes `break`), except inside a loop of the subroutine. `if x = na` becomes
+`missing(x)`.
 Matrices: `vector(n)`, `rowvector(n)`, `sym(n)`, `coef(n)`, `matrix m = expr`, `m = expr`,
 `m(i,j)` in expressions, `@inverse @transpose @det @identity @kronecker @cholesky
 @eigenvalues @trace @rank @vec @rows @columns @getmaindiagonal @emult @ediv @convert
 @columnextract @rowextract @subextract`, `stom(series|group, m)`, `mtos(m, series|group)`.
 `examples/garch_panel.prg` (with `examples/lib_matrix.prg`) uses all of these.
 
-Not yet: ARCH-M and threshold orders other than 1, `return` inside subroutines,
-`pagestack`, panel estimators (fixed/random effects through `ls` on a panel page).
+Not yet: period random effects, panel GMM/2SLS, pool objects (identifiers are read
+from the series names instead), Student-t / GED errors for ARCH models.
 
 ## Real programs (`real_prg/`, local testing only: the source repos have no licence)
 | Program | Lines | Untranslated | Ran in gretl |

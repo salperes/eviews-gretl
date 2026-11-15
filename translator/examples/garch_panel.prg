@@ -1,5 +1,5 @@
-' EViews program: TARCH and EGARCH, subroutines and include,
-' matrix algebra, panel pages, IPS test and pageunstack
+' EViews program: TARCH, EGARCH and ARCH-M, subroutines and include,
+' matrix algebra, panel pages, IPS test, panel estimators, pageunstack and pagestack
 include "lib_matrix"
 wfopen "../../data/usmacro.gdt"
 series r = 100*dlog(gdp)
@@ -14,6 +14,9 @@ series ut = resid
 series hf = @coefs(2) + @coefs(3)*ut^2 + @coefs(4)*ut^2*(ut<0) + @coefs(5)*ht
 equation ee.arch(1,1,e) r c
 ee.makegarch he
+' GARCH-in-mean and a TARCH(2,1) with one threshold term
+equation em.arch(1,1,archm=sd) r c
+equation et2.arch(2,1,thrsh=1) r c
 
 ' matrix algebra in a subroutine from the include file
 call olsmat(cons, gdp)
@@ -36,5 +39,14 @@ call report("check", check)
 wfopen "../../data/panel_demo.csv"
 pagestruct id @date(year)
 ly.uroot(ips, maxlag=2)
+' panel least squares: two-way fixed effects and random effects
+equation epf.ls(cx=f, per=f) ly c ly(-1)
+equation epr.ls(cx=r) ly c ly(-1)
 pageunstack(namepat="*_?", page="wide") id year @ ly
 show ly_11 ly_13
+
+' stack the wide page back into a panel page
+pagestack(page=long) ly_?
+equation efe.ls(cx=f) ly_ c ly_(-1)
+efe.makeresid ufe
+show ufe

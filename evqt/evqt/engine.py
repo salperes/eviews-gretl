@@ -429,6 +429,13 @@ class GretlEngine:
         out = self.run(f"eval {expr}")
         return [m.group(1) for ln in out for m in [re.match(r'\[\d+\] "(.*)"$', ln.strip())] if m]
 
+    def eq_kind(self, name: str) -> str:
+        """kind member of an equation bundle (ls, nls, garch, panel ...)."""
+        out = self.run(f'string ev_k = "ls"\nif inbundle({name}, "kind")\nev_k = {name}.kind\nendif\n'
+                       f'printf "%s\\n", ev_k')
+        lines = [x.strip() for x in out if x.strip()]
+        return lines[-1] if lines else "ls"
+
     def is_garch(self, name: str) -> bool:
         # nested ifs: hansl's ?: evaluates both branches
         out = self.run(f'scalar ev_g = 0\nif inbundle({name}, "kind")\nif {name}.kind == "garch"\n'
@@ -436,7 +443,7 @@ class GretlEngine:
         return "".join(out).strip().endswith("1")
 
     def equation_text(self, name: str) -> str:
-        fn = "ev_garchprint" if self.is_garch(name) else "ev_print"
+        fn = {"garch": "ev_garchprint", "panel": "ev_panelprint"}.get(self.eq_kind(name), "ev_print")
         return "\n".join(self.run(f"{fn}(&{name})", check=True)).strip("\n")
 
     # -- panel pages --------------------------------------------------------
@@ -448,6 +455,27 @@ class GretlEngine:
         self.run(f"smpl full\nsetobs {unit} {time} --panel-vars", check=True)
         self._read_range()
         self.refresh()
+
+    def stack_page(self, name: str, patterns: list[str]):
+        """EViews pagestack: pool series x_? (one per unit) become one series of a new panel page."""
+        if name in self.wf.pages:
+            raise GretlError(f"page {name} already exists")
+        cmds = ["smpl full", f'strings ev_sid = ev_stackids("{patterns[0]}", dataset)']
+        cmds += [f'matrix ev_s{k} = ev_stack("{p}", dataset, ev_sid)' for k, p in enumerate(patterns, 1)]
+        cmds += ["scalar ev_T = rows(ev_s1)", "scalar ev_NS = nelem(ev_sid)", "matrix ev_idv = seq(1, ev_NS)'",
+                 "loop ev_j = 1..ev_NS", "scalar ev_v = atof(ev_sid[ev_j])", "if ok(ev_v)",
+                 "ev_idv[ev_j] = ev_v", "endif", "endloop"]
+        self.run("\n".join(cmds), check=True)
+        self._save_page()
+        body = ["scalar ev_NT = ev_T * ev_NS", "nulldata ev_NT --preserve",
+                "series crossid = vec(ones(ev_T, 1) * ev_idv')",
+                "series period = vec(seq(1, ev_T)' * ones(1, ev_NS))"]
+        body += [f"series {p.replace('?', '')} = vec(ev_s{k})" for k, p in enumerate(patterns, 1)]
+        body += ["setobs crossid period --panel-vars"]
+        self.run("\n".join(body), check=True)
+        self.wf.pages.append(name)
+        self.wf.page_lists[name] = {}
+        self._enter_page(name)
 
     def unstack_page(self, name: str, unit: str, time: str, series: list[str], pattern: str = "*?"):
         """EViews pageunstack: a new page with one series per cross-section unit."""

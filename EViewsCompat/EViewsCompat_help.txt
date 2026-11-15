@@ -130,7 +130,8 @@ Model options: ev_modelsolve(eqs, identities, dataset, dynamic, quiet, opts)
   stochastic simulation: ev_modelseries(m, k, "mean") and (m, k, "sd").
 
 ARCH models (needs the gig package, installed with gretl)
-  ev_garch("y c x", dataset, "garch|tarch|egarch", narch, ngarch [, quiet])  -> bundle
+  ev_garch("y c x", dataset, "garch|tarch|egarch", narch, ngarch [, quiet]
+           [, "sd|var|log" (ARCH-M term)] [, nthr (threshold order, -1 = default)])  -> bundle
       EViews equation.arch(narch, ngarch[, t|e]). Coefficients are in EViews order and
       parameterisation: mean equation, then C(.) of the variance equation
       GARCH  : h = w + a e(-1)^2 + b h(-1)
@@ -145,3 +146,12 @@ Panel pages
   adf k x --c                        on a panel prints the Im-Pesaran-Shin test
   ev_unstack(x)   -> T x N matrix, one column per cross-section unit
   ev_panelids(id) -> the identifier of each unit, in panel order
+
+Panel least squares (EViews ls on a panel page)
+  ev_panel("y c x", dataset [, "none|fixed|random"] [, period_fe] [, quiet])  -> bundle
+      ls(cx=f) / ls(cx=r) / ls(per=f); only the regressors are reported, as in EViews
+  ev_panelprint(&b); ev_resid(b) and ev_fit(b) give residual and fitted series
+
+pagestack helpers
+  ev_stackids("x_?", dataset)   -> strings: the identifiers ? of matching series
+  ev_stack("x_?", dataset [, ids]) -> T x N matrix, one column per identifier

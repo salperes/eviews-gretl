@@ -30,7 +30,8 @@ of iCloud-synced folders on purpose.
   diagnostics, Wald test, make residual/fitted series, re-estimate.
 - Quick menu: Sample, Generate Series, Show, Graph, Series Statistics, Estimate
   Equation (LS with ordinary/White/HAC covariance, or ARCH: GARCH, TARCH or EGARCH with
-  ARCH and GARCH orders; the ARCH equation window shows the variance equation, a
+  ARCH and GARCH orders, threshold order and an ARCH-M term; the ARCH equation window
+  shows the variance equation, a
   conditional variance graph and Make GARCH Variance Series).
 - File: open gdt/csv/xlsx/dta/wf1..., save as .gdt, run EViews programs.
 - Freeze saves the current view to a file (txt, csv or png).
@@ -77,7 +78,11 @@ series) or `pagestruct id @date(t)`; Proc > Reshape Current Page: Unstack in New
 page `x.uroot(ips)` gives the Im-Pesaran-Shin test. EViews programs run from File may use
 subroutines, `include` files and matrix algebra (see the translator README).
 
-Not yet: panel estimators on panel pages, EViews-specific add-ins.
+On a panel page the equation dialog adds cross-section effects (none, fixed, random) and
+period fixed effects. Proc > Reshape Current Page: Stack in New Page (or
+`pagestack(page=long) x_?`) turns one-series-per-unit data into a panel page.
+
+Not yet: period random effects, EViews-specific add-ins.
 
 Known issue: Qt 6.8 on macOS can crash when accessibility automation tools drive the
 window in the background; normal mouse and keyboard use is not affected.

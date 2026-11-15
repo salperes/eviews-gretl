@@ -141,7 +141,8 @@ Model options: ev_modelsolve(eqs, identities, dataset, dynamic, quiet, opts)
   stochastic simulation: ev_modelseries(m, k, &quot;mean&quot;) and (m, k, &quot;sd&quot;).
 
 ARCH models (needs the gig package, installed with gretl)
-  ev_garch(&quot;y c x&quot;, dataset, &quot;garch|tarch|egarch&quot;, narch, ngarch [, quiet])  -&gt; bundle
+  ev_garch(&quot;y c x&quot;, dataset, &quot;garch|tarch|egarch&quot;, narch, ngarch [, quiet]
+           [, &quot;sd|var|log&quot; (ARCH-M term)] [, nthr (threshold order, -1 = default)])  -&gt; bundle
       EViews equation.arch(narch, ngarch[, t|e]). Coefficients are in EViews order and
       parameterisation: mean equation, then C(.) of the variance equation
       GARCH  : h = w + a e(-1)^2 + b h(-1)
@@ -156,6 +157,15 @@ Panel pages
   adf k x --c                        on a panel prints the Im-Pesaran-Shin test
   ev_unstack(x)   -&gt; T x N matrix, one column per cross-section unit
   ev_panelids(id) -&gt; the identifier of each unit, in panel order
+
+Panel least squares (EViews ls on a panel page)
+  ev_panel(&quot;y c x&quot;, dataset [, &quot;none|fixed|random&quot;] [, period_fe] [, quiet])  -&gt; bundle
+      ls(cx=f) / ls(cx=r) / ls(per=f); only the regressors are reported, as in EViews
+  ev_panelprint(&amp;b); ev_resid(b) and ev_fit(b) give residual and fitted series
+
+pagestack helpers
+  ev_stackids(&quot;x_?&quot;, dataset)   -&gt; strings: the identifiers ? of matching series
+  ev_stack(&quot;x_?&quot;, dataset [, ids]) -&gt; T x N matrix, one column per identifier
 </help>
 <depends count="1">
 gig </depends>
@@ -2958,7 +2968,7 @@ return bs
 </code>
 </gretl-function>
 <gretl-function name="ev_garch" type="bundle">
- <params count="6">
+ <params count="8">
   <param name="spec" type="string">
 <description>Mean equation, e.g. y c x</description>
   </param>
@@ -2975,10 +2985,30 @@ return bs
 <description>GARCH order</description>
   </param>
   <param name="quiet" type="bool" default="0"/>
+  <param name="archm" type="string" optional="true">
+<description>ARCH-in-mean term: var, sd or log</description>
+  </param>
+  <param name="nthr" type="int" min="-1" default="-1">
+<description>Threshold (asymmetric) order; -1 = EViews default</description>
+  </param>
  </params>
 <code>string md = exists(model) ? tolower(model) : &quot;garch&quot;
 errorif(!instring(&quot; garch tarch egarch &quot;, &quot; &quot; ~ md ~ &quot; &quot;), &quot;model must be garch, tarch or egarch&quot;)
+if md == &quot;garch&quot; &amp;&amp; nthr &gt; 0
+  md = &quot;tarch&quot;                  # EViews: arch(p,q,thrsh=k) is a threshold model
+endif
+scalar mt = 0
+string mlab = &quot;&quot;
+if exists(archm) &amp;&amp; archm != &quot;&quot;
+  string am = tolower(archm)
+  errorif(!instring(&quot; var sd log &quot;, &quot; &quot; ~ am ~ &quot; &quot;), &quot;archm must be var, sd or log&quot;)
+  mt = am == &quot;var&quot; ? 1 : (am == &quot;sd&quot; ? 2 : 3)
+  mlab = am == &quot;var&quot; ? &quot;GARCH&quot; : (am == &quot;sd&quot; ? &quot;@SQRT(GARCH)&quot; : &quot;LOG(GARCH)&quot;)
+endif
 scalar gtype = md == &quot;garch&quot; ? 1 : (md == &quot;tarch&quot; ? 3 : 7)
+scalar ng0 = gtype == 1 ? 0 : narch       # threshold terms gig estimates
+scalar nt = nthr &lt; 0 ? ng0 : nthr
+errorif(gtype == 3 &amp;&amp; nt == 0, &quot;a threshold model needs thrsh &gt;= 1&quot;)
 strings tok = strsplit(spec)
 series evg_y = ev_gen(tok[1], vars)
 list X = null
@@ -3011,8 +3041,7 @@ if failed
   return _(kind = &quot;garch&quot;, failed = 1, model = md, spec = spec)
 endif
 scalar nm = nelem(X)
-scalar ng = gtype == 1 ? 0 : narch
-scalar nv = 1 + narch + ng + ngarch
+scalar nv0 = 1 + narch + ng0 + ngarch
 # gig's layout: mean, omega, alpha (narch), gamma (narch, fixed at 0 for GARCH),
 # beta (ngarch), then distribution parameters; the vcv covers the active ones
 matrix pos = seq(1, nm + 1 + narch)
@@ -3037,7 +3066,7 @@ endif
 # gig's GJR: h = w + a(|e| - g e)^2 + b h  -&gt;  EViews TARCH:
 # h = w + A e^2 + G e^2 (e &lt; 0) + b h, with A = a(1-g)^2, G = 4ag (delta method)
 if gtype == 3
-  matrix Jm = I(nm + nv)
+  matrix Jm = I(nm + nv0)
   loop i = 1..narch
     scalar ia = nm + 1 + i
     scalar ig = nm + 1 + narch + i
@@ -3052,61 +3081,119 @@ if gtype == 3
   endloop
   V = Jm * V * Jm'
 endif
+scalar lnl = m.criteria[1]
+scalar T = m.nobs
+matrix hm = {m.h}
+matrix um = {m.uhat}
+series evg_o = obs
+matrix tob = {evg_o}
+matrix okr = ok(hm) .* ok(um)
+hm = selifr(hm, okr)
+um = selifr(um, okr)
+tob = selifr(tob, okr)
+string meth = &quot;ML ARCH - Normal distribution (gig, BFGS)&quot;
+if mt &gt; 0 || nt != ng0
+  # ARCH-in-mean or other threshold orders: own likelihood (EViews recursion),
+  # started from the estimates above; covariance from the numerical Hessian
+  list LL = evg_y X evg_o
+  matrix Dm = {LL}
+  matrix yv = Dm[, 1]
+  matrix XM = {}
+  if nm &gt; 0
+    XM = Dm[, 2:1 + nm]
+  endif
+  tob = Dm[, cols(Dm)]
+  matrix th = c[1:nm + 1 + narch]
+  loop k = 1..nt
+    scalar gk = k &lt;= ng0 ? c[nm + 1 + narch + k] : 0
+    th |= gk
+  endloop
+  if ngarch &gt; 0
+    th |= c[nm + 2 + narch + ng0:nm + 1 + narch + ng0 + ngarch]
+  endif
+  if mt &gt; 0
+    th = 0 | th
+  endif
+  scalar h0 = meanc(um.^2)
+  scalar eg = gtype == 7
+  set bfgs_toler 1e-9
+  set max_verbose off
+  scalar lnl = BFGSmax(&amp;th, &quot;ev__garchobj(th, yv, XM, eg, nm, narch, nt, ngarch, mt, h0)&quot;)
+  matrix H = numhess(th, &quot;ev__garchobj(th, yv, XM, eg, nm, narch, nt, ngarch, mt, h0)&quot;)
+  catch matrix V = -inv(H)
+  if $error
+    matrix V = mshape(NA, rows(th), rows(th))
+  endif
+  if sumc(!ok(V)) &gt; 0 || minc(diag(V)) &lt;= 0
+    printf &quot;Warning: the coefficient covariance could not be computed (singular Hessian)\n&quot;
+    V = mshape(NA, rows(th), rows(th))
+  endif
+  matrix R = ev__garchh(th, yv, XM, eg, nm, narch, nt, ngarch, mt, h0)
+  c = th
+  um = R[, 2]
+  hm = R[, 3]
+  T = rows(yv)
+  meth = &quot;ML ARCH - Normal distribution (BFGS, numerical Hessian)&quot;
+endif
+scalar nmp = nm + (mt &gt; 0)              # mean-equation coefficients shown
+if mt &gt; 0
+  strings xl2 = defarray(mlab)
+  loop i = 1..nelem(xlab)
+    xl2 += xlab[i]
+  endloop
+  xlab = xl2
+endif
 bundle b
 b.kind = &quot;garch&quot;
 b.failed = 0
 b.model = md
+b.archm = mt
 b.spec = spec
 b.depvar = toupper(tok[1])
-b.method = &quot;ML ARCH - Normal distribution (gig, BFGS)&quot;
+b.method = meth
 strings lab = array(0)
-loop i = 1..nm + nv
+loop i = 1..rows(c)
   lab += sprintf(&quot;C(%d)&quot;, i)
 endloop
 b.clabels = lab
 b.xlab = xlab
-b.nm = nm
+b.nm = nmp
 b.narch = narch
 b.ngarch = ngarch
+b.nthr = nt
 b.coeff = c
 b.vcv = V
 b.stderr = sqrt(diag(V))
 b.k = rows(c)
-b.lnl = m.criteria[1]
-b.T = m.nobs
-b.h = {m.h}
-b.uhat = {m.uhat}
-series evg_o = obs
-b.tobs = {evg_o}
-# keep only the estimation rows
-matrix okr = ok(b.h) .* ok(b.uhat)
-b.h = selifr(b.h, okr)
-b.uhat = selifr(b.uhat, okr)
-b.tobs = selifr(b.tobs, okr)
+b.lnl = lnl
+b.T = T
+b.h = hm
+b.uhat = um
+b.tobs = tob
 b.sample = sprintf(&quot;%s %s&quot;, obslabel(minc(b.tobs)), obslabel(maxc(b.tobs)))
 b.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
 # variance equation as EViews writes it
-string ve = sprintf(&quot;C(%d)&quot;, nm + 1)
+string ve = sprintf(&quot;C(%d)&quot;, nmp + 1)
 if gtype == 7
   loop i = 1..narch
-    ve ~= sprintf(&quot; + C(%d)*ABS(RESID(-%d)/@SQRT(GARCH(-%d)))&quot;, nm + 1 + i, i, i)
+    ve ~= sprintf(&quot; + C(%d)*ABS(RESID(-%d)/@SQRT(GARCH(-%d)))&quot;, nmp + 1 + i, i, i)
   endloop
-  loop i = 1..narch
-    ve ~= sprintf(&quot; + C(%d)*RESID(-%d)/@SQRT(GARCH(-%d))&quot;, nm + 1 + narch + i, i, i)
+  loop i = 1..nt
+    ve ~= sprintf(&quot; + C(%d)*RESID(-%d)/@SQRT(GARCH(-%d))&quot;, nmp + 1 + narch + i, i, i)
   endloop
   loop i = 1..ngarch
-    ve ~= sprintf(&quot; + C(%d)*LOG(GARCH(-%d))&quot;, nm + 1 + narch + ng + i, i)
+    ve ~= sprintf(&quot; + C(%d)*LOG(GARCH(-%d))&quot;, nmp + 1 + narch + nt + i, i)
   endloop
   ve = &quot;LOG(GARCH) = &quot; ~ ve
 else
   loop i = 1..narch
-    ve ~= sprintf(&quot; + C(%d)*RESID(-%d)^2&quot;, nm + 1 + i, i)
+    ve ~= sprintf(&quot; + C(%d)*RESID(-%d)^2&quot;, nmp + 1 + i, i)
   endloop
-  loop i = 1..ng
-    ve ~= sprintf(&quot; + C(%d)*RESID(-%d)^2*(RESID(-%d)&lt;0)&quot;, nm + 1 + narch + i, i, i)
+  loop i = 1..nt
+    ve ~= sprintf(&quot; + C(%d)*RESID(-%d)^2*(RESID(-%d)&lt;0)&quot;, nmp + 1 + narch + i, i, i)
   endloop
   loop i = 1..ngarch
-    ve ~= sprintf(&quot; + C(%d)*GARCH(-%d)&quot;, nm + 1 + narch + ng + i, i)
+    ve ~= sprintf(&quot; + C(%d)*GARCH(-%d)&quot;, nmp + 1 + narch + nt + i, i)
   endloop
   ve = &quot;GARCH = &quot; ~ ve
 endif
@@ -3186,6 +3273,242 @@ errorif($datatype != 3, &quot;The current page is not a panel&quot;)
 set skip_missing off
 matrix v = {id}
 return v[seq(1, rows(v), $pd)]
+</code>
+</gretl-function>
+<gretl-function name="ev_panel" type="bundle">
+ <params count="5">
+  <param name="spec" type="string">
+<description>Equation, e.g. y c x</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="cx" type="string" optional="true">
+<description>Cross-section effects: none, fixed or random</description>
+  </param>
+  <param name="perfe" type="bool" default="0">
+<description>Period fixed effects</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>errorif($datatype != 3, &quot;The current page is not a panel (use pagestruct first)&quot;)
+string ce = exists(cx) &amp;&amp; cx != &quot;&quot; ? tolower(cx) : &quot;none&quot;
+ce = ce == &quot;f&quot; ? &quot;fixed&quot; : (ce == &quot;r&quot; ? &quot;random&quot; : ce)
+errorif(!instring(&quot; none fixed random &quot;, &quot; &quot; ~ ce ~ &quot; &quot;), &quot;cx must be none, fixed or random&quot;)
+strings tok = strsplit(spec)
+series evp_y = ev_gen(tok[1], vars)
+list X = null
+strings xlab = array(0)
+loop i = 2..nelem(tok)
+  if tolower(tok[i]) == &quot;c&quot;
+    list X += const
+    xlab += &quot;C&quot;
+  else
+    string v = sprintf(&quot;evp_x%d&quot;, i)
+    series @v = ev_gen(tok[i], vars)
+    list X += @v
+    xlab += toupper(tok[i])
+  endif
+endloop
+errorif(ce != &quot;none&quot; &amp;&amp; !inlist(X, &quot;const&quot;), &quot;fixed and random effects need a constant (c)&quot;)
+if ce == &quot;fixed&quot;
+  if perfe
+    panel evp_y X --fixed-effects --time-dummies --quiet
+  else
+    panel evp_y X --fixed-effects --quiet
+  endif
+elif ce == &quot;random&quot;
+  if perfe
+    panel evp_y X --random-effects --time-dummies --quiet
+  else
+    panel evp_y X --random-effects --quiet
+  endif
+else
+  if perfe
+    panel evp_y X --pooled --time-dummies --quiet
+  else
+    panel evp_y X --pooled --quiet
+  endif
+endif
+scalar k = nelem(X)
+bundle b
+b.kind = &quot;panel&quot;
+b.spec = spec
+b.depvar = toupper(tok[1])
+b.effects = ce
+b.perfe = perfe
+b.method = ce == &quot;random&quot; ? &quot;Panel EGLS (Cross-section random effects)&quot; : &quot;Panel Least Squares&quot;
+b.xlab = xlab
+b.coeff = $coeff[1:k]
+b.stderr = $stderr[1:k]
+b.vcv = $vcv[1:k, 1:k]
+b.k = k
+b.ktot = $ncoeff
+b.T = $T
+# some statistics are not defined for every estimator (random effects): NA then
+scalar df = $df
+catch scalar r2 = $rsq
+if $error
+  r2 = NA
+endif
+catch scalar ssr = $ess
+if $error
+  ssr = NA
+endif
+catch scalar se = $sigma
+if $error
+  se = NA
+endif
+catch scalar lnl = $lnl
+if $error
+  lnl = NA
+endif
+b.df = df
+series evp_u = $uhat
+series evp_f = $yhat
+series evp_o = obs
+list LL = evp_u evp_f evp_o
+matrix D = {LL}
+b.uhat = D[, 1]
+b.yhat = D[, 2]
+b.tobs = D[, 3]
+matrix yy = D[, 1] + D[, 2]
+if !ok(ssr)
+  ssr = sumc(D[, 1].^2)
+  se = sqrt(ssr / df)
+endif
+if !ok(r2)
+  r2 = corr(yy, D[, 2])^2
+endif
+b.y = yy
+b.r2 = r2
+b.ssr = ssr
+b.se = se
+b.lnl = lnl
+b.r2adj = 1 - (1 - r2) * (b.T - 1) / df
+b.ymean = meanc(D[, 1] + D[, 2])
+b.ysd = sdc(D[, 1] + D[, 2])
+matrix u = D[, 1]
+b.dw = sumc((u[2:] - u[1:rows(u)-1]).^2) / sumc(u.^2)    # across the stacked rows
+# panel dimensions in the estimation sample
+series evp_un = $unit
+series evp_tt = $obsminor
+list L2 = evp_y X evp_un evp_tt
+matrix Z = {L2}
+b.ncross = rows(values(Z[, cols(Z) - 1]))
+b.nper = rows(values(Z[, cols(Z)]))
+b.balanced = b.T == b.ncross * b.nper
+b.tstat = b.coeff ./ b.stderr
+matrix pv = zeros(k, 1)
+loop i = 1..k
+  pv[i] = 2 * pvalue(t, b.df, abs(b.tstat[i]))
+endloop
+b.pval = pv
+b.aic = -2 * b.lnl / b.T + 2 * b.ktot / b.T
+b.sc = -2 * b.lnl / b.T + b.ktot * log(b.T) / b.T
+b.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
+if !quiet
+  ev_panelprint(&amp;b)
+endif
+return b
+</code>
+</gretl-function>
+<gretl-function name="ev_panelprint" type="void">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code>printf &quot;\nDependent Variable: %s\nMethod: %s\nDate: %s\n&quot;, b.depvar, b.method, b.estdate
+printf &quot;Periods included: %d\nCross-sections included: %d\n&quot;, b.nper, b.ncross
+printf &quot;Total panel (%s) observations: %d\n\n&quot;, b.balanced ? &quot;balanced&quot; : &quot;unbalanced&quot;, b.T
+ev__line(78)
+printf &quot;%-26s%13s%13s%14s%12s\n&quot;, &quot;Variable&quot;, &quot;Coefficient&quot;, &quot;Std. Error&quot;, &quot;t-Statistic&quot;, &quot;Prob.&quot;
+ev__line(78)
+loop i = 1..b.k
+  printf &quot;%-26s%13.6f%13.6f%14.6f%12.4f\n&quot;, b.xlab[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+endloop
+ev__line(78)
+if b.effects != &quot;none&quot; || b.perfe
+  printf &quot;%38s\n&quot;, &quot;Effects Specification&quot;
+  ev__line(78)
+  if b.effects == &quot;fixed&quot;
+    printf &quot;Cross-section fixed (dummy variables)\n&quot;
+  elif b.effects == &quot;random&quot;
+    printf &quot;Cross-section random\n&quot;
+  endif
+  if b.perfe
+    printf &quot;Period fixed (dummy variables)\n&quot;
+  endif
+  ev__line(78)
+endif
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;R-squared&quot;, b.r2, &quot;Mean dependent var&quot;, b.ymean
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Adjusted R-squared&quot;, b.r2adj, &quot;S.D. dependent var&quot;, b.ysd
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;S.E. of regression&quot;, b.se, &quot;Akaike info criterion&quot;, b.aic
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Sum squared resid&quot;, b.ssr, &quot;Schwarz criterion&quot;, b.sc
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Log likelihood&quot;, b.lnl, &quot;Durbin-Watson stat&quot;, b.dw
+ev__line(78)
+</code>
+</gretl-function>
+<gretl-function name="ev_stackids" type="strings">
+ <params count="2">
+  <param name="pattern" type="string">
+<description>Pool series name, e.g. gdp_?</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series (e.g. dataset)</description>
+  </param>
+ </params>
+<code># identifiers ? of the series that match the pattern, in workfile order
+errorif(!instring(pattern, &quot;?&quot;), &quot;The pattern needs a ? for the identifier&quot;)
+strings p2 = strsplit(pattern, &quot;?&quot;)
+string lead = nelem(p2) &gt; 0 ? p2[1] : &quot;&quot;
+string tail = nelem(p2) &gt; 1 ? p2[2] : &quot;&quot;
+scalar la = strlen(lead)
+scalar lt = strlen(tail)
+strings nm = varnames(vars)
+strings ids = array(0)
+loop i = 1..nelem(nm)
+  string x = toupper(nm[i])
+  scalar n = strlen(x)
+  if n &gt; la + lt
+    if substr(x, 1, la) == toupper(lead) || la == 0
+      if lt == 0 || substr(x, n - lt + 1, n) == toupper(tail)
+        ids += substr(nm[i], la + 1, n - lt)
+      endif
+    endif
+  endif
+endloop
+errorif(nelem(ids) == 0, &quot;No series match &quot; ~ pattern)
+return ids
+</code>
+</gretl-function>
+<gretl-function name="ev_stack" type="matrix">
+ <params count="3">
+  <param name="pattern" type="string">
+<description>Pool series name, e.g. gdp_?</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series (e.g. dataset)</description>
+  </param>
+  <param name="ids" type="strings" optional="true">
+<description>Identifiers (default: those of ev_stackids)</description>
+  </param>
+ </params>
+<code># T x N matrix: column j holds the series for identifier j (NA where missing)
+strings u = exists(ids) ? ids : ev_stackids(pattern, vars)
+strings nm = varnames(vars)
+set skip_missing off
+matrix M = mshape(NA, $nobs, nelem(u))
+loop j = 1..nelem(u)
+  string want = toupper(strsub(pattern, &quot;?&quot;, u[j]))
+  loop i = 1..nelem(nm)
+    if toupper(nm[i]) == want
+      series evs_x = vars[i]
+      M[, j] = {evs_x}
+      break
+    endif
+  endloop
+endloop
+return M
 </code>
 </gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
@@ -3906,6 +4229,105 @@ loop t = 1..T
   endloop
 endloop
 return Sol
+</code>
+</gretl-function>
+<gretl-function name="ev__garchh" type="matrix" private="1">
+ <params count="10">
+  <param name="th" type="matrix" const="true"/>
+  <param name="y" type="matrix" const="true"/>
+  <param name="XM" type="matrix" const="true"/>
+  <param name="eg" type="scalar"/>
+  <param name="nm" type="scalar"/>
+  <param name="na" type="scalar"/>
+  <param name="nt" type="scalar"/>
+  <param name="ng" type="scalar"/>
+  <param name="mt" type="scalar"/>
+  <param name="h0" type="scalar"/>
+ </params>
+<code># conditional variance recursion of the ARCH family (EViews form);
+# th = [lambda (ARCH-M only), mean coefficients, omega, alpha, gamma, beta]
+# returns [log-likelihood_t, residual_t, h_t]
+scalar T = rows(y)
+scalar off = mt &gt; 0
+scalar lam = 0
+if mt &gt; 0
+  lam = th[1]
+endif
+matrix mu = zeros(T, 1)
+if nm &gt; 0
+  mu = XM * th[off + 1:off + nm]
+endif
+scalar p0 = off + nm
+scalar w = th[p0 + 1]
+matrix e = zeros(T, 1)
+matrix h = zeros(T, 1)
+matrix ll = zeros(T, 1)
+scalar lh0 = log(h0)
+scalar az0 = sqrt(2 / $pi)
+loop t = 1..T
+  scalar ht = w
+  loop i = 1..na
+    scalar a = th[p0 + 1 + i]
+    scalar s = t - i
+    if eg
+      ht += s &gt;= 1 ? a * abs(e[s]) / sqrt(h[s]) : a * az0
+    else
+      ht += s &gt;= 1 ? a * e[s]^2 : a * h0
+    endif
+  endloop
+  loop k = 1..nt
+    scalar g = th[p0 + 1 + na + k]
+    scalar s = t - k
+    if eg
+      ht += s &gt;= 1 ? g * e[s] / sqrt(h[s]) : 0
+    else
+      ht += s &gt;= 1 ? g * e[s]^2 * (e[s] &lt; 0) : g * h0 / 2
+    endif
+  endloop
+  loop j = 1..ng
+    scalar bb = th[p0 + 1 + na + nt + j]
+    scalar s = t - j
+    if eg
+      ht += s &gt;= 1 ? bb * log(h[s]) : bb * lh0
+    else
+      ht += s &gt;= 1 ? bb * h[s] : bb * h0
+    endif
+  endloop
+  scalar hv = eg ? exp(ht) : ht
+  if !ok(hv) || hv &lt;= 0
+    return mshape(NA, T, 3)
+  endif
+  h[t] = hv
+  scalar gm = 0
+  if mt == 1
+    gm = hv
+  elif mt == 2
+    gm = sqrt(hv)
+  elif mt == 3
+    gm = log(hv)
+  endif
+  e[t] = y[t] - mu[t] - lam * gm
+  ll[t] = -0.5 * (log(2 * $pi) + log(hv) + e[t]^2 / hv)
+endloop
+return ll ~ e ~ h
+</code>
+</gretl-function>
+<gretl-function name="ev__garchobj" type="scalar" private="1">
+ <params count="10">
+  <param name="th" type="matrix" const="true"/>
+  <param name="y" type="matrix" const="true"/>
+  <param name="XM" type="matrix" const="true"/>
+  <param name="eg" type="scalar"/>
+  <param name="nm" type="scalar"/>
+  <param name="na" type="scalar"/>
+  <param name="nt" type="scalar"/>
+  <param name="ng" type="scalar"/>
+  <param name="mt" type="scalar"/>
+  <param name="h0" type="scalar"/>
+ </params>
+<code>matrix r = ev__garchh(th, y, XM, eg, nm, na, nt, ng, mt, h0)
+scalar s = sumc(r[, 1])
+return ok(s) ? s : -1e100
 </code>
 </gretl-function>
 <sample-script>

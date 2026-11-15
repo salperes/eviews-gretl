@@ -230,7 +230,8 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
                 raise ValueError("@coefs/resid used before any equation")
             eq = ctx.last_eq
             p = re.sub(r"@coefs\s*\(\s*([^()]+?)\s*\)", rf"{eq}.coeff[\1]", p, flags=re.IGNORECASE)
-            res = f"ev_resid({eq})" if ctx.equations.get(eq) == "ls" else apply_case(f"{eq}_resid", ctx)
+            res = f"ev_resid({eq})" if ctx.equations.get(eq) in ("ls", "panel") \
+                else apply_case(f"{eq}_resid", ctx)
             p = re.sub(r"(?<![A-Za-z0-9_])resid(?![A-Za-z0-9_])", res, p, flags=re.IGNORECASE)
         # matrix element m(i,j) -> m[i,j]
         for mt in ctx.matrices:
@@ -245,6 +246,9 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
         p = re.sub(r"\bnot\b", "!", p, flags=re.IGNORECASE)
         if condition:
             p = re.sub(r"(?<![<>!=])=(?!=)", "==", p)
+            # x = na is a missing-value test in EViews
+            p = re.sub(r"([\w.$\[\]]+)\s*==\s*NA\b", r"missing(\1)", p)
+            p = re.sub(r"([\w.$\[\]]+)\s*!=\s*NA\b", r"!missing(\1)", p)
         if ctx.case != "keep":
             p = case_names(p, ctx)
         # matrix functions last: their hansl names (inv, I, ...) must not be re-cased
@@ -418,6 +422,17 @@ def _ls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     ctx.last_eq = name
     sp = _spec(spec, ctx)
     ctx.eq_dep[name] = sp.split("=", 1)[0].strip() if "=" in sp else sp.split()[0]
+    op = _opts(opts)
+    if ctx.panel or "cx" in op or "per" in op:
+        # panel least squares: cross-section fixed/random effects, period fixed effects
+        if "=" in sp:
+            raise ValueError("explicit (nonlinear) equations on a panel page are not supported")
+        cx = {"f": "fixed", "r": "random"}.get(op.get("cx", "")[:1].lower(), "none")
+        per = 1 if op.get("per", "")[:1].lower() == "f" else 0
+        if op.get("per", "")[:1].lower() == "r":
+            raise ValueError("period random effects are not supported (use per=f)")
+        ctx.equations[name] = "panel"
+        return [f'bundle {name} = ev_panel("{sp}", dataset, "{cx}", {per})']
     cov = _ls_cov(opts)
     args = f'"{_spec(spec, ctx)}", dataset' + (f', "{cov}"' if cov else "")
     return [f"bundle {name} = ev_ls({args})"]
@@ -425,8 +440,17 @@ def _ls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
 
 def _arch_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     o = [x.strip().lower() for x in (opts or "1,1").split(",") if x.strip()]
-    if any(x.startswith(("archm", "thrsh")) or x in ("m",) for x in o):
-        raise ValueError("ARCH-M and threshold orders are not supported")
+    kv = dict(x.split("=", 1) for x in o if "=" in x)
+    archm = kv.get("archm", "")
+    if archm and archm not in ("var", "sd", "log"):
+        raise ValueError("archm must be var, sd or log")
+    thrsh = kv.get("thrsh", "")
+    if thrsh and not thrsh.isdigit():
+        raise ValueError("thrsh needs a number")
+    unknown = [k for k in kv if k not in ("archm", "thrsh")]
+    if unknown:
+        raise ValueError(f"arch option {unknown[0]}= not supported")
+    o = [x for x in o if "=" not in x]
     model = "tarch" if any(x in ("t", "tarch") for x in o) else \
         ("egarch" if any(x in ("e", "egarch") for x in o) else "garch")
     nums = [x for x in o if re.fullmatch(r"\d+", x)]
@@ -437,10 +461,13 @@ def _arch_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     sp = _spec(spec, ctx)
     ctx.eq_dep[name] = sp.split()[0]
     hn, rn = apply_case(f"{name}_h", ctx), apply_case(f"{name}_resid", ctx)
-    if model != "garch":
-        # TARCH / EGARCH through the gig package (EViews parameterisation)
+    if model != "garch" or archm or thrsh:
+        # TARCH / EGARCH / ARCH-M through the gig package and EViewsCompat (EViews parameterisation)
         ctx.equations[name] = "garch"
-        return [f'bundle ev_gb = ev_garch("{sp}", dataset, "{model}", {na}, {ng}, 1)',
+        extra = ""
+        if archm or thrsh:
+            extra = (f', "{archm}"' if archm else ", null") + (f", {thrsh}" if thrsh else "")
+        return [f'bundle ev_gb = ev_garch("{sp}", dataset, "{model}", {na}, {ng}, 1{extra})',
                 "if ev_gb.failed",
                 f'printf "Warning: {name} ({model.upper()}) did not converge; previous estimates kept\\n"',
                 "else",
@@ -1006,7 +1033,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         kind = ctx.equations.get(o)
         if kind == "arch":
             raise ValueError("output of a GARCH(p,q) equation: estimated with gretl's garch command")
-        return [{"vecm": f"ev_vecprint(&{o})", "var": f"ev_varprint(&{o})",
+        return [{"vecm": f"ev_vecprint(&{o})", "var": f"ev_varprint(&{o})", "panel": f"ev_panelprint(&{o})",
                  "garch": f"ev_garchprint(&{o})"}.get(kind, f"ev_print(&{o})")]
     if ml == "resids":
         return [f"ev_plot(&{o})"]
@@ -1037,7 +1064,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if ml == "ls":
             return _var_call(obj, opts, args, ctx)
         raise ValueError(f"VAR view .{meth} not supported")
-    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) == "ls":
+    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("ls", "panel"):
         return [f"series {translate_name(args.split()[0], ctx)} = ev_resid({o})"]
     if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("arch", "garch"):
         return [f"series {translate_name(args.split()[0], ctx)} = {apply_case(o + '_resid', ctx)}"]
@@ -1152,6 +1179,8 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         return [f"setobs {uid} {tv} --panel-vars", "scalar ev_N = $nobs"]
     if word == "pageunstack":
         return _pageunstack(cmd_opts, rest, ctx)
+    if word == "pagestack":
+        return _pagestack(cmd_opts, rest, ctx)
 
     if word in ("matrix", "vector", "rowvector", "sym", "coef"):
         m = re.fullmatch(r"(?i)(\w+)\s*(?:\(\s*([^,()]+?)\s*(?:,\s*([^()]+?)\s*)?\))?\s+(\w+)\s*(?:=\s*(.+))?", s)
@@ -1432,6 +1461,42 @@ def _pageunstack(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
     return out + ["scalar ev_N = $nobs"]
 
 
+def _pagestack(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
+    """pagestack(page=name) x_? y? -> a panel page with one stacked series per pattern."""
+    op = {}
+    for k, v in re.findall(r'(\w+)\s*=\s*("[^"]*"|[^,]+)', cmd_opts or ""):
+        op[k.lower()] = v.strip().strip('"')
+    new = op.get("page") or f"untitled{len(ctx.pages) + 1}"
+    left, at, right = rest.partition("@")
+    pats = (right if at else left).split()
+    if not pats or any("?" not in p for p in pats):
+        raise ValueError("pagestack: give pool series with ? for the identifier, e.g. gdp_? cpi_?")
+    # a pool object before @ is not needed: identifiers are read from the series names
+    pats = [apply_case(p, ctx) for p in pats]
+    ctx.need_pages = True
+    out = ["smpl full", f'strings ev_sid = ev_stackids("{pats[0]}", dataset)']
+    for k, p in enumerate(pats, 1):
+        out.append(f'matrix ev_s{k} = ev_stack("{p}", dataset, ev_sid)')
+    out += ["scalar ev_T = rows(ev_s1)", "scalar ev_NS = nelem(ev_sid)", "matrix ev_idv = seq(1, ev_NS)'",
+            "loop ev_j = 1..ev_NS",
+            "scalar ev_v = atof(ev_sid[ev_j])",
+            "if ok(ev_v)",
+            "ev_idv[ev_j] = ev_v",
+            "endif",
+            "endloop",
+            "string ev_pagedir = $dotdir", f'store "@ev_pagedir/{ctx.page}.gdtb"',
+            "scalar ev_NT = ev_T * ev_NS", "nulldata ev_NT --preserve",
+            "series crossid = vec(ones(ev_T, 1) * ev_idv')",
+            "series period = vec(seq(1, ev_T)' * ones(1, ev_NS))"]
+    for k, p in enumerate(pats, 1):
+        out.append(f"series {p.replace('?', '')} = vec(ev_s{k})")
+    out += ["setobs crossid period --panel-vars", "scalar ev_N = $nobs"]
+    ctx.pages.add(new)
+    ctx.page = new
+    ctx.panel = ("crossid", "period")
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Program structure: include files and subroutines
 # ---------------------------------------------------------------------------
@@ -1536,7 +1601,25 @@ def _expand_calls(lines, subs, depth=0):
             continue
         out.append((lineno, f"' --- call {m.group(1)}"))
         inner = [(lineno, b if b.strip().startswith("'") else _substitute(b, params, args)) for _, b in body]
-        out += _expand_calls(inner, subs, depth + 1)
+        # return: the body runs inside a one-pass loop and return becomes break
+        has_ret, lev, marked = False, 0, []
+        for ln_, b in inner:
+            c = _strip_comment(b).strip().lower()
+            w = c.split()[0] if c else ""
+            if w in ("for", "while"):
+                lev += 1
+            elif w in ("next", "wend"):
+                lev -= 1
+            if c == "return":
+                if lev > 0:
+                    b = "__return_in_loop__"
+                else:
+                    b, has_ret = "__return__", True
+            marked.append((ln_, b))
+        expanded = _expand_calls(marked, subs, depth + 1)
+        if has_ret:
+            expanded = [(lineno, "__sub_begin__")] + expanded + [(lineno, "__sub_end__")]
+        out += expanded
         out.append((lineno, f"' --- end of {m.group(1)}"))
     return out
 
@@ -1566,9 +1649,14 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False, base
             if code.startswith("__call_unknown__"):
                 code = code.split(None, 1)[1]
                 raise ValueError("unknown subroutine or wrong number of arguments")
+            if code.strip() == "__return_in_loop__":
+                code = "return"
+                raise ValueError("return inside a loop of a subroutine: restructure with if/else")
             if re.fullmatch(r"(?i)\s*return\s*", code):
-                raise ValueError("return inside a subroutine: restructure with if/else")
-            res = translate_line(code, ctx)
+                raise ValueError("return outside a subroutine")
+            marks = {"__sub_begin__": ["loop 1    # subroutine body (return = break)"],
+                     "__sub_end__": ["endloop"], "__return__": ["break"]}
+            res = marks.get(code.strip()) or translate_line(code, ctx)
         except Ignored as e:
             ctx.ignored.append((lineno, stripped))
             body.append("    " * indent + f"# ignored(EViews line {lineno}, {e}): {code.strip()}")

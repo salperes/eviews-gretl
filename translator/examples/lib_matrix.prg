@@ -11,6 +11,10 @@ subroutine olsmat(series y, series x)
 endsub
 
 subroutine report(string %what, scalar !value)
+  ' nothing to report for a missing value
+  if !value = na then
+    return
+  endif
   scalar {%what}_val = !value
   show {%what}_val
 endsub

@@ -7,7 +7,10 @@ FIML results through ev_sysfrom), VAR and VEC objects (estimates, Granger tests,
 test, structural A-B and long-run identification, impulse responses, variance
 decomposition, lag length criteria), model solution (equations plus identities, Newton),
 ARCH models (`ev_garch`: GARCH, TARCH, EGARCH through the gig package, reported in the
-EViews parameterisation; `ev_garchseries`), panel unstacking (`ev_unstack`, `ev_panelids`),
+EViews parameterisation; ARCH-M and other threshold orders by its own likelihood;
+`ev_garchseries`), panel least squares (`ev_panel`: pooled, fixed and random effects,
+period fixed effects), panel unstacking and stacking (`ev_unstack`, `ev_panelids`,
+`ev_stackids`, `ev_stack`),
 Wald test, residual diagnostics, freeze and @-functions for gretl.
 Usage: see `EViewsCompat_help.txt` and `EViewsCompat_sample.inp`.
 
@@ -20,7 +23,7 @@ export GRETL_HOME=/Applications/Gretl.app/Contents/Resources/share/gretl/
 ```
 
 ```bash
-for t in test_evcompat test_usmacro test_forecast_var test_estimators test_systems test_advanced test_more test_garch_panel; do /Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/$t.inp" | grep -E '^(ok|FAIL)'; done
+for t in test_evcompat test_usmacro test_forecast_var test_estimators test_systems test_advanced test_more test_garch_panel test_panel_est; do /Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/$t.inp" | grep -E '^(ok|FAIL)'; done
 ```
 
 ```bash
@@ -51,5 +54,7 @@ equation fields that are joined with spaces.
   h = w + a(|e| - g e)^2 + b h; EViews' TARCH coefficients are A = a(1-g)^2 and G = 4ag
   (standard errors by the delta method). gig's EGARCH is the EViews form.
 - `nulldata` needs a scalar argument (`nulldata rows(m)` is a syntax error).
+- `x == NA` in an `if` is an "indeterminate condition": use `missing(x)`.
+- After `panel ... --random-effects`, `$rsq` is not defined (catch it).
 - After `smpl ... --restrict` leaves one cross-section unit, the data are no longer a
   panel (`$datatype` 2), so `levinlin` fails.
