@@ -313,7 +313,7 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
                 raise ValueError("@coefs/resid used before any equation")
             eq = ctx.last_eq
             p = re.sub(r"@coefs\s*\(\s*([^()]+?)\s*\)", rf"{eq}.coeff[\1]", p, flags=re.IGNORECASE)
-            res = f"ev_resid({eq})" if ctx.equations.get(eq) in ("ls", "panel", "tsls", "binary", "ardl", "mlreg", "cointreg") \
+            res = f"ev_resid({eq})" if ctx.equations.get(eq) in ("ls", "panel", "tsls", "binary", "ardl", "mlreg", "cointreg", "robustls", "glm") \
                 else apply_case(f"{eq}_resid", ctx)
             p = re.sub(r"(?<![A-Za-z0-9_])resid(?![A-Za-z0-9_])", res, p, flags=re.IGNORECASE)
         # matrix element m(i,j) -> m[i,j] (string vectors too)
@@ -519,7 +519,10 @@ def _ls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
         cx = {"f": "fixed", "r": "random"}.get(op.get("cx", "")[:1].lower(), "none")
         per = 1 if op.get("per", "")[:1].lower() == "f" else 0
         if op.get("per", "")[:1].lower() == "r":
-            raise ValueError("period random effects are not supported (use per=f)")
+            if cx != "random":
+                raise ValueError("period random effects alone are not supported (use cx=r, per=r or per=f)")
+            ctx.equations[name] = "panelre2"
+            return [f'bundle {name} = ev_panelre2("{sp}", dataset, 1)']
         ctx.equations[name] = "panel"
         return [f'bundle {name} = ev_panel("{sp}", dataset, "{cx}", {per})']
     cov = _ls_cov(opts)
@@ -543,6 +546,11 @@ def _tsls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
         raise ValueError("nonlinear TSLS (explicit equations) is not supported")
     name, sp = _new_eq(name, "tsls", spec.replace("@", " @ "), ctx)
     sp = re.sub(r"\s+", " ", sp)
+    op = _opts(opts)
+    if ctx.panel or "cx" in op:
+        cx = "random" if op.get("cx", "f")[:1].lower() == "r" else "fixed"
+        ctx.equations[name] = "paneliv"
+        return [f'bundle {name} = ev_paneliv("{sp}", dataset, "{cx}")']
     cov = _ls_cov(opts)
     return [f'bundle {name} = ev_tsls("{sp}", dataset' + (', "white"' if cov == "white" else "") + ")"]
 
@@ -590,8 +598,13 @@ def _ml_call(kind: str):
             m = "tobit"
             p1 = op.get("l", "0") or "0"
             p2 = op.get("r", "NA") or "NA"
-            if "t" in op:
-                raise ValueError("truncated regression is not supported")
+            if "t" in op or "truncated" in op:
+                name, sp = _new_eq(name, "mlreg", spec, ctx)
+                lo = op.get("l", "NA") or "NA"
+                hi = op.get("r", "NA") or "NA"
+                if lo == "NA" and hi == "NA":
+                    lo = "0"
+                return [f'bundle {name} = ev_truncreg("{sp}", dataset, {lo}, {hi})']
         elif kind == "count":
             m = {"": "poisson", "p": "poisson", "n": "negbin"}.get(d)
         elif kind == "qreg":
@@ -637,8 +650,8 @@ def _gmm_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
 def _cointreg_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     op = _opts(opts)
     m = op.get("method", "fmols").lower()           # EViews default: FMOLS
-    if m not in ("fmols", "dols"):
-        raise ValueError(f"cointreg method={m} not supported (fmols, dols)")
+    if m not in ("fmols", "dols", "ccr"):
+        raise ValueError(f"cointreg method={m} not supported (fmols, dols, ccr)")
     lead = op.get("lead", "1")
     lag = op.get("lag", "1")
     lead = lead if lead.isdigit() else "1"
@@ -648,7 +661,102 @@ def _cointreg_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str
     return [f'bundle {name} = ev_cointreg("{sp}", dataset, "{m}", {lead}, {lag}, "{tr}")']
 
 
+def _simple_call(kind: str, fn):
+    def call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+        name, sp = _new_eq(name, kind, spec.replace("@", " @ "), ctx)
+        sp = re.sub(r"\s+", " ", sp)
+        return [f"bundle {name} = {fn(sp, _opts(opts), ctx)}"]
+    return call
+
+
+def _robust(sp, op, ctx):
+    psi = "huber" if "huber" in str(op.get("psi", op.get("method", ""))).lower() else "bisquare"
+    tune = op.get("tune", op.get("c", "NA")) or "NA"
+    return f'ev_robustls("{sp}", dataset, "{psi}", {tune})'
+
+
+def _step(sp, op, ctx):
+    m = "back" if "back" in str(op.get("back", "")) or "back" in " ".join(op).lower() else "fwd"
+    pin = op.get("ftol", op.get("pin", "0.05")) or "0.05"
+    pout = op.get("btol", op.get("pout", "0.1")) or "0.1"
+    return f'ev_stepls("{sp}", dataset, "{m}", {pin}, {pout})'
+
+
+def _breakls(sp, op, ctx):
+    mb = op.get("maxbreaks", op.get("maxbrk", "5")) or "5"
+    trim = float(op.get("trim", "15") or 15)
+    trim = trim / 100 if trim > 1 else trim
+    cr = "lwz" if "lwz" in str(op.get("select", "")).lower() else "bic"
+    return f'ev_breakls("{sp}", dataset, {mb}, {trim:g}, "{cr}")'
+
+
+def _thresh(sp, op, ctx):
+    if "@" not in sp:
+        raise ValueError("threshold: give the threshold variable after @")
+    left, right = [x.strip() for x in sp.split("@", 1)]
+    trim = float(op.get("trim", "15") or 15)
+    trim = trim / 100 if trim > 1 else trim
+    return f'ev_threshold("{left}", "{right}", dataset, {trim:g})'
+
+
+def _glm(sp, op, ctx):
+    fam = op.get("family", "normal").lower()
+    link = op.get("link", "")
+    fam = {"bin": "binomial", "binomial": "binomial", "poisson": "poisson", "gamma": "gamma",
+           "normal": "normal", "gauss": "normal"}.get(fam)
+    if not fam:
+        raise ValueError("glm family must be normal, poisson, binomial or gamma")
+    lk = f'"{link.lower()}"' if link else "null"
+    return f'ev_glm("{sp}", dataset, "{fam}", {lk})'
+
+
+def _enet(sp, op, ctx):
+    pen = op.get("penalty", "el").lower()
+    alpha = {"lasso": "1", "ridge": "0"}.get(pen, op.get("alpha", "0.5"))
+    lf = op.get("lfrac", "NA") or "NA"
+    return f'ev_enet("{sp}", dataset, {alpha}, {lf})'
+
+
+def _heckit(sp, op, ctx):
+    if "@" not in sp:
+        raise ValueError("heckit: give the selection equation after @")
+    two = 1 if "2step" in " ".join(op).lower() or "twostep" in " ".join(op).lower() else 0
+    return f'ev_heckit("{sp}", dataset, {two})'
+
+
+def _midas_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    """midas(fixedlag=K, polynomial=almon|beta|step|umidas, polyorder=p) y c @ page\\x"""
+    op = _opts(opts)
+    if "@" not in spec:
+        raise ValueError("midas: give the high-frequency series after @ (page\\series)")
+    left, right = [x.strip() for x in spec.split("@", 1)]
+    if "\\" not in right:
+        raise ValueError("midas: the high-frequency series must be page\\series")
+    pg, ser = right.split()[0].split("\\", 1)
+    if pg not in ctx.pages:
+        raise ValueError(f"unknown page {pg}")
+    K = op.get("fixedlag", op.get("lag", "6"))
+    poly = op.get("polynomial", "almon").lower()
+    poly = {"pdl": "almon", "almon": "almon", "beta": "beta", "step": "step", "umidas": "umidas", "u-midas": "umidas"}.get(poly, "almon")
+    deg = op.get("polyorder", op.get("steps", "2")) or "2"
+    name, sp = _new_eq(name, "midas", left, ctx)
+    ctx.need_pages = True
+    out = ["string ev_pagedir = $dotdir", "scalar ev_s1 = $t1", "scalar ev_s2 = $t2", "smpl full",
+           f'store "@ev_pagedir/{ctx.page}.gdtb"', f'open "@ev_pagedir/{pg}.gdtb" --quiet --preserve',
+           f"matrix ev_hf = ev_pagecol({translate_name(ser, ctx)})",
+           f'open "@ev_pagedir/{ctx.page}.gdtb" --quiet --preserve']
+    out += [f"list {g} = {' '.join(m)}" for g, m in ctx.groups.items() if ctx.group_page.get(g) == ctx.page]
+    out += ["smpl ev_s1 ev_s2", f"matrix ev_ml = ev_midaslags(ev_hf, {K})",
+            f'bundle {name} = ev_midas("{sp}", dataset, ev_ml, "{poly}", {deg})']
+    return out
+
+
 EQ_METHODS = {"ls": None, "arch": None, "tsls": _tsls_call, "binary": _binary_call, "ardl": _ardl_call,
+              "robustls": _simple_call("robustls", _robust), "stepls": _simple_call("ls", _step),
+              "breakls": _simple_call("breakls", _breakls), "threshold": _simple_call("threshold", _thresh),
+              "switchreg": _simple_call("switchreg", lambda sp, op, c: f'ev_switchreg("{sp}", dataset)'),
+              "glm": _simple_call("glm", _glm), "enet": _simple_call("enet", _enet),
+              "heckit": _simple_call("heckit", _heckit), "midas": _midas_call,
               "liml": _liml_call, "ordered": _ml_call("ordered"), "censored": _ml_call("censored"),
               "count": _ml_call("count"), "qreg": _ml_call("qreg"), "gmm": _gmm_call, "cointreg": _cointreg_call}
 
@@ -664,6 +772,18 @@ def _arch_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
         raise ValueError("thrsh needs a number")
     unknown = [k for k in kv if k not in ("archm", "thrsh")]
     dist = "t" if "tdist" in o else ("ged" if "ged" in o else "")
+    if "parch" in o or "cgarch" in o or "component" in o:
+        if archm or thrsh or dist:
+            raise ValueError("PARCH / component ARCH: ARCH-M, threshold orders and t/GED errors are not supported")
+        nm = translate_name(name, ctx)
+        ctx.equations[nm] = "garch"
+        ctx.last_eq = nm
+        sp = _spec(spec, ctx)
+        ctx.eq_dep[nm] = sp.split()[0]
+        model = "parch" if "parch" in o else "component"
+        hn, rn = apply_case(f"{nm}_h", ctx), apply_case(f"{nm}_resid", ctx)
+        return [f'bundle {nm} = ev_garchx("{sp}", dataset, "{model}")',
+                f'series {hn} = ev_garchseries({nm}, "h")', f'series {rn} = ev_garchseries({nm}, "resid")']
     if unknown:
         raise ValueError(f"arch option {unknown[0]}= not supported")
     o = [x for x in o if "=" not in x and x not in ("tdist", "ged", "n")]
@@ -1448,6 +1568,9 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return [{"vecm": f"ev_vecprint(&{o})", "var": f"ev_varprint(&{o})", "panel": f"ev_panelprint(&{o})",
                  "binary": f"ev_binaryprint(&{o})", "ardl": f"ev_ardlprint(&{o})",
                  "mlreg": f"ev_mlprint(&{o})", "cointreg": f"ev_coefprint(&{o})", "dpanel": f"ev_coefprint(&{o})",
+                 "robustls": f"ev_coefprint(&{o})", "breakls": f"ev_coefprint(&{o})", "threshold": f"ev_coefprint(&{o})",
+                 "switchreg": f"ev_coefprint(&{o})", "glm": f"ev_coefprint(&{o})", "heckit": f"ev_coefprint(&{o})",
+                 "midas": f"ev_coefprint(&{o})", "paneliv": f"ev_coefprint(&{o})", "panelre2": f"ev_coefprint(&{o})",
                  "system": f"ev_sysprint(&{o})",
                  "garch": f"ev_garchprint(&{o})"}.get(kind, f"ev_print(&{o})")]
     if ml == "resids":
@@ -1520,7 +1643,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
                     out.append(f"series {base}{suf} = ev_varfseries({o}_fc, {k})")
                 return out
         raise ValueError(f"VAR view .{meth} not supported")
-    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("ls", "panel", "tsls", "binary", "ardl", "mlreg", "cointreg"):
+    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("ls", "panel", "tsls", "binary", "ardl", "mlreg", "cointreg", "robustls", "glm"):
         return [f"series {translate_name(args.split()[0], ctx)} = ev_resid({o})"]
     if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("arch", "garch"):
         return [f"series {translate_name(args.split()[0], ctx)} = {apply_case(o + '_resid', ctx)}"]
@@ -1952,7 +2075,8 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         if EQ_METHODS.get(meth.lower()):
             return EQ_METHODS[meth.lower()](name, opts, spec, ctx)
         raise ValueError(f"estimation method {meth} not supported")
-    m = re.fullmatch(r"(ls|tsls|binary|ardl|liml|ordered|censored|count|qreg|gmm|cointreg)(?:\(([^)]*)\))?\s+(.+)",
+    m = re.fullmatch(r"(ls|tsls|binary|ardl|liml|ordered|censored|count|qreg|gmm|cointreg|robustls|stepls|breakls|"
+                     r"threshold|switchreg|glm|enet|heckit|midas)(?:\(([^)]*)\))?\s+(.+)",
                      s, flags=re.IGNORECASE)
     if m:
         ctx.eq_counter += 1

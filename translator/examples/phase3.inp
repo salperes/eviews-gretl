@@ -1,0 +1,44 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: Phase 3 of the gap analysis (docs/GAP_ANALIZI.md)
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+smpl full
+smpl 1960:1 2019:4
+series DC = ldiff(CONS)
+series DG = ldiff(GDP)
+series R = 100*DG
+
+# E3: power ARCH and component GARCH
+bundle EP = ev_garchx("R c", dataset, "parch")
+series EP_H = ev_garchseries(EP, "h")
+series EP_RESID = ev_garchseries(EP, "resid")
+bundle ECG = ev_garchx("R c", dataset, "component")
+series ECG_H = ev_garchseries(ECG, "h")
+series ECG_RESID = ev_garchseries(ECG, "resid")
+
+# E14, E19, E17: robust and stepwise LS, GLM, breaks, thresholds, Markov switching
+smpl full
+smpl 1970:1 2019:4
+bundle EROB = ev_robustls("DC c DG", dataset, "bisquare", NA)
+bundle ESTEP = ev_stepls("DC c @ DG FFR DG(-1) DC(-1)", dataset, "fwd", 0.05, 0.1)
+bundle EGLM = ev_glm("DC c DG", dataset, "normal", null)
+bundle EBRK = ev_breakls("DC c", dataset, 3, 0.15, "bic")
+bundle ETH = ev_threshold("DC c DC(-1)", "DC(-1)", dataset, 0.15)
+bundle ESW = ev_switchreg("DG c", dataset)
+
+# E16: canonical cointegrating regression
+smpl full
+smpl 1960:1 2019:4
+series LC = log(CONS)
+series LGD = log(GDP)
+bundle ECCR = ev_cointreg("LC LGD", dataset, "ccr", 1, 1, "const")
+
+# E20: lasso with cross-validated penalty
+smpl full
+smpl 1970:1 2019:4
+bundle ELAS = ev_enet("DC c DG FFR DG(-1) DC(-1)", dataset, 1, NA)
+

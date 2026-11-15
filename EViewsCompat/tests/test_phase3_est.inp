@@ -1,0 +1,147 @@
+# Phase 3 estimators
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+series r = 100 * dg
+smpl 1960:1 2019:4
+# --- E3 PARCH and component GARCH nest GARCH(1,1)
+bundle g0 = ev_garch("r c", dataset, "garch", 1, 1, 1)
+bundle gp = ev_garchx("r c", dataset, "parch", 1)
+check("PARCH likelihood >= GARCH(1,1)", gp.lnl >= g0.lnl - 1e-3, 1)
+bundle gc = ev_garchx("r c", dataset, "component", 1)
+check("component GARCH likelihood >= GARCH(1,1)", gc.lnl >= g0.lnl - 1e-3, 1)
+matrix c = gc.coeff
+matrix h = gc.h
+check("component GARCH variance positive", minc(h) > 0, 1)
+# --- E10 truncated regression on simulated data: consistent where OLS on the truncated sample is not
+nulldata 4000
+set seed 17
+series x = normal()
+series ys = 1 + 2 * x + 2 * normal()
+smpl ys > 0 --restrict
+bundle tr = ev_truncreg("ys c x", dataset, 0, NA, 1)
+ols ys const x --quiet
+check("truncated regression slope near 2", tr.coeff[2], 2, 0.06)
+check("OLS on the truncated sample is biased towards 0", $coeff[2] < tr.coeff[2], 1)
+smpl full
+# --- E14 robust least squares: an outlier moves OLS, not the M-estimator
+series yo = 1 + 2 * x + normal()
+yo[5] = 500
+bundle rl = ev_robustls("yo c x", dataset, "bisquare", NA, 1)
+check("robust LS slope near 2 despite the outlier", rl.coeff[2], 2, 0.03)
+check("the outlier gets zero weight", rl.weights[5], 0)
+bundle rh = ev_robustls("yo c x", dataset, "huber", NA, 1)
+check("Huber M-estimate near 2", rh.coeff[2], 2, 0.03)
+# --- E14 stepwise: picks the relevant regressor
+series z1 = normal()
+series z2 = normal()
+series ystep = 1 + 3 * z1 + normal()
+bundle sw = ev_stepls("ystep c @ z1 z2 x", dataset, "fwd", 0.05, 0.1, 1)
+check("stepwise forwards keeps z1 only", sw.selected == "ystep c z1", 1)
+# --- E19 GLM against gretl
+open ../../data/usmacro.gdt --quiet
+smpl 1970:1 2019:4
+series dg = ldiff(GDP)
+series dc = ldiff(CONS)
+series cnt = round(FFR)
+bundle gl = ev_glm("cnt c dg", dataset, "poisson", null, 1)
+poisson cnt const dg --quiet
+check("GLM Poisson = gretl poisson", gl.coeff[2], $coeff[2], 1e-6)
+series up = dg > 0.0075
+bundle gb = ev_glm("up c FFR", dataset, "binomial", "logit", 1)
+logit up const FFR --quiet
+check("GLM binomial logit = gretl logit", gb.coeff[2], $coeff[2], 1e-6)
+bundle gn = ev_glm("dc c dg", dataset, "normal", null, 1)
+ols dc const dg --quiet
+check("GLM normal identity = OLS", gn.coeff[2], $coeff[2], 1e-8)
+# --- E12 Heckman against gretl heckit (same call)
+series sel = dg > 0.004
+bundle hk = ev_heckit("dc c FFR @ sel c FFR dc(-1)", dataset, 1, 1)
+heckit dc const FFR ; sel const FFR dc(-1) --two-step --quiet
+check("Heckman two-step = gretl heckit", hk.coeff[2], $coeff[2], 1e-8)
+# --- E16 CCR on simulated cointegration
+nulldata 400
+set seed 23
+series xx = cum(normal())
+series yy = 1 + 2 * xx + normal()
+bundle cc = ev_cointreg("yy xx", dataset, "ccr", 0, 0, null, 1)
+check("CCR recovers beta = 2", cc.coeff[1], 2, 0.02)
+# --- E17 threshold and breaks on simulated data
+series qv = normal()
+series yt = qv > 0.3 ? 1 + 2 * xx * 0 + 3 + normal() : 1 + normal()
+bundle th = ev_threshold("yt c", "qv", dataset, 0.15, 1)
+check("threshold estimate near 0.3", th.threshold, 0.3, 0.1)
+series ybr = obs > 200 ? 4 + normal() : normal()
+bundle bp = ev_breakls("ybr c", dataset, 3, 0.15, null, 1)
+check("Bai-Perron finds one break", bp.nbreaks, 1)
+check("break at observation 201", bp.breakobs[1], 201)
+# Markov switching: two regimes in the mean
+series st = 0
+set seed 29
+loop t = 2..400
+    scalar tp = t - 1
+    st[t] = st[tp] ? (randgen1(u, 0, 1) < 0.95) : (randgen1(u, 0, 1) < 0.05)
+endloop
+series ysw = st ? 3 + normal() : normal()
+bundle ms = ev_switchreg("ysw c", dataset, 1)
+scalar hi = max(ms.coeff[1], ms.coeff[2])
+check("Markov switching: high-regime mean near 3", hi, 3, 0.1)
+check("Markov switching: persistent regimes", ms.p11 > 0.8 && ms.p22 > 0.8, 1)
+# --- E18 MIDAS: monthly regressor, quarterly dependent variable
+nulldata 240
+setobs 12 2000:01 --time-series
+set seed 31
+series xm = normal()
+matrix S = ev_pagecol(xm)
+nulldata 80 --preserve
+setobs 4 2000:1 --time-series
+matrix L = ev_midaslags(S, 6)
+matrix wtrue = {0.4; 0.3; 0.15; 0.1; 0.05; 0}
+series yq = 1 + L * wtrue * 2 + 0.1 * mnormal(80, 1)
+bundle mu = ev_midas("yq c", dataset, L, "umidas", 1, 1)
+check("U-MIDAS recovers the first lag weight", mu.coeff[2], 0.8, 0.05)
+bundle ma = ev_midas("yq c", dataset, L, "almon", 2, 1)
+check("Almon MIDAS: implied first lag weight", ma.lagweights[1], 0.8, 0.1)
+bundle mb = ev_midas("yq c", dataset, L, "beta", 1, 1)
+check("beta MIDAS: slope near 2", mb.coeff[2], 2, 0.1)
+# --- E20 lasso / ridge (regls)
+nulldata 200
+set seed 37
+series a1 = normal()
+series a2 = normal()
+series a3 = normal()
+series ye = 1 + 2 * a1 + normal()
+bundle la = ev_enet("ye c a1 a2 a3", dataset, 1, 0.05, 1)
+check("lasso keeps the relevant regressor", la.coeff[2] > 1.5, 1)
+check("lasso shrinks an irrelevant one to (nearly) zero", abs(la.coeff[3]) < 0.1, 1)
+bundle ri = ev_enet("ye c a1 a2 a3", dataset, 0, 0.1, 1)
+check("ridge estimates", ok(ri.coeff[2]), 1)
+# --- E21 panel IV with fixed effects = TSLS with unit dummies
+open ../../data/panel_demo.csv --quiet
+setobs ID YEAR --panel-vars
+series ly1 = LY(-1)
+series ly2 = LY(-2)
+bundle pv = ev_paneliv("LY c LY(-1) @ c LY(-2)", dataset, "fixed", 1)
+genr unitdum
+list D = du_*
+list D2 = D - du_1
+tsls LY const ly1 D2 ; const ly2 D2 --quiet
+check("panel FE-2SLS = TSLS with unit dummies", pv.coeff[2], $coeff[2], 1e-6)
+# --- E5 random effects: the one-way version equals gretl's Swamy-Arora estimator
+bundle r1 = ev_panelre2("LY c LY(-1)", dataset, 0, 1)
+panel LY const ly1 --random-effects --quiet
+check("one-way RE (Swamy-Arora) = gretl panel --random-effects", r1.coeff[2], $coeff[2], 1e-6)
+bundle r2 = ev_panelre2("LY c LY(-1)", dataset, 1, 0)
+check("two-way RE estimated", ok(r2.coeff[2]), 1)

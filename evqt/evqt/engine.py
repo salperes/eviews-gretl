@@ -58,6 +58,11 @@ _ERR_PATTERNS = re.compile(
     r"No such file|Error attempting)", re.IGNORECASE)
 
 
+EQ_KINDS = {"ls", "nls", "arma", "garch", "panel", "tsls", "binary", "ardl", "mlreg", "cointreg", "dpanel",
+            "robustls", "breakls", "threshold", "switchreg", "glm", "enet", "heckit", "midas", "paneliv",
+            "panelre2", "logl", "sspace"}
+
+
 class GretlEngine:
     def __init__(self, gretlcli: str = GRETLCLI):
         env = dict(os.environ, GRETL_HOME=GRETL_HOME)
@@ -186,6 +191,8 @@ class GretlEngine:
                     b, sys_, uh, kind = parts
                     if kind in ("vecm", "system", "model", "table"):
                         self.wf.kinds[b] = kind
+                    elif kind in EQ_KINDS:
+                        self.wf.kinds[b] = "equation"
                     else:
                         self.wf.kinds[b] = "var" if sys_ != "0" else ("equation" if uh != "0" else "bundle")
         for b in self.wf.bundles:
@@ -453,8 +460,9 @@ class GretlEngine:
 
     def equation_text(self, name: str) -> str:
         fn = {"garch": "ev_garchprint", "panel": "ev_panelprint", "binary": "ev_binaryprint",
-              "ardl": "ev_ardlprint", "mlreg": "ev_mlprint", "cointreg": "ev_coefprint",
-              "dpanel": "ev_coefprint"}.get(self.eq_kind(name), "ev_print")
+              "ardl": "ev_ardlprint", "mlreg": "ev_mlprint"}.get(self.eq_kind(name), "ev_print")
+        if self.eq_kind(name) in EQ_KINDS - {"ls", "nls", "arma", "garch", "panel", "tsls", "binary", "ardl", "mlreg"}:
+            fn = "ev_coefprint"
         return "\n".join(self.run(f"{fn}(&{name})", check=True)).strip("\n")
 
     # -- panel pages --------------------------------------------------------

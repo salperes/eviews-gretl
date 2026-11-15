@@ -369,8 +369,8 @@ class Phase2Estimators(unittest.TestCase):
         self.assertEqual(translate_line("equation g1.arch(1,1,tdist) r c", c)[0],
                          'bundle ev_gb = ev_garch("r c", dataset, "garch", 1, 1, 1, null, -1, "t")')
         self.assertEqual(translate_line("e4.output", c), ["ev_mlprint(&e4)"])
-        with self.assertRaises(ValueError):
-            translate_line("equation e11.censored(t) y c x", c)
+        self.assertEqual(translate_line("equation e11.censored(t) y c x", c),
+                         ['bundle e11 = ev_truncreg("y c x", dataset, 0, NA)'])
 
 
 class Phase2Tests(unittest.TestCase):
@@ -488,6 +488,27 @@ ss.ml
         self.assertIn("function matrices ev_ssm_ss (const matrix c)", h)
         self.assertIn("    R[1, 1] = exp(c[1])", h)
         self.assertIn("    T[1, 1] = 0 + (1)", h)
+
+
+class Phase3Estimators(unittest.TestCase):
+    def test_estimators(self):
+        c = Ctx()
+        self.assertEqual(translate_line("equation e1.arch(1,1,cgarch) r c", c)[0], 'bundle e1 = ev_garchx("r c", dataset, "component")')
+        self.assertEqual(translate_line("equation e2.robustls(psi=huber) y c x", c), ['bundle e2 = ev_robustls("y c x", dataset, "huber", NA)'])
+        self.assertEqual(translate_line("equation e3.glm(family=binomial, link=probit) d c x", c),
+                         ['bundle e3 = ev_glm("d c x", dataset, "binomial", "probit")'])
+        self.assertEqual(translate_line("equation e4.breakls(trim=10) y c x", c), ['bundle e4 = ev_breakls("y c x", dataset, 5, 0.1, "bic")'])
+        self.assertEqual(translate_line("equation e5.threshold y c y(-1) @ y(-1)", c), ['bundle e5 = ev_threshold("y c y(-1)", "y(-1)", dataset, 0.15)'])
+        self.assertEqual(translate_line("equation e6.enet(penalty=ridge, lfrac=0.1) y c x", c), ['bundle e6 = ev_enet("y c x", dataset, 0, 0.1)'])
+        self.assertEqual(translate_line("equation e7.heckit y c x @ s c z", c), ['bundle e7 = ev_heckit("y c x @ s c z", dataset, 0)'])
+        translate_line("pagecreate(page=mon) m 2000m1 2010m12", c)
+        translate_line("pageselect page1", c)
+        out = translate_line(r"equation em.midas(fixedlag=6, polynomial=almon, polyorder=2) y c @ mon\x", c)
+        self.assertIn("matrix ev_hf = ev_pagecol(x)", out)
+        self.assertEqual(out[-1], 'bundle em = ev_midas("y c", dataset, ev_ml, "almon", 2)')
+        translate_line("pagestruct id @date(t)", c)
+        self.assertEqual(translate_line("equation ep.tsls(cx=f) y c x @ c z", c), ['bundle ep = ev_paneliv("y c x @ c z", dataset, "fixed")'])
+        self.assertEqual(translate_line("equation er.ls(cx=r, per=r) y c x", c), ['bundle er = ev_panelre2("y c x", dataset, 1)'])
 
 
 class Structure(unittest.TestCase):

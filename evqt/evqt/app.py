@@ -436,7 +436,8 @@ class EquationWindow(ObjectWindow):
         except GretlError:
             self.kind = "ls"
         self.garch = self.kind == "garch"
-        if self.kind in ("tsls", "binary", "ardl", "mlreg", "cointreg"):
+        if self.kind in ("tsls", "binary", "ardl", "mlreg", "cointreg", "robustls", "breakls", "threshold", "switchreg",
+                         "glm", "enet", "heckit", "midas", "paneliv", "panelre2", "dpanel", "logl", "sspace"):
             views = [("Estimation Output", self.output)]
             if self.kind == "ardl":
                 views.append(("Cointegration and Long Run Form: Bounds Test", lambda: self.run_text(f"ev_boundsprint(&{name})")))
@@ -2152,7 +2153,11 @@ class MainWindow(QMainWindow):
                          "ORDERED - Ordered Choice", "CENSORED - Censored or Truncated Data (Tobit)",
                          "COUNT - Integer Count Data", "QREG - Quantile Regression",
                          "LIML - Limited Information Maximum Likelihood", "GMM - Generalized Method of Moments",
-                         "COINTREG - Cointegrating Regression"])
+                         "COINTREG - Cointegrating Regression",
+                         "ROBUSTLS - Robust Least Squares", "STEPLS - Stepwise Least Squares",
+                         "BREAKLS - Least Squares with Breakpoints", "THRESHOLD - Threshold Regression",
+                         "SWITCHREG - Switching Regression", "GLM - Generalized Linear Models",
+                         "ENET - Elastic Net Regularization", "HECKIT - Heckman Selection"])
         mopts = QLineEdit()
         mopts.setPlaceholderText("EViews options, e.g. d=n (probit), quant=0.25, method=dols")
         inst = QLineEdit()
@@ -2272,7 +2277,8 @@ class MainWindow(QMainWindow):
             return
         if method.currentIndex() >= 5:
             mi = method.currentIndex()
-            meth = ["ordered", "censored", "count", "qreg", "liml", "gmm", "cointreg"][mi - 5]
+            meth = ["ordered", "censored", "count", "qreg", "liml", "gmm", "cointreg", "robustls", "stepls",
+                    "breakls", "threshold", "switchreg", "glm", "enet", "heckit"][mi - 5]
             o = mopts.text().strip()
             rhs = s
             if meth in ("liml", "gmm"):

@@ -25,7 +25,8 @@ public = ev_gen ev_ls ev_print ev_plot ev_wald ev_diag ev_freeze \
   ev_mlreg ev_mlprint ev_wls ev_cointreg ev_dpanel ev_coefprint \
   ev_rescorr ev_ubreak ev_vif ev_paneltests ev_cause ev_varwhite ev_varimpulse ev_var2eqs ev_vecrestrict \
   ev_ngperron ev_zivot ev_panelur ev_cf ev_smooth ev_ipolate ev_pcomp ev_pcscore ev_kdplot \
-  ev_dateadd ev_datediff ev_makedate ev_wfind ev_wdrop ev_wkeep ev_wunique ev_wreplace ev_wsort ev_covp ev_cumprod ev_cummax ev_ifirst ev_ilast ev_ls_gui
+  ev_dateadd ev_datediff ev_makedate ev_wfind ev_wdrop ev_wkeep ev_wunique ev_wreplace ev_wsort ev_covp ev_cumprod ev_cummax ev_ifirst ev_ilast \
+  ev_garchx ev_truncreg ev_heckit ev_robustls ev_stepls ev_switchreg ev_threshold ev_breakls ev_midaslags ev_midas ev_glm ev_enet ev_paneliv ev_panelre2 ev_ls_gui
 gui-main = ev_ls_gui
 bundle-print = ev_print
 bundle-plot = ev_plot

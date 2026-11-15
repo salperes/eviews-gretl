@@ -462,6 +462,16 @@ w.save_history(hist)
 txt = open(hist).read()
 check("smpl 1985q1 2019q4" in txt and "pagestack" in txt, "command history saved as an EViews program")
 
+# --- Phase 3 estimators open as equations
+w.execute("smpl 1970q1 2019q4")
+w.execute("equation erob.robustls dlog(cons) c dlog(gdp)")
+check(w.engine.wf.kinds.get("erob") == "equation", "robust LS result is an equation object")
+w.open_object(("erob", "equation"))
+check("Robust Least Squares" in w.windows["erob"].text.toPlainText(), "robust LS window")
+w.execute("equation ebrk.breakls(maxbreaks=2) dlog(cons) c")
+w.open_object(("ebrk", "equation"))
+check("Breaks" in w.windows["ebrk"].text.toPlainText() or "Least Squares with Breaks" in w.windows["ebrk"].text.toPlainText(), "breakpoint LS window")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
 if failures:
