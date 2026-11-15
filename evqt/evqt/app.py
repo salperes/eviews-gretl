@@ -266,6 +266,8 @@ class SeriesWindow(ObjectWindow):
                       ("Graph: Kernel Density", lambda: self.run_plot_cmd(f"ev_kdplot({name}, \"@PNG\")")),
                       ("Graph: Quantile-Quantile (Normal)", lambda: self.run_plot_cmd(f"qqplot {name} --output=\"@PNG\"")),
                       ("Graph: Boxplot", lambda: self.run_plot_cmd(f"boxplot {name} --output=\"@PNG\"")),
+                      ("Variance Ratio Test", lambda: self.run_text(f"matrix ev_vr = ev_vratio({name})")),
+                      ("Spectrum (periodogram)", lambda: self.run_plot_cmd(f"matrix ev_sp = ev_spectrum({name}, 0, \"@PNG\")")),
                       ("-", None),
                       ("Descriptive Statistics", lambda: self.run_text(f"summary {name}\nnormtest {name} --jbera")),
                       ("Correlogram...", self.correlogram),
@@ -276,6 +278,7 @@ class SeriesWindow(ObjectWindow):
                       ("Frequency Filter (BK / CF)...", self.bpf),
                       ("Exponential Smoothing...", self.smooth),
                       ("Interpolate...", lambda: main.execute(f"{name}.ipolate {name}_ipol")),
+                      ("Exponential Smoothing: ETS (AIC selection)", lambda: self.run_text(f"bundle ev_et = ev_ets({name})")),
                       ("Seasonal Adjustment: Census X-13", lambda: main.execute(f'{name}.x13(save="d10 d11")'))]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
@@ -392,6 +395,9 @@ class GroupWindow(ObjectWindow):
                       ("Cointegration Test: Engle-Granger", lambda: self.coint("eg")),
                       ("Cointegration Test: Phillips-Ouliaris", lambda: self.coint("po")),
                       ("Granger Causality...", self.cause),
+                      ("Tests of Equality (means, medians, variances)", lambda: self.run_text(f'bundle ev_te = ev_testequal("{" ".join(self.members())}", dataset)')),
+                      ("Cross Correlation (first two series)", lambda: self.run_text(f"matrix ev_xc = ev_xcorr({self.members()[0]}, {self.members()[1]}, 12)")),
+                      ("N-Way Tabulation", lambda: self.run_text(f"xtab {' '.join(self.members())}")),
                       ("Principal Components", lambda: self.run_text(f'bundle ev_pc = ev_pcomp("{" ".join(self.members())}", dataset)'))]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
@@ -499,7 +505,10 @@ class EquationWindow(ObjectWindow):
                       ("Stability Diagnostics: Recursive Estimates (CUSUM)...", self.rls),
                       ("Stability Diagnostics: Quandt-Andrews Breakpoint Test", lambda: self.run_text(f"bundle ev_qa = ev_ubreak({name})")),
                       ("Residual Diagnostics: Correlogram - Q-statistics...", self.rescorr),
-                      ("Coefficient Diagnostics: Variance Inflation Factors", lambda: self.run_text(f"matrix ev_vf = ev_vif({name})"))]),
+                      ("Coefficient Diagnostics: Variance Inflation Factors", lambda: self.run_text(f"matrix ev_vf = ev_vif({name})")),
+                      ("Coefficient Diagnostics: Confidence Ellipse (C(1), C(2))", lambda: self.run_plot_png(f"matrix ev_el = ev_ellipse({name}, 1, 2, 0.95, \"@PNG\")")),
+                      ("Stability Diagnostics: Influence Statistics", lambda: self.run_text(f"matrix ev_is = ev_influence({name})")),
+                      ("Covariance Matrix", lambda: self.run_text(f"ev_covprint({name})"))]),
             ("Proc", [("Make Residual Series...", lambda: self.make("resid")),
                       ("Make Fitted Series...", lambda: self.make("fit"))]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
@@ -545,6 +554,14 @@ class EquationWindow(ObjectWindow):
                 return
             fn = "ev_resid" if kind == "resid" else "ev_fit"
             self.main.execute(f"series {n.strip()} = {fn}({self.name})", hansl=True)
+
+    def run_plot_png(self, cmd):
+        png = self.main.engine.tmp_png()
+        try:
+            self.main.engine.run(cmd.replace("@PNG", png), check=True)
+            self.show_image(png)
+        except GretlError as e:
+            self.main.error(str(e))
 
     def rescorr(self):
         k, ok = QInputDialog.getInt(self, "Correlogram Specification", "Lags to include:", 12, 1, 100)
@@ -725,7 +742,8 @@ class VarWindow(ObjectWindow):
                       ("Lag Structure: AR Roots Table", lambda: self.var_view(f"matrix ev_vroots = ev_varroots({name})")),
                       ("Residual Tests: Serial Correlation LM...", self.var_lm),
                       ("Residual Tests: Normality (Cholesky)", lambda: self.var_view(f"bundle ev_n = ev_varnorm({name})")),
-                      ("Residual Tests: White Heteroskedasticity (No Cross Terms)", lambda: self.var_view(f"bundle ev_w = ev_varwhite({name})"))]),
+                      ("Residual Tests: White Heteroskedasticity (No Cross Terms)", lambda: self.var_view(f"bundle ev_w = ev_varwhite({name})")),
+                      ("Historical Decomposition", lambda: self.var_view(f"bundle ev_hd = ev_varhist({name})"))]),
             ("Proc", [("Make Residuals", self.make_resids),
                       ("Forecast...", self.var_forecast),
                       ("Estimate Structural Factorization...", self.svar)]),

@@ -417,8 +417,7 @@ class Phase2Series(unittest.TestCase):
                           "series pc2 = ev_pcscore(g_pc, 2)"])
         translate_line("pagestruct id @date(t)", c)
         self.assertEqual(translate_line("x.uroot(hadri)", c), ['bundle x_pur = ev_panelur(x, "hadri", 0, 1)'])
-        with self.assertRaises(ValueError):
-            translate_line("x.uroot(breit)", c)
+        self.assertEqual(translate_line("x.uroot(breit)", c), ["bundle x_pur = ev_breitung(x, 0)"])
 
 
 class Phase2Data(unittest.TestCase):
@@ -509,6 +508,25 @@ class Phase3Estimators(unittest.TestCase):
         translate_line("pagestruct id @date(t)", c)
         self.assertEqual(translate_line("equation ep.tsls(cx=f) y c x @ c z", c), ['bundle ep = ev_paneliv("y c x @ c z", dataset, "fixed")'])
         self.assertEqual(translate_line("equation er.ls(cx=r, per=r) y c x", c), ['bundle er = ev_panelre2("y c x", dataset, 1)'])
+
+
+class Phase3Views(unittest.TestCase):
+    def test_views(self):
+        c = Ctx()
+        translate_line("equation e.ls y c x", c)
+        self.assertEqual(translate_line("e.infstats", c), ["matrix e_inf = ev_influence(e)"])
+        self.assertEqual(translate_line("e.cellipse c(1), c(2)", c), ["matrix e_ell = ev_ellipse(e, 1, 2, 0.95)"])
+        self.assertEqual(translate_line("e.coefcov", c), ["ev_covprint(e)"])
+        self.assertEqual(translate_line("y.vratio(per=2 4)", c), ['matrix y_vr = ev_vratio(y, "2 4")'])
+        self.assertEqual(translate_line("y.ets ysm", c), ['bundle y_ets = ev_ets(y, "auto")', "series ysm = y_ets.fitted"])
+        translate_line("group g y x", c)
+        self.assertEqual(translate_line("g.testbet", c), ['bundle g_eq = ev_testequal("y x", dataset)'])
+        self.assertEqual(translate_line("g.cross(8)", c), ["matrix g_xc = ev_xcorr(y, x, 8)"])
+        self.assertEqual(translate_line("g.freq", c), ["xtab y x"])
+        translate_line("var v.ls 1 2 y x", c)
+        self.assertEqual(translate_line("v.hdecomp", c), ["bundle v_hd = ev_varhist(v)"])
+        translate_line("pagestruct id @date(t)", c)
+        self.assertEqual(translate_line("z.uroot(breit)", c), ["bundle z_pur = ev_breitung(z, 0)"])
 
 
 class Structure(unittest.TestCase):

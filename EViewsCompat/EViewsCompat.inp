@@ -8192,6 +8192,514 @@ function bundle ev_panelre2 (string spec "Equation, e.g. y c x", list vars "Seri
 end function
 
 # -------------------------------------------------------------------
+# Phase 3 views and tests
+# -------------------------------------------------------------------
+
+function matrix ev_influence (bundle b "ev_ls result", bool quiet[0])
+    # RStudent, DFFITS, COVRATIO, hat values and DFBETAS (EViews Influence Statistics)
+    errorif(!inbundle(b, "X"), "Influence statistics need a least squares equation (ev_ls)")
+    matrix X = b.X
+    matrix e = b.uhat
+    scalar n = rows(X)
+    scalar k = cols(X)
+    matrix XXi = inv(X'X)
+    matrix h = sumr((X * XXi) .* X)
+    scalar s2 = e'e / (n - k)
+    matrix s2i = ((n - k) * s2 - e.^2 ./ (1 - h)) / (n - k - 1)     # variance without observation i
+    matrix rst = e ./ sqrt(s2i .* (1 - h))
+    matrix dff = rst .* sqrt(h ./ (1 - h))
+    matrix cvr = (s2i / s2).^k ./ (1 - h)
+    matrix DB = zeros(n, k)
+    matrix C = X * XXi
+    loop i = 1..n
+        DB[i,] = C[i,] * e[i] / (1 - h[i]) ./ sqrt(s2i[i] * diag(XXi)')
+    endloop
+    matrix R = rst ~ dff ~ cvr ~ h ~ DB
+    strings cn = defarray("RStudent", "DFFITS", "COVRATIO", "Hat Matrix")
+    loop j = 1..k
+        cn += "DFBETAS " ~ b.labels[j]
+    endloop
+    cnameset(R, cn)
+    if !quiet
+        printf "\nInfluence Statistics\nEquation: %s\n\n", b.spec
+        printf "%-10s%12s%12s%12s%12s\n", "obs", "RStudent", "DFFITS", "COVRATIO", "Hat"
+        loop i = 1..n
+            printf "%-10s%12.6f%12.6f%12.6f%12.6f\n", obslabel(b.tobs[i]), rst[i], dff[i], cvr[i], h[i]
+        endloop
+    endif
+    return R
+end function
+
+function matrix ev_ellipse (bundle b "Estimated equation", int i[1::1], int j[1::2], scalar level[0.95],
+                            string out[null] "Graph file (default: display; none: no graph)")
+    # boundary of the joint confidence region of coefficients i and j (F-based, as EViews)
+    matrix c = b.coeff[i] | b.coeff[j]
+    matrix V = b.vcv[{i, j}, {i, j}]
+    scalar df2 = inbundle(b, "T") ? b.T - b.k : 1e6
+    scalar r2 = 2 * critical(F, 2, df2, 1 - level)
+    matrix L = cholesky(V)
+    matrix ang = seq(0, 200)' * 2 * $pi / 200
+    matrix P = (L * (cos(ang) ~ sin(ang))' * sqrt(r2))' .+ c'
+    cnameset(P, defarray(b.labels[i], b.labels[j]))
+    string o = exists(out) ? out : "display"
+    if o != "none"
+        gnuplot 2 1 --matrix=P --with-lines --output="@o"
+    endif
+    return P
+end function
+
+function void ev_covprint (bundle b "Estimated equation")
+    # EViews View > Covariance Matrix
+    printf "\nCoefficient Covariance Matrix\n%14s", ""
+    strings lb = inbundle(b, "labels") ? b.labels : b.clabels
+    loop j = 1..b.k
+        printf "%14s", lb[j]
+    endloop
+    printf "\n"
+    loop i = 1..b.k
+        printf "%-14s", lb[i]
+        loop j = 1..b.k
+            printf "%14.6g", b.vcv[i, j]
+        endloop
+        printf "\n"
+    endloop
+end function
+
+function matrix ev_gradients (bundle b "ev_ls result", bool quiet[0])
+    # gradients of the sum of squares at the estimates (-2 X'e): zero at an interior optimum
+    errorif(!inbundle(b, "X"), "Gradients need a least squares equation (ev_ls)")
+    matrix g = -2 * b.X' * b.uhat
+    if !quiet
+        printf "\nGradients of the objective function at the estimates\n"
+        loop i = 1..rows(g)
+            printf "%-26s%16.6g\n", b.labels[i], g[i]
+        endloop
+    endif
+    return g
+end function
+
+# --- Breitung panel unit root test
+
+function bundle ev_breitung (series x "Series of a balanced panel page", int lag[0::0] "Prewhitening lags",
+                             bool quiet[0])
+    errorif($datatype != 3, "The Breitung test needs a panel page")
+    set skip_missing off
+    matrix M = ev_unstack(x)
+    scalar N = cols(M)
+    matrix dys = {}
+    matrix yls = {}
+    loop i = 1..N
+        matrix y = M[, i]
+        y = selifr(y, ok(y))
+        scalar T = rows(y)
+        matrix dy = y[2:T] - y[1:T-1]
+        matrix yl = y[1:T-1]
+        # prewhitening: remove the lagged differences, scale by the residual s.d.
+        scalar s = sdc(dy)
+        if lag > 0
+            matrix Z = {}
+            loop j = 1..lag
+                Z ~= mlag(dy, j, NA)
+            endloop
+            matrix ok1 = sumr(!ok(Z)) .= 0
+            matrix d1 = selifr(dy, ok1)
+            matrix l1 = selifr(yl, ok1)
+            matrix Zs = selifr(Z, ok1)
+            matrix e1 = d1 - Zs * mols(d1, Zs)
+            matrix e2 = l1 - Zs * mols(l1, Zs)
+            s = sdc(d1 - (l1 ~ Zs) * mols(d1, l1 ~ Zs))
+            dy = e1
+            yl = e2
+        endif
+        dy = dy / s
+        yl = yl / s
+        scalar Tn = rows(dy)
+        # forward orthogonal deviations of the differences; levels relative to the first value
+        matrix dst = zeros(Tn - 1, 1)
+        matrix lst = zeros(Tn - 1, 1)
+        loop t = 1..Tn - 1
+            scalar m = meanc(dy[t + 1:Tn])
+            scalar st = sqrt((Tn - t) / (Tn - t + 1))
+            dst[t] = st * (dy[t] - m)
+            lst[t] = yl[t] - yl[1]          # levels relative to the initial value
+        endloop
+        dys |= dst
+        yls |= lst
+    endloop
+    scalar rho = (yls'dys) / (yls'yls)
+    matrix e = dys - rho * yls
+    scalar se = sqrt((e'e / rows(e)) / (yls'yls))
+    bundle r
+    r.stat = rho / se
+    r.p = cnorm(r.stat)
+    if !quiet
+        printf "\nBreitung Panel Unit Root Test\nNull Hypothesis: Unit root (common unit root process)\nCross-sections: %d\n\n", N
+        printf "%-30s%14s%10s\n", "Method", "Statistic", "Prob.**"
+        printf "%-30s%14.6f%10.4f\n", "Breitung t-stat", r.stat, r.p
+        printf "** Probability from the standard normal distribution (left tail)\n"
+    endif
+    return r
+end function
+
+# --- ETS exponential smoothing (state space, additive errors, ML / AIC selection)
+
+function matrix ev__etsrun (const matrix th, const matrix y, string mdl, scalar s)
+    # mdl: ANN, AAN, AAdN, ANA, AAA; th = [alpha, beta, gamma, phi, l0, b0, s0 (s-1)] on logit scales where bounded
+    scalar T = rows(y)
+    scalar a = 1 / (1 + exp(-th[1]))
+    scalar bt = 1 / (1 + exp(-th[2])) * a
+    scalar g = 1 / (1 + exp(-th[3])) * (1 - a)
+    scalar ph = 0.8 + 0.18 / (1 + exp(-th[4]))
+    scalar trend = instring(mdl, "AA")
+    scalar damped = mdl == "AAdN"
+    scalar seas = substr(mdl, strlen(mdl), strlen(mdl)) == "A" && mdl != "AAN"
+    scalar l = th[5]
+    scalar b = trend ? th[6] : 0
+    matrix S = zeros(s, 1)
+    if seas
+        S[1:s-1] = th[7:5 + s]
+        S[s] = -sumc(S[1:s-1])
+    endif
+    matrix F = zeros(T, 1)
+    loop t = 1..T
+        scalar k = (t - 1) % s + 1
+        scalar phb = damped ? ph * b : b
+        scalar f = l + (trend ? phb : 0) + (seas ? S[k] : 0)
+        F[t] = f
+        scalar e = y[t] - f
+        scalar lold = l
+        l = l + (trend ? phb : 0) + a * e
+        if trend
+            b = phb + bt * e
+        endif
+        if seas
+            S[k] = S[k] + g * e
+        endif
+    endloop
+    return F
+end function
+
+function scalar ev__etsll (const matrix th, const matrix y, string mdl, scalar s)
+    matrix F = ev__etsrun(th, y, mdl, s)
+    scalar T = rows(y)
+    scalar sse = sumc((y - F).^2)
+    scalar r = -T / 2 * (1 + log(2 * $pi) + log(sse / T))
+    return ok(r) ? r : -1e100
+end function
+
+function bundle ev_ets (series x "Series", string model[null] "ANN, AAN, AAdN, ANA, AAA or auto (AIC)",
+                        bool quiet[0])
+    set skip_missing off
+    matrix y = {x}
+    errorif(sumc(!ok(y)) > 0, "The series has missing values in the sample")
+    scalar s = $pd
+    string req = exists(model) ? toupper(model) : "AUTO"
+    strings cand = defarray(req)
+    if req == "AUTO"
+        cand = s > 1 ? defarray("ANN", "AAN", "AAdN", "ANA", "AAA") : defarray("ANN", "AAN", "AAdN")
+    endif
+    scalar best = 1e300
+    bundle r
+    loop i = 1..nelem(cand)
+        string mdl = cand[i]
+        matrix th = {0; -1; -1; 0; y[1]; (y[min(rows(y), s + 1)] - y[1]) / s}
+        if s > 1
+            th |= zeros(s - 1, 1)
+        else
+            th |= 0
+        endif
+        set max_verbose off
+        catch scalar ll = BFGSmax(&th, "ev__etsll(th, y, mdl, s)")
+        if $error
+            ll = ev__etsll(th, y, mdl, s)
+        endif
+        # parameters: smoothing (alpha, beta, gamma, phi) + initial states
+        scalar np = 1 + instring(mdl, "AA") + (mdl == "AAdN") + (mdl == "ANA" || mdl == "AAA") + 1 + instring(mdl, "AA") + ((mdl == "ANA" || mdl == "AAA") ? s - 1 : 0)
+        scalar aic = -2 * ll + 2 * (np + 1)
+        if aic < best
+            best = aic
+            matrix F = ev__etsrun(th, y, mdl, s)
+            r.model = mdl
+            r.lnl = ll
+            r.aic = aic
+            r.alpha = 1 / (1 + exp(-th[1]))
+            r.beta = 1 / (1 + exp(-th[2])) * r.alpha
+            r.gamma = 1 / (1 + exp(-th[3])) * (1 - r.alpha)
+            r.phi = 0.8 + 0.18 / (1 + exp(-th[4]))
+            r.fitted = F
+            r.sse = sumc((y - F).^2)
+        endif
+        if !quiet
+            printf "ETS(%s): log likelihood %.4f, AIC %.4f\n", mdl, ll, aic
+        endif
+    endloop
+    if !quiet
+        printf "\nSelected model: ETS(%s)   alpha %.4f%s%s%s\n", r.model, r.alpha, \
+          instring(r.model, "AA") ? sprintf("   beta %.4f", r.beta) : "", r.model == "AAdN" ? sprintf("   phi %.4f", r.phi) : "", \
+          (r.model == "ANA" || r.model == "AAA") ? sprintf("   gamma %.4f", r.gamma) : ""
+        printf "Sum squared one-step errors %.6f\n", r.sse
+    endif
+    return r
+end function
+
+# --- equality tests across the series of a group; variance ratio; BDS; spectrum; cross-correlations
+
+function bundle ev_testequal (string names "Series, e.g. x1 x2 x3", list vars "Series used (e.g. dataset)", bool quiet[0])
+    # equality of means (ANOVA F), medians (Kruskal-Wallis) and variances (Bartlett, Levene) across series
+    strings tok = strsplit(names)
+    scalar g = nelem(tok)
+    matrix V = {}
+    matrix G = {}
+    set skip_missing off
+    loop i = 1..g
+        series evq_x = ev_gen(tok[i], vars)
+        matrix v = {evq_x}
+        v = selifr(v, ok(v))
+        V |= v
+        G |= i * ones(rows(v), 1)
+    endloop
+    scalar n = rows(V)
+    scalar gm = meanc(V)
+    scalar ssb = 0
+    scalar ssw = 0
+    scalar sp = 0
+    scalar bart = 0
+    matrix ni = zeros(g, 1)
+    matrix vi = zeros(g, 1)
+    loop i = 1..g
+        matrix v = selifr(V, G .= i)
+        ni[i] = rows(v)
+        vi[i] = sdc(v)^2 * ni[i] / (ni[i] - 1)
+        ssb += ni[i] * (meanc(v) - gm)^2
+        ssw += sumc((v - meanc(v)).^2)
+    endloop
+    bundle r
+    r.F = (ssb / (g - 1)) / (ssw / (n - g))
+    r.Fp = pvalue(F, g - 1, n - g, r.F)
+    # Kruskal-Wallis on ranks
+    matrix rk = ranking(V)
+    scalar H = 0
+    loop i = 1..g
+        H += sumc(selifr(rk, G .= i))^2 / ni[i]
+    endloop
+    r.KW = 12 / (n * (n + 1)) * H - 3 * (n + 1)
+    r.KWp = pvalue(c, g - 1, r.KW)
+    # Bartlett
+    scalar s2p = sumc((ni - 1) .* vi) / (n - g)
+    scalar num = (n - g) * log(s2p) - sumc((ni - 1) .* log(vi))
+    scalar den = 1 + (sumc(1 ./ (ni - 1)) - 1 / (n - g)) / (3 * (g - 1))
+    r.bartlett = num / den
+    r.bartlettp = pvalue(c, g - 1, r.bartlett)
+    # Levene (absolute deviations from the group means)
+    matrix z = zeros(n, 1)
+    loop t = 1..n
+        scalar gi = G[t]
+        z[t] = abs(V[t] - meanc(selifr(V, G .= gi)))
+    endloop
+    scalar zm = meanc(z)
+    scalar zb = 0
+    scalar zw = 0
+    loop i = 1..g
+        matrix zi = selifr(z, G .= i)
+        zb += ni[i] * (meanc(zi) - zm)^2
+        zw += sumc((zi - meanc(zi)).^2)
+    endloop
+    r.levene = (zb / (g - 1)) / (zw / (n - g))
+    r.levenep = pvalue(F, g - 1, n - g, r.levene)
+    if !quiet
+        printf "\nTest for Equality of Means, Medians and Variances Between Series\nIncluded observations: %d\n\n", n
+        printf "%-28s%8s%14s%10s\n", "Method", "df", "Value", "Prob."
+        printf "%-28s%8s%14.6f%10.4f\n", "Anova F-test (means)", sprintf("(%d, %d)", g - 1, n - g), r.F, r.Fp
+        printf "%-28s%8d%14.6f%10.4f\n", "Kruskal-Wallis (medians)", g - 1, r.KW, r.KWp
+        printf "%-28s%8d%14.6f%10.4f\n", "Bartlett (variances)", g - 1, r.bartlett, r.bartlettp
+        printf "%-28s%8s%14.6f%10.4f\n", "Levene (variances)", sprintf("(%d, %d)", g - 1, n - g), r.levene, r.levenep
+    endif
+    return r
+end function
+
+function matrix ev_vratio (series x "Series (levels, e.g. log prices)", string periods[null] "Periods, e.g. 2 4 8 16",
+                           bool quiet[0])
+    # Lo-MacKinlay variance ratio test of a random walk: homoskedastic and heteroskedasticity-robust z
+    set skip_missing off
+    matrix p = {x}
+    p = selifr(p, ok(p))
+    matrix r = p[2:] - p[1:rows(p)-1]
+    scalar n = rows(r)
+    scalar mu = meanc(r)
+    scalar s1 = sumc((r - mu).^2) / (n - 1)
+    strings pt = strsplit(exists(periods) ? periods : "2 4 8 16")
+    matrix R = {}
+    loop i = 1..nelem(pt)
+        scalar q = atof(pt[i])
+        matrix rq = p[q + 1:] - p[1:rows(p) - q]
+        scalar m = q * (n - q + 1) * (1 - q / n)
+        scalar sq = sumc((rq - q * mu).^2) / m
+        scalar vr = sq / s1
+        scalar zh = (vr - 1) / sqrt(2 * (2 * q - 1) * (q - 1) / (3 * q * n))
+        scalar th = 0
+        matrix d = (r - mu).^2
+        loop j = 1..q - 1
+            scalar dl = (d[j+1:n]'d[1:n-j]) / (d'd)^2 * n
+            th += (2 * (q - j) / q)^2 * dl
+        endloop
+        scalar zr = (vr - 1) / sqrt(th)
+        R |= {q, vr, zh, 2 * cnorm(-abs(zh)), zr, 2 * cnorm(-abs(zr))}
+    endloop
+    cnameset(R, defarray("Period", "Var. Ratio", "z (homosk.)", "Prob.", "z (heterosk.)", "Prob."))
+    if !quiet
+        printf "\nVariance Ratio Test (Lo-MacKinlay)\nNull Hypothesis: the series is a random walk\nObservations: %d\n\n", n + 1
+        printf "%8s%12s%14s%10s%16s%10s\n", "Period", "Var. Ratio", "z (homosk.)", "Prob.", "z (heterosk.)", "Prob."
+        loop i = 1..rows(R)
+            printf "%8d%12.6f%14.6f%10.4f%16.6f%10.4f\n", R[i, 1], R[i, 2], R[i, 3], R[i, 4], R[i, 5], R[i, 6]
+        endloop
+    endif
+    return R
+end function
+
+function matrix ev_xcorr (series x, series y, int k[1::12] "Lags and leads", bool quiet[0])
+    # correlations of x(t) with y(t-j), j = -k..k (EViews cross correlogram: lag and lead columns)
+    set skip_missing off
+    matrix D = {x} ~ {y}
+    D = selifr(D, sumr(!ok(D)) .= 0)
+    scalar n = rows(D)
+    matrix a = D[, 1] - meanc(D[, 1])
+    matrix b = D[, 2] - meanc(D[, 2])
+    scalar den = sqrt((a'a) * (b'b))
+    matrix R = zeros(k + 1, 3)
+    loop j = 0..k
+        R[j + 1, 1] = j
+        R[j + 1, 2] = (a[j+1:n]'b[1:n-j]) / den     # x(t), y(t-j): lag
+        R[j + 1, 3] = (b[j+1:n]'a[1:n-j]) / den     # x(t), y(t+j): lead
+    endloop
+    cnameset(R, defarray("i", "lag", "lead"))
+    if !quiet
+        printf "\nCross Correlogram\nIncluded observations: %d\nCorrelations are asymptotically consistent approximations\n\n", n
+        printf "%6s%14s%14s\n", "i", "x,y(-i) lag", "x,y(+i) lead"
+        loop j = 1..k + 1
+            printf "%6d%14.4f%14.4f\n", R[j, 1], R[j, 2], R[j, 3]
+        endloop
+    endif
+    return R
+end function
+
+function matrix ev_spectrum (series x, int window[0::0] "Bartlett window size (0: raw periodogram)",
+                             string out[null] "Graph file (default: display; none: no graph)")
+    matrix P = {}
+    if window > 0
+        P = pergm(x, window)
+    else
+        P = pergm(x)
+    endif
+    cnameset(P, defarray("Frequency", "Spectral density"))
+    string o = exists(out) ? out : "display"
+    if o != "none"
+        gnuplot 2 1 --matrix=P --with-lines --output="@o"
+    endif
+    return P
+end function
+
+# --- VAR historical decomposition
+
+function bundle ev_varhist (bundle v "ev_varest result", bool quiet[0])
+    # contribution of each Cholesky shock to each variable; the rest is the base projection
+    matrix U = v.sys.uhat
+    scalar T = rows(U)
+    scalar n = cols(U)
+    matrix P = cholesky(v.sys.sigma)
+    matrix E = U * inv(P')                     # structural shocks
+    matrix A = v.sys.A
+    scalar np = rows(A)
+    matrix J = I(n) ~ zeros(n, np - n)
+    matrices Th = array(T)
+    matrix Ap = I(np)
+    loop h = 1..T
+        Th[h] = J * Ap * J' * P
+        Ap = Ap * A
+    endloop
+    matrix C = zeros(T, n * n)                 # column (s-1)*n + i: shock s on variable i
+    loop t = 1..T
+        loop jj = 1..t
+            matrix th = Th[t - jj + 1]
+            C[t,] = C[t,] + vec(th .* E[jj,])'
+        endloop
+    endloop
+    matrix Y = v.sys.Y
+    matrix base = Y
+    loop i = 1..n
+        loop s = 1..n
+            base[, i] = base[, i] - C[, (s - 1) * n + i]
+        endloop
+    endloop
+    bundle r
+    r.contrib = C
+    r.base = base
+    r.actual = Y
+    r.tobs = seq(v.sys.t1, v.sys.t2)'
+    if !quiet
+        printf "\nHistorical decomposition (Cholesky shocks), %s\n", v.sample
+        printf "Last observation, contributions of each shock:\n%-16s%14s", "Variable", "Base"
+        loop s = 1..n
+            printf "%14s", "Shock " ~ v.ylab[s]
+        endloop
+        printf "\n"
+        loop i = 1..n
+            printf "%-16s%14.6f", v.ylab[i], base[T, i]
+            loop s = 1..n
+                printf "%14.6f", C[T, (s - 1) * n + i]
+            endloop
+            printf "\n"
+        endloop
+    endif
+    return r
+end function
+
+# --- system residual tests and model fit tables
+
+function bundle ev_sysrestests (bundle s "ev_system result", bool quiet[0])
+    # residual correlation matrix and Cholesky-orthogonalised normality test (as VAR)
+    matrix U = s.uhat
+    matrix C = mcorr(U)
+    bundle v = _(sys = _(uhat = U))
+    bundle nm = ev_varnorm(v, 1)
+    bundle r
+    r.corr = C
+    r.jb = nm.jb_joint
+    r.jbp = nm.jb_p
+    if !quiet
+        printf "\nSystem Residual Correlation Matrix\n"
+        print C
+        printf "System Residual Normality Test (Cholesky): Jarque-Bera %.6f (df %d), Prob. %.4f\n", r.jb, 2 * cols(U), r.jbp
+    endif
+    return r
+end function
+
+function matrix ev_modelfit (bundle ms "ev_modelsolve result", bool quiet[0])
+    # RMSE, MAE, MAPE and Theil U of the solution against the actual values
+    matrix S = ms.sol
+    matrix A = ms.actual
+    scalar m = cols(S)
+    matrix R = zeros(m, 4)
+    loop k = 1..m
+        matrix ok1 = ok(S[, k]) .* ok(A[, k])
+        matrix s = selifr(S[, k], ok1)
+        matrix a = selifr(A[, k], ok1)
+        matrix e = a - s
+        R[k, 1] = sqrt(meanc(e.^2))
+        R[k, 2] = meanc(abs(e))
+        R[k, 3] = 100 * meanc(abs(e ./ a))
+        R[k, 4] = sqrt(meanc(e.^2)) / (sqrt(meanc(a.^2)) + sqrt(meanc(s.^2)))
+    endloop
+    cnameset(R, defarray("RMSE", "MAE", "MAPE", "Theil U"))
+    if !quiet
+        printf "\nModel solution fit (%s)\n%-16s%14s%14s%14s%14s\n", ms.sample, "Variable", "RMSE", "MAE", "MAPE", "Theil U"
+        loop k = 1..m
+            printf "%-16s%14.6f%14.6f%14.4f%14.6f\n", ms.names[k], R[k, 1], R[k, 2], R[k, 3], R[k, 4]
+        endloop
+    endif
+    return R
+end function
+
+# -------------------------------------------------------------------
 # Panel least squares on a panel page: ls(cx=f|r, per=f)
 # -------------------------------------------------------------------
 

@@ -886,7 +886,8 @@ def _uroot(series: str, opts: str | None, ctx: Ctx) -> list[str]:
             "hqc": " --test-down=tstat", "tstat": " --test-down=tstat"}.get(info, "")
     if ctx.panel and ({"adf", "pp", "hadri", "fisher", "breit"} & o.keys()):
         if "breit" in o:
-            raise ValueError("the Breitung panel test is not available (use llc, ips, adf, pp or hadri)")
+            lg = o.get("lag", "0") if o.get("lag", "0").isdigit() else "0"
+            return [f"bundle {x}_pur = ev_breitung({x}, {lg})"]
         kind = "hadri" if "hadri" in o else ("fisherpp" if "pp" in o else "fisher")
         lg = o.get("lag", "1") if o.get("lag", "1").isdigit() else "1"
         return [f'bundle {x}_pur = ev_panelur({x}, "{kind}", {int("trend" in o)}, {lg})']
@@ -1516,6 +1517,49 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if ty not in ("bpg", "harvey", "glejser", "arch", "white"):
             raise ValueError(f"hettest type {ty} not supported")
         return [f'bundle {o}_het = ev_hettest({o}, "{ty}", {nl})']
+    if ml == "infstats" and ctx.equations.get(o, "ls") == "ls":
+        return [f"matrix {o}_inf = ev_influence({o})"]
+    if ml == "cellipse":
+        cs = [int(x) for x in re.findall(r"(?i)c\(\s*(\d+)\s*\)", args)] or [1, 2]
+        f = _plot_file_arg(ctx)
+        return [f"matrix {o}_ell = ev_ellipse({o}, {cs[0]}, {cs[1] if len(cs) > 1 else 2}, 0.95{f})"]
+    if ml == "coefcov":
+        return [f"ev_covprint({o})"]
+    if ml == "grads" and ctx.equations.get(o, "ls") == "ls":
+        return [f"matrix {o}_grad = ev_gradients({o})"]
+    if ml == "ets":
+        outn = args.split()[0] if args.strip() else ""
+        m = _opts(opts).get("model", "auto")
+        out = [f'bundle {o}_ets = ev_ets({o}, "{m}")']
+        if outn:
+            out.append(f"series {translate_name(outn, ctx)} = {o}_ets.fitted")
+        return out
+    if ml == "vratio":
+        per = " ".join(re.findall(r"\d+", _opts(opts).get("per", ""))) or "2 4 8 16"
+        return [f'matrix {o}_vr = ev_vratio({o}, "{per}")']
+    if ml == "bdstest":
+        m = _opts(opts).get("m", "6")
+        return [f"bds {m} {o}"]
+    if ml == "spectrum":
+        return [f"matrix {o}_spec = ev_spectrum({o}, 0{_plot_file_arg(ctx)})"]
+    if ml == "testbet" and o in ctx.groups:
+        return [f'bundle {o}_eq = ev_testequal("{" ".join(ctx.groups[o])}", dataset)']
+    if ml == "cross" and o in ctx.groups:
+        g = ctx.groups[o]
+        if len(g) < 2:
+            raise ValueError("cross correlogram needs two series")
+        k = (opts or "12").strip() or "12"
+        return [f"matrix {o}_xc = ev_xcorr({g[0]}, {g[1]}, {k})"]
+    if ml == "freq" and o in ctx.groups:
+        return [f"xtab {' '.join(ctx.groups[o])}"]
+    if ml == "freq":
+        return [f"freq {o}"]
+    if ml == "hdecomp" and ctx.equations.get(o) == "var":
+        return [f"bundle {o}_hd = ev_varhist({o})"]
+    if ml in ("correl", "rescorr") and ctx.equations.get(o) == "system":
+        return [f"bundle {o}_rt = ev_sysrestests({o})"]
+    if ml == "msg" and o in ctx.models:
+        return [f"matrix {o}_fit = ev_modelfit({o})"]
     if ml in ("correlogram", "correlsq") and ctx.equations.get(o, "ls") in ("ls", "tsls", "ardl", "cointreg"):
         k = (opts or args or "12").strip() or "12"
         return [f"matrix {o}_corr = ev_rescorr({o}, {k}, {int(ml == 'correlsq')})"]

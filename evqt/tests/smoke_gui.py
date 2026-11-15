@@ -472,6 +472,13 @@ w.execute("equation ebrk.breakls(maxbreaks=2) dlog(cons) c")
 w.open_object(("ebrk", "equation"))
 check("Breaks" in w.windows["ebrk"].text.toPlainText() or "Least Squares with Breaks" in w.windows["ebrk"].text.toPlainText(), "breakpoint LS window")
 
+ew.run_text("matrix ev_is = ev_influence(eqls)")
+check("Influence Statistics" in ew.text.toPlainText(), "equation view: influence statistics")
+ew.run_plot_png('matrix ev_el = ev_ellipse(eqls, 1, 2, 0.95, "@PNG")')
+check(ew.stack.currentWidget() is ew._scroll, "equation view: confidence ellipse")
+vw2.var_view("bundle ev_hd = ev_varhist(vtest)")
+check("Historical decomposition" in vw2.text.toPlainText(), "VAR view: historical decomposition")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
 if failures:

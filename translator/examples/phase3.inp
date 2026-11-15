@@ -42,3 +42,23 @@ smpl full
 smpl 1970:1 2019:4
 bundle ELAS = ev_enet("DC c DG FFR DG(-1) DC(-1)", dataset, 1, NA)
 
+# T13, T14, T16: influence statistics, confidence ellipse, coefficient covariance
+smpl full
+smpl 1970:1 2019:4
+bundle E1 = ev_ls("DC c DG", dataset)
+matrix E1_inf = ev_influence(E1)
+matrix E1_ell = ev_ellipse(E1, 1, 2, 0.95)
+ev_covprint(E1)
+# S11, S13, S14, G8: ETS, equality tests, variance ratio, cross correlogram
+bundle LGD_ets = ev_ets(LGD, "auto")
+series LGD_FIT = LGD_ets.fitted
+list GT = DC DG
+bundle GT_eq = ev_testequal("DC DG", dataset)
+matrix GT_xc = ev_xcorr(DC, DG, 4)
+matrix LGD_vr = ev_vratio(LGD, "2 4 8")
+# V11: historical decomposition
+smpl full
+smpl 1985:1 2015:4
+bundle V1 = ev_varest("1 2 DC DG @ c", dataset, 0, "dc dg")
+bundle V1_hd = ev_varhist(V1)
+

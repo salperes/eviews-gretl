@@ -1,0 +1,103 @@
+# Phase 3 views and tests
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+smpl 1970:1 2019:4
+bundle e = ev_ls("dlog(CONS) c dlog(GDP)", dataset, null, 1)
+# --- T13 influence statistics vs gretl leverage
+matrix IF = ev_influence(e, 1)
+ols dc const dg --quiet
+leverage --save --quiet
+check("hat values = gretl leverage", IF[5, 4], lever[1971:1], 1e-8)
+check("DFFITS = gretl dffits", IF[5, 2], dffits[1971:1], 1e-6)
+# --- T14 confidence ellipse: boundary points satisfy the F quadratic form
+matrix EL = ev_ellipse(e, 1, 2, 0.95, "none")
+matrix dv = EL[17,] - e.coeff'
+check("ellipse boundary: (b-c)' inv(V) (b-c) = 2 F", qform(dv, inv(e.vcv)), 2 * critical(F, 2, e.T - e.k, 0.05), 1e-8)
+# --- T16 gradients at the OLS optimum are zero
+matrix gr = ev_gradients(e, 1)
+check("gradients at the estimates are zero", maxc(abs(gr)), 0, 1e-8)
+# --- S13 equality of means = gretl anova
+bundle te = ev_testequal("dlog(CONS) dlog(GDP)", dataset, 0)
+matrix st = {dc} | {dg}
+matrix gidx = ones(rows({dc}), 1) | 2 * ones(rows({dg}), 1)
+scalar nst = rows(st)
+nulldata nst --preserve
+series ys = st
+series gi = gidx
+anova ys gi --quiet
+check("ANOVA F (equality of means) = gretl anova", te.F, $test, 1e-6)
+# --- S14 variance ratio of a random walk is near one
+nulldata 2000
+set seed 41
+series rw = cum(normal())
+matrix VR = ev_vratio(rw, "2 4 8", 1)
+check("variance ratio of a random walk (q = 4) near 1", VR[2, 2], 1, 0.1)
+# --- S15 spectrum and G8 cross correlations
+matrix SP = ev_spectrum(rw, 0, "none")
+check("periodogram rows", rows(SP) > 0, 1)
+series xa = normal()
+series xb = xa(-2) + 0.1 * normal()
+matrix XC = ev_xcorr(xb, xa, 4, 1)
+check("cross correlation peaks at lag 2", imaxc(XC[, 2]) - 1, 2)
+# --- S7 Breitung: random-walk panel vs stationary panel
+nulldata 300
+set seed 43
+series uid = 1 + floor((obs - 1) / 30)
+series per = 1 + (obs - 1) % 30
+series e1 = normal()
+series rp = 0
+series sp = 0
+loop t = 2..300
+    scalar tm = t - 1
+    if uid[t] == uid[tm]
+        rp[t] = rp[tm] + e1[t]
+        sp[t] = 0.5 * sp[tm] + e1[t]
+    endif
+endloop
+setobs uid per --panel-vars
+bundle b1 = ev_breitung(rp, 0, 1)
+bundle b2 = ev_breitung(sp, 0, 1)
+check("Breitung does not reject for random walks", b1.p > 0.05, 1)
+check("Breitung rejects for stationary AR(1) units", b2.p < 0.01, 1)
+# --- S11 ETS: trending seasonal data selects a trend + seasonal model
+nulldata 120
+setobs 4 1990:1 --time-series
+set seed 47
+series ys = 10 + 0.2 * obs + 3 * ($obsminor == 1) - 2 * ($obsminor == 3) + 0.3 * normal()
+bundle et = ev_ets(ys, "auto", 1)
+check("ETS selects a seasonal model with trend", et.model == "AAA", 1)
+# --- V11 historical decomposition: base + contributions = actual, base = dynamic forecast
+open ../../data/usmacro.gdt --quiet
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+smpl 1985:1 2015:4
+bundle v = ev_varest("1 2 dc dg", dataset, 1)
+bundle hd = ev_varhist(v, 1)
+check("historical decomposition adds up", hd.base[50, 1] + hd.contrib[50, 1] + hd.contrib[50, 3], hd.actual[50, 1], 1e-10)
+smpl 1985:3 2015:4
+bundle fc = ev_varfcast(v, dataset, 1, 1)
+check("base projection = dynamic forecast from the sample start", hd.base[100, 2], fc.fcast[100, 2], 1e-8)
+# --- Y5 and Y8
+smpl 1985:1 2015:4
+bundle sy = ev_system(defarray("dlog(CONS)", "dlog(INV)"), defarray("c dlog(GDP)", "c dlog(GDP)"), defarray("1 2", "3 4"), dataset, "sur", null, 1)
+bundle srt = ev_sysrestests(sy, 1)
+check("system residual correlation matrix is 2 x 2 with unit diagonal", srt.corr[2, 2], 1)
+bundle eq1 = ev_ls("FFR c FFR(-1)", dataset, null, 1)
+smpl 2010:1 2015:4
+strings noid = array(0)
+bundle ms = ev_modelsolve(defarray(eq1), noid, dataset, 1, 1)
+matrix MF = ev_modelfit(ms, 0)
+check("model fit RMSE >= MAE", MF[1, 1] >= MF[1, 2], 1)
