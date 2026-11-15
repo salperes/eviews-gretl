@@ -313,6 +313,37 @@ eqc.afr()
 app.processEvents()
 eqc.parentWidget().grab().save(os.path.join(out, "evqt_afr.png"))
 
+# --- ARCH family: TARCH / EGARCH through the gig package
+w.execute("smpl 1960q1 2019q4")
+w.execute("series r = 100*dlog(gdp)")
+w.execute("equation eqt.arch(1,1,t) r c")
+check("eqt" in w.engine.wf.bundles and w.engine.is_garch("eqt"), "arch(1,1,t) creates a TARCH equation")
+w.open_object(("eqt", "equation"))
+et = w.windows["eqt"]
+check(et.garch and "Variance Equation" in et.text.toPlainText() if hasattr(et, "text") else et.garch,
+      "TARCH equation window shows the variance equation")
+QInputDialog.getText = staticmethod(lambda *a, **k: ("gvar", True))
+et.make("h")
+check("gvar" in w.engine.wf.series, "Make GARCH Variance Series")
+w.execute("equation eqe.arch(1,1,e) r c")
+check("eqe" in w.engine.wf.bundles, "arch(1,1,e) creates an EGARCH equation")
+
+# --- panel page: structure, IPS test and unstack
+PANEL = os.path.join(os.path.dirname(__file__), "..", "..", "data", "panel_demo.csv")
+w.execute("pagecreate(page=pan) u 90")
+w.engine.run(f'clear --dataset\nopen "{os.path.abspath(PANEL)}" --quiet --preserve', check=True)
+w.engine.refresh()
+w.execute("pagestruct ID @date(YEAR)")
+check(w.engine.is_panel(), "pagestruct makes a panel page")
+out = w.engine.run("adf 2 LY --c")
+check(any("W_tbar" in ln for ln in out), "panel unit root test (IPS) on the panel page")
+w.execute('pageunstack(namepat="*_?", page=wide) ID YEAR @ LY')
+check(w.engine.wf.page == "wide" and {"LY_11", "LY_12", "LY_13"} <= set(w.engine.wf.series),
+      "pageunstack: new page with one series per unit")
+check(w.engine.wf.nobs_full == 30, "unstacked page has T = 30 observations")
+w.select_page("usmacro")
+check(w.engine.wf.page == "usmacro", "back to the quarterly page")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
 sys.exit(1 if failures else 0)

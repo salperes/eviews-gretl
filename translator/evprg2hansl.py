@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import datetime as dt
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -70,6 +71,7 @@ class Ctx:
     texts: dict = field(default_factory=dict)       # text object -> lines
     models: dict = field(default_factory=dict)      # model -> {"eqs": [...], "ids": [...]}
     var_endo: dict = field(default_factory=dict)    # VAR name -> series names of its variables
+    panel: tuple | None = None                      # (unit id, time) after pagestruct
 
 
 def safe_name(name: str, prefix: str) -> str:
@@ -77,11 +79,11 @@ def safe_name(name: str, prefix: str) -> str:
 
 
 def apply_case(name: str, ctx: Ctx) -> str:
-    if ctx.case == "upper":
-        return name.upper()
-    if ctx.case == "lower":
-        return name.lower()
-    return name
+    f = {"upper": str.upper, "lower": str.lower}.get(ctx.case)
+    if not f:
+        return name
+    # $i (loop index) and @s (string substitution) stay as they are
+    return re.sub(r"[$@]\w+|[^$@]+", lambda m: m.group(0) if m.group(0)[0] in "$@" else f(m.group(0)), name)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +131,60 @@ _KEY_RES = [(re.compile(r"(?<![A-Za-z0-9_$])" + src + r"(?![A-Za-z0-9_])", re.IG
             for src, dst in KEYWORD_MAP]
 
 
+# EViews matrix functions with one-to-one hansl names
+MATRIX_FUNCS = [
+    ("@inverse", "inv"), ("@transpose", "transp"), ("@det", "det"), ("@identity", "I"),
+    ("@cholesky", "cholesky"), ("@eigenvalues", "eigensym"), ("@trace", "tr"),
+    ("@rank", "rank"), ("@vec", "vec"), ("@rows", "rows"), ("@columns", "cols"),
+    ("@getmaindiagonal", "diag"),
+]
+_MFUNC_RES = [(re.compile(re.escape(a) + r"\s*\(", re.IGNORECASE), b + "(") for a, b in MATRIX_FUNCS]
+
+
+def _call_args(p: str, start: int) -> tuple[list[str], int]:
+    """Split the arguments of a call whose '(' is at p[start]; return (args, end index after ')')."""
+    depth, cur, args = 0, "", []
+    for i in range(start, len(p)):
+        ch = p[i]
+        if ch == "(":
+            depth += 1
+            if depth == 1:
+                continue
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                args.append(cur.strip())
+                return args, i + 1
+        elif ch == "," and depth == 1:
+            args.append(cur.strip())
+            cur = ""
+            continue
+        cur += ch
+    raise ValueError("unbalanced parentheses")
+
+
+def _matrix_funcs(p: str) -> str:
+    """Functions that become operators or slices: @kronecker, @emult, @ediv, *extract."""
+    forms = {
+        "@kronecker": lambda a: f"({a[0]} ** {a[1]})",
+        "@emult": lambda a: f"({a[0]} .* {a[1]})",
+        "@ediv": lambda a: f"({a[0]} ./ {a[1]})",
+        "@convert": lambda a: "{" + a[0] + "}",
+        "@columnextract": lambda a: f"{a[0]}[,{a[1]}]",
+        "@rowextract": lambda a: f"{a[0]}[{a[1]},]",
+        "@subextract": lambda a: f"{a[0]}[{a[1]}:{a[3] if len(a) > 3 else 'rows(' + a[0] + ')'},"
+                                 f"{a[2]}:{a[4] if len(a) > 4 else 'cols(' + a[0] + ')'}]",
+    }
+    rx = re.compile(r"(@kronecker|@emult|@ediv|@convert|@columnextract|@rowextract|@subextract)\s*(?=\()", re.IGNORECASE)
+    while True:
+        m = rx.search(p)
+        if not m:
+            return p
+        args, end = _call_args(p, m.end())
+        args = [_matrix_funcs(a) for a in args]
+        p = p[:m.start()] + forms[m.group(1).lower()](args) + p[end:]
+
+
 def _split_strings(s: str):
     """Yield (is_string_literal, chunk) pieces so literals stay untouched."""
     for i, part in enumerate(re.split(r'("[^"]*")', s)):
@@ -174,8 +230,12 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
                 raise ValueError("@coefs/resid used before any equation")
             eq = ctx.last_eq
             p = re.sub(r"@coefs\s*\(\s*([^()]+?)\s*\)", rf"{eq}.coeff[\1]", p, flags=re.IGNORECASE)
-            res = f"ev_resid({eq})" if ctx.equations.get(eq) == "ls" else f"{eq}_resid"
+            res = f"ev_resid({eq})" if ctx.equations.get(eq) == "ls" else apply_case(f"{eq}_resid", ctx)
             p = re.sub(r"(?<![A-Za-z0-9_])resid(?![A-Za-z0-9_])", res, p, flags=re.IGNORECASE)
+        # matrix element m(i,j) -> m[i,j]
+        for mt in ctx.matrices:
+            p = re.sub(rf"(?<![A-Za-z0-9_.$]){re.escape(mt)}\s*\(\s*([^()]+)\)", rf"{mt}[\1]", p,
+                       flags=re.IGNORECASE)
         # group element g(i) -> g[i]
         for g in ctx.groups:
             p = re.sub(rf"(?<![A-Za-z0-9_.$]){re.escape(g)}\s*\(\s*([^()-][^()]*)\)", rf"{g}[\1]", p)
@@ -187,6 +247,10 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
             p = re.sub(r"(?<![<>!=])=(?!=)", "==", p)
         if ctx.case != "keep":
             p = case_names(p, ctx)
+        # matrix functions last: their hansl names (inv, I, ...) must not be re-cased
+        p = _matrix_funcs(p)
+        for rx, dst in _MFUNC_RES:
+            p = rx.sub(dst, p)
         out.append(p)
     return "".join(out)
 
@@ -203,7 +267,7 @@ def case_names(p: str, ctx: Ctx) -> str:
     """Apply --case to series names, including lagged ones like x(-1), but not to functions."""
     def fix(m):
         name, paren = m.group(1), m.group(2)
-        if paren and (name.lower() in _FUNC_NAMES or name.startswith("ev_")):
+        if "(" in paren and (name.lower() in _FUNC_NAMES or name.startswith("ev_")):
             return m.group(0)
         return _case_ident(name, ctx) + paren
     return re.sub(r"(?<![A-Za-z0-9_$@.])([A-Za-z][A-Za-z0-9_]*)(?![A-Za-z0-9_])(\s*\(?)", fix, p)
@@ -212,7 +276,7 @@ def case_names(p: str, ctx: Ctx) -> str:
 def _case_ident(name: str, ctx: Ctx) -> str:
     if name in _KEEP_CASE or name in ctx.index_vars or name in ctx.foreach_vars \
             or name in ctx.scalars or name in ctx.strings or name.startswith("ev_") \
-            or name in ctx.groups or name in ctx.equations:
+            or name in ctx.groups or name in ctx.equations or name in ctx.matrices:
         return name
     return apply_case(name, ctx)
 
@@ -276,9 +340,14 @@ def translate_smpl(args: str, ctx: Ctx) -> list[str]:
         if len(toks) != 2:
             raise ValueError("smpl needs a start and an end (or a sample object)")
         a, b = toks
-        start = _smpl_point(a, "ev_t1", out, ctx)
-        end = _smpl_point(b, "ev_t2", out, ctx)
-        out.append(f"smpl {start} {end}")
+        if ctx.panel and (translate_date(a) or translate_date(b)):
+            # gretl panels have no calendar: the date range is left to the user
+            out.append(f"# NOTE: date range {a} {b} not applied on the panel page "
+                       f"(restrict with the time variable: smpl {ctx.panel[1]} >= ... --restrict)")
+        else:
+            start = _smpl_point(a, "ev_t1", out, ctx)
+            end = _smpl_point(b, "ev_t2", out, ctx)
+            out.append(f"smpl {start} {end}")
     if cond:
         out.append(f"smpl {translate_expr(cond, ctx, condition=True)} --restrict")
     return out
@@ -355,25 +424,41 @@ def _ls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
 
 
 def _arch_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
-    o = [x.strip().lower() for x in (opts or "1,1").split(",")]
-    if any(x in ("t", "e", "tarch", "egarch") or x.startswith(("thrsh", "egarch", "archm")) for x in o):
-        raise ValueError("TGARCH/EGARCH/ARCH-M need the gig package")
+    o = [x.strip().lower() for x in (opts or "1,1").split(",") if x.strip()]
+    if any(x.startswith(("archm", "thrsh")) or x in ("m",) for x in o):
+        raise ValueError("ARCH-M and threshold orders are not supported")
+    model = "tarch" if any(x in ("t", "tarch") for x in o) else \
+        ("egarch" if any(x in ("e", "egarch") for x in o) else "garch")
     nums = [x for x in o if re.fullmatch(r"\d+", x)]
-    p, q = (nums + ["1", "1"])[:2]
+    na, ng = (nums + ["1", "1"])[:2]          # EViews arch(ARCH order, GARCH order)
     name = translate_name(name, ctx)
     ctx.equations[name] = "arch"
     ctx.last_eq = name
-    toks = _spec(spec, ctx).split()
+    sp = _spec(spec, ctx)
+    ctx.eq_dep[name] = sp.split()[0]
+    hn, rn = apply_case(f"{name}_h", ctx), apply_case(f"{name}_resid", ctx)
+    if model != "garch":
+        # TARCH / EGARCH through the gig package (EViews parameterisation)
+        ctx.equations[name] = "garch"
+        return [f'bundle ev_gb = ev_garch("{sp}", dataset, "{model}", {na}, {ng}, 1)',
+                "if ev_gb.failed",
+                f'printf "Warning: {name} ({model.upper()}) did not converge; previous estimates kept\\n"',
+                "else",
+                f"bundle {name} = ev_gb",
+                f'series {hn} = ev_garchseries({name}, "h")',
+                f'series {rn} = ev_garchseries({name}, "resid")',
+                "endif"]
+    toks = sp.split()
     dep, regs = toks[0], ["const" if t.lower() == "c" else translate_expr(t, ctx) for t in toks[1:]]
-    # EViews arch(p,q): p = GARCH order, q = ARCH order; gretl garch p q likewise
+    # gretl garch p q: p = GARCH order, q = ARCH order
     # EViews warns and continues when GARCH does not converge; so do we
-    return [f"catch garch {p} {q} ; {translate_expr(dep, ctx)} {' '.join(regs)} --quiet",
+    return [f"catch garch {ng} {na} ; {translate_expr(dep, ctx)} {' '.join(regs)} --quiet",
             "if $error",
             f'printf "Warning: {name} (GARCH) did not converge; previous estimates kept\\n"',
             "else",
             f"bundle {name} = _(coeff = $coeff, vcv = $vcv, lnl = $lnl)",
-            f"series {name}_h = $h",
-            f"series {name}_resid = $uhat",
+            f"series {hn} = $h",
+            f"series {rn} = $uhat",
             "endif"]
 
 
@@ -407,20 +492,26 @@ def _uroot(series: str, opts: str | None, ctx: Ctx) -> list[str]:
     for x in (opts or "adf").split(","):
         k, _, v = x.strip().lower().partition("=")
         o[k] = v
-    test = "adf" if "adf" in o or not ({"kpss", "pp", "llc", "ips", "df", "ers", "np"} & o.keys()) else None
+    # ips: gretl's adf on a panel prints the Im-Pesaran-Shin W_tbar test
+    test = "adf" if "adf" in o or "ips" in o or not ({"kpss", "pp", "llc", "df", "ers", "np"} & o.keys()) else None
     det = "--ct" if "trend" in o else ("--nc" if "none" in o else "--c")
     diff = " --difference" if o.get("dif", "0") not in ("", "0") else ""
     lag = o.get("maxlag") or o.get("lag") or "4"
     x = translate_name(series, ctx)
+    info = o.get("info", "")
+    down = {"aic": " --test-down=AIC", "sic": " --test-down=BIC", "bic": " --test-down=BIC",
+            "hqc": " --test-down=tstat", "tstat": " --test-down=tstat"}.get(info, "")
     if test == "adf":
-        info = o.get("info", "")
-        down = {"aic": " --test-down=AIC", "sic": " --test-down=BIC", "bic": " --test-down=BIC",
-                "hqc": " --test-down=tstat", "tstat": " --test-down=tstat"}.get(info, "")
         return [f"adf {lag} {x} {det}{diff}{down}"]
     if "kpss" in o:
         return [f"kpss {o.get('lag', '-1')} {x}" + (" --trend" if "trend" in o else "")]
     if "llc" in o:
-        return [f"levinlin {lag} {x}" + (" --ct" if "trend" in o else "")]
+        # a sample left with one cross-section is a time series in gretl: plain ADF
+        return ["if $datatype == 3",
+                f"levinlin {lag} {x}" + (" --ct" if "trend" in o else ""),
+                "else",
+                f"adf {lag} {x} {det}{diff}{down}",
+                "endif"]
     raise ValueError(f"unit root test {'/'.join(o)} has no gretl equivalent here")
 
 
@@ -913,7 +1004,10 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return [f"bundle {o}_diag = ev_diag({o})"]
     if ml in ("output", "results", "display", "spec"):
         kind = ctx.equations.get(o)
-        return [{"vecm": f"ev_vecprint(&{o})", "var": f"ev_varprint(&{o})"}.get(kind, f"ev_print(&{o})")]
+        if kind == "arch":
+            raise ValueError("output of a GARCH(p,q) equation: estimated with gretl's garch command")
+        return [{"vecm": f"ev_vecprint(&{o})", "var": f"ev_varprint(&{o})",
+                 "garch": f"ev_garchprint(&{o})"}.get(kind, f"ev_print(&{o})")]
     if ml == "resids":
         return [f"ev_plot(&{o})"]
     if ml in ("fit", "forecast") and ctx.equations.get(o, "ls") == "ls":
@@ -945,10 +1039,10 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         raise ValueError(f"VAR view .{meth} not supported")
     if ml in ("makeresid", "makeresids") and ctx.equations.get(o) == "ls":
         return [f"series {translate_name(args.split()[0], ctx)} = ev_resid({o})"]
-    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) == "arch":
-        return [f"series {translate_name(args.split()[0], ctx)} = {o}_resid"]
-    if ml == "makegarch" and ctx.equations.get(o) == "arch":
-        return [f"series {translate_name(args.split()[0], ctx)} = {o}_h"]
+    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("arch", "garch"):
+        return [f"series {translate_name(args.split()[0], ctx)} = {apply_case(o + '_resid', ctx)}"]
+    if ml == "makegarch" and ctx.equations.get(o) in ("arch", "garch"):
+        return [f"series {translate_name(args.split()[0], ctx)} = {apply_case(o + '_h', ctx)}"]
     if ml == "hpf":
         lam = re.search(r"lambda\s*=\s*([\d.]+)", opts or "")
         lam_arg = f", {lam.group(1)}" if lam else ""
@@ -1048,13 +1142,50 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         return ["string ev_pagedir = $dotdir", f'catch remove("@ev_pagedir/{new}.gdtb")',
                 f'# page {old} renamed to {new}: next pageselect uses the new name']
 
-    if word == "matrix":
-        m = re.fullmatch(r"(?i)matrix\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*(\w+)", s)
-        if m:
-            r, c, name = int(m.group(1)), int(m.group(2)), translate_name(m.group(3), ctx)
-            ctx.matrices[name] = (r, c)
-            return [f"matrix {name} = zeros({r}, {c})"]
-        raise ValueError("matrix: use matrix(rows, cols) name")
+    if word == "pagestruct":
+        # pagestruct id @date(t) -> panel: unit and time variables
+        m = re.fullmatch(r"(?i)pagestruct(?:\([^)]*\))?\s+(\w+)\s+@date(?:var)?\s*\(\s*(\w+)\s*\)", s)
+        if not m:
+            raise ValueError("pagestruct: use pagestruct id @date(timevar)")
+        uid, tv = translate_name(m.group(1), ctx), translate_name(m.group(2), ctx)
+        ctx.panel = (uid, tv)
+        return [f"setobs {uid} {tv} --panel-vars", "scalar ev_N = $nobs"]
+    if word == "pageunstack":
+        return _pageunstack(cmd_opts, rest, ctx)
+
+    if word in ("matrix", "vector", "rowvector", "sym", "coef"):
+        m = re.fullmatch(r"(?i)(\w+)\s*(?:\(\s*([^,()]+?)\s*(?:,\s*([^()]+?)\s*)?\))?\s+(\w+)\s*(?:=\s*(.+))?", s)
+        if not m:
+            raise ValueError(f"{word}: use {word}(size) name [= expression]")
+        _, r, c, name, expr = m.groups()
+        name = translate_name(name, ctx)
+        if word in ("vector", "coef"):
+            r, c = r or "1", "1"
+        elif word == "rowvector":
+            r, c = "1", r or "1"
+        elif word == "sym":
+            c = r
+        dims = (int(r), int(c)) if r and c and r.isdigit() and c.isdigit() else (None, None)
+        ctx.matrices[name] = dims
+        if expr is None:
+            if not (r and c):
+                raise ValueError(f"{word}: give the size")
+            return [f"matrix {name} = zeros({translate_expr(r, ctx)}, {translate_expr(c, ctx)})"]
+        e = translate_expr(expr, ctx)
+        if r and c and re.fullmatch(r"[-+]?[\d.]+(e[-+]?\d+)?|NA", e.strip(), re.IGNORECASE):
+            return [f"matrix {name} = ones({translate_expr(r, ctx)}, {translate_expr(c, ctx)}) * {e}"]
+        return [f"matrix {name} = {e}"]
+    if word == "stom":
+        a = [x.strip() for x in _call_args(s, s.index("("))[0]]
+        src, dst = translate_name(a[0], ctx), translate_name(a[1], ctx)
+        ctx.matrices[dst] = (None, None)
+        return [f"matrix {dst} = {{{src}}}"]
+    if word == "mtos":
+        a = [x.strip() for x in _call_args(s, s.index("("))[0]]
+        src, dst = translate_name(a[0], ctx), translate_name(a[1], ctx)
+        if dst in ctx.groups:
+            return [f"series {g} = {src}[,{j}]" for j, g in enumerate(ctx.groups[dst], 1)]
+        return [f"series {dst} = {src}"]
     if word == "text":
         name = translate_name(rest.split()[0], ctx)
         ctx.texts[name] = []
@@ -1174,7 +1305,8 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
     if word in ("show", "print"):
         res = []
         for n in rest.split():
-            n = translate_name(n, ctx)
+            pv = program_vars(n.strip(), ctx)
+            n = pv if pv in ctx.scalars or pv in ctx.strings else translate_name(n, ctx)
             if n in ctx.equations or n in ctx.graphs:
                 continue        # already printed / drawn when created
             else:
@@ -1256,18 +1388,55 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             return [f"string {v} = {translate_expr(expr, ctx)}"]
         if name in ctx.scalars:
             return [f"{name} = {translate_expr(expr, ctx)}"]
+        if translate_name(name, ctx) in ctx.matrices:
+            return [f"matrix {translate_name(name, ctx)} = {translate_expr(expr, ctx)}"]
         return [f"series {translate_name(name, ctx)} = {translate_expr(expr, ctx)}"]
 
     raise ValueError("unsupported statement")
 
 
-def translate(text: str, case: str = "keep") -> tuple[str, list[tuple[int, str]]]:
-    hansl, todos, _ = translate_full(text, case)
-    return hansl, todos
+def _pageunstack(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
+    """pageunstack(namepat="*_?", page=name) id time @ series... -> one series per unit on a new page."""
+    if not ctx.panel:
+        raise ValueError("pageunstack needs a panel page (pagestruct first)")
+    op = {}
+    for k, v in re.findall(r'(\w+)\s*=\s*("[^"]*"|[^,]+)', cmd_opts or ""):
+        op[k.lower()] = v.strip().strip('"')
+    pat = op.get("namepat", "*?")
+    new = op.get("page") or f"untitled{len(ctx.pages) + 1}"
+    left, _, right = rest.partition("@")
+    ids = left.split()
+    if not ids or not right.split():
+        raise ValueError("pageunstack: give id [time] @ series")
+    uid = translate_name(ids[0], ctx)
+    series = [translate_name(x, ctx) for x in right.split()]
+    ctx.need_pages = True
+    # the whole panel is unstacked (a restricted sample may no longer be a panel)
+    out = ["smpl full", f"matrix ev_uid = ev_panelids({uid})"]
+    for k, x in enumerate(series, 1):
+        out.append(f"matrix ev_u{k} = ev_unstack({x})")
+    tv = ctx.panel[1]
+    out.append(f"matrix ev_ut = ev_unstack({tv})[,1]")
+    out += ["string ev_pagedir = $dotdir", "smpl full", f'store "@ev_pagedir/{ctx.page}.gdtb"',
+            "scalar ev_T = rows(ev_ut)", "nulldata ev_T --preserve",
+            f"series {tv} = ev_ut    # time variable of the panel (the page is undated)"]
+    for k, x in enumerate(series, 1):
+        nm = pat.replace("*", x).replace("?", "%g")
+        out += [f"loop ev_j = 1..cols(ev_u{k})",
+                f'string ev_nm = sprintf("{nm}", ev_uid[ev_j])',
+                f"series @ev_nm = ev_u{k}[,ev_j]",
+                "endloop"]
+    ctx.pages.add(new)
+    ctx.page = new
+    ctx.panel = None
+    return out + ["scalar ev_N = $nobs"]
 
 
-def translate_full(text: str, case: str = "keep", plot_files: bool = False):
-    ctx = Ctx(case=case, plot_files=plot_files)
+# ---------------------------------------------------------------------------
+# Program structure: include files and subroutines
+# ---------------------------------------------------------------------------
+
+def _join_continuations(text: str, src: str = "") -> list[tuple]:
     raw = text.replace("\r\n", "\n").split("\n")
     lines, buf, start = [], "", 0
     for i, ln in enumerate(raw, 1):         # join continuation lines ending in " _"
@@ -1276,8 +1445,112 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False):
         if re.search(r"\s_\s*$", _strip_comment(ln)):
             buf += re.sub(r"\s_\s*$", " ", _strip_comment(ln))
             continue
-        lines.append((start, buf + ln))
+        lines.append((start if not src else f"{src}:{start}", buf + ln))
         buf = ""
+    return lines
+
+
+def _expand_includes(lines, base_dir, depth=0):
+    out = []
+    for lineno, ln in lines:
+        m = re.fullmatch(r'(?i)\s*include\s+"?([^"\']+?)"?\s*(\'.*)?', ln)
+        if not m:
+            out.append((lineno, ln))
+            continue
+        f = m.group(1).strip()
+        if not re.search(r"\.\w+$", f):
+            f += ".prg"
+        path = os.path.join(base_dir or ".", *re.split(r"[\\/]", f))
+        if depth > 10 or not os.path.exists(path):
+            out.append((lineno, f"__include_missing__ {f}"))
+            continue
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            sub = _join_continuations(fh.read(), os.path.basename(path))
+        out.append((lineno, f"' --- include {f}"))
+        out += _expand_includes(sub, os.path.dirname(path), depth + 1)
+        out.append((lineno, f"' --- end of include {f}"))
+    return out
+
+
+_SUB_RX = re.compile(r"(?i)\s*subroutine\s+(?:local\s+)?(\w+)\s*(?:\((.*)\))?\s*$")
+
+
+def _collect_subs(lines):
+    """Take subroutine ... endsub blocks out of the program: name -> (params, body)."""
+    subs, main, cur = {}, [], None
+    for lineno, ln in lines:
+        code = _strip_comment(ln).strip()
+        m = _SUB_RX.fullmatch(code)
+        if m and cur is None:
+            params = []
+            for prm in (m.group(2) or "").split(","):
+                toks = prm.split()
+                if toks:
+                    params.append(toks[-1])          # "series x", "scalar !n", "string %s"
+            cur = (m.group(1).lower(), params, [])
+            continue
+        if cur is not None and re.fullmatch(r"(?i)endsub", code):
+            subs[cur[0]] = (cur[1], cur[2])
+            cur = None
+            continue
+        (cur[2] if cur is not None else main).append((lineno, ln))
+    return subs, main
+
+
+def _substitute(line: str, params: list[str], args: list[str]) -> str:
+    code, cmt = line, ""
+    for prm, arg in zip(params, args):
+        if prm[0] in "!%":
+            # literal argument "abc" -> abc inside {}, the literal elsewhere;
+            # a program variable argument (%t, !i) keeps its braces
+            lit = not re.fullmatch(r"[!%]\w+", arg)
+            br = arg.strip('"') if lit else "{" + arg + "}"
+            code = re.sub(r"\{" + re.escape(prm) + r"\}", lambda _m: br, code)
+            code = re.sub(re.escape(prm) + r"(?![A-Za-z0-9_])", lambda _m: arg, code)
+        else:
+            parts = re.split(r'("[^"]*")', code)
+            for i in range(0, len(parts), 2):
+                parts[i] = re.sub(r"(?<![A-Za-z0-9_!%@.])" + re.escape(prm) + r"(?![A-Za-z0-9_])",
+                                  lambda _m: arg, parts[i], flags=re.IGNORECASE)
+            code = "".join(parts)
+    return code + cmt
+
+
+def _expand_calls(lines, subs, depth=0):
+    out = []
+    for lineno, ln in lines:
+        code = _strip_comment(ln).strip()
+        m = re.fullmatch(r"(?i)call\s+(\w+)\s*(\(.*\))?", code)
+        if not m:
+            out.append((lineno, ln))
+            continue
+        nm = m.group(1).lower()
+        if nm not in subs or depth > 20:
+            out.append((lineno, f"__call_unknown__ {code}"))
+            continue
+        params, body = subs[nm]
+        args = _call_args(m.group(2), 0)[0] if m.group(2) else []
+        args = [a for a in args if a != ""]
+        if len(args) != len(params):
+            out.append((lineno, f"__call_unknown__ {code}"))
+            continue
+        out.append((lineno, f"' --- call {m.group(1)}"))
+        inner = [(lineno, b if b.strip().startswith("'") else _substitute(b, params, args)) for _, b in body]
+        out += _expand_calls(inner, subs, depth + 1)
+        out.append((lineno, f"' --- end of {m.group(1)}"))
+    return out
+
+
+def translate(text: str, case: str = "keep") -> tuple[str, list[tuple[int, str]]]:
+    hansl, todos, _ = translate_full(text, case)
+    return hansl, todos
+
+
+def translate_full(text: str, case: str = "keep", plot_files: bool = False, base_dir: str | None = None):
+    ctx = Ctx(case=case, plot_files=plot_files)
+    lines = _expand_includes(_join_continuations(text), base_dir)
+    subs, lines = _collect_subs(lines)
+    lines = _expand_calls(lines, subs)
 
     body, indent, has_wf = [], 0, False
     for lineno, ln in lines:
@@ -1287,6 +1560,14 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False):
             continue
         code = _strip_comment(ln)
         try:
+            if code.startswith("__include_missing__"):
+                code = "include " + code.split(None, 1)[1]
+                raise ValueError(f"include file {code.split(None, 1)[1]} not found")
+            if code.startswith("__call_unknown__"):
+                code = code.split(None, 1)[1]
+                raise ValueError("unknown subroutine or wrong number of arguments")
+            if re.fullmatch(r"(?i)\s*return\s*", code):
+                raise ValueError("return inside a subroutine: restructure with if/else")
             res = translate_line(code, ctx)
         except Ignored as e:
             ctx.ignored.append((lineno, stripped))
@@ -1328,7 +1609,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     with open(a.prg, encoding="utf-8", errors="replace") as f:
         text = f.read()
-    hansl, todos, ignored = translate_full(text, a.case, a.plot_files)
+    hansl, todos, ignored = translate_full(text, a.case, a.plot_files, os.path.dirname(os.path.abspath(a.prg)))
     outp = a.output or re.sub(r"\.prg$", "", a.prg, flags=re.IGNORECASE) + ".inp"
     with open(outp, "w", encoding="utf-8") as f:
         f.write(hansl)

@@ -56,7 +56,7 @@ matrix PA = mshape({1, 0, 0, NA, 1, 0, NA, NA, 1}, 3, 3)'
 matrix PB = zeros(3, 3)
 matrix PB = mshape({NA, 0, 0, 0, NA, 0, 0, 0, NA}, 3, 3)'
 ev_svar(&V1, PA, PB)
-ev_varirfplot(V1, 8, "plot01.png")
+ev_varirfplot(V1, 8)
 scalar ev_s1 = $t1
 scalar ev_s2 = $t2
 smpl full

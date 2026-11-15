@@ -6,6 +6,8 @@ statistics), systems (LS, WLS, SUR, 2SLS, weighted 2SLS, 3SLS, GMM with shared c
 FIML results through ev_sysfrom), VAR and VEC objects (estimates, Granger tests, Johansen
 test, structural A-B and long-run identification, impulse responses, variance
 decomposition, lag length criteria), model solution (equations plus identities, Newton),
+ARCH models (`ev_garch`: GARCH, TARCH, EGARCH through the gig package, reported in the
+EViews parameterisation; `ev_garchseries`), panel unstacking (`ev_unstack`, `ev_panelids`),
 Wald test, residual diagnostics, freeze and @-functions for gretl.
 Usage: see `EViewsCompat_help.txt` and `EViewsCompat_sample.inp`.
 
@@ -18,7 +20,7 @@ export GRETL_HOME=/Applications/Gretl.app/Contents/Resources/share/gretl/
 ```
 
 ```bash
-for t in test_evcompat test_usmacro test_forecast_var test_estimators test_systems test_advanced test_more; do /Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/$t.inp" | grep -E '^(ok|FAIL)'; done
+for t in test_evcompat test_usmacro test_forecast_var test_estimators test_systems test_advanced test_more test_garch_panel; do /Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/$t.inp" | grep -E '^(ok|FAIL)'; done
 ```
 
 ```bash
@@ -45,3 +47,9 @@ equation fields that are joined with spaces.
 - The at-sign is string substitution, so the source never writes it literally.
 - `catch` must not wrap calls to user-defined functions.
 - Files in `$dotdir` (~/.gretl) are deleted when gretl exits.
+- The package depends on gig (`depends = gig`). gig's GJR model is
+  h = w + a(|e| - g e)^2 + b h; EViews' TARCH coefficients are A = a(1-g)^2 and G = 4ag
+  (standard errors by the delta method). gig's EGARCH is the EViews form.
+- `nulldata` needs a scalar argument (`nulldata rows(m)` is a syntax error).
+- After `smpl ... --restrict` leaves one cross-section unit, the data are no longer a
+  panel (`$datatype` 2), so `levinlin` fails.

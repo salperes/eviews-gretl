@@ -50,8 +50,25 @@ Also: nonlinear system equations, `s.gmm(w=hac)`, `text t` + `t.append @e1 = ...
 `m.scenario "Scenario 1"`, `m.override x`, `m.addassign @all`, `m.addinit(v=n) @all`,
 `m.solve(s=s, r=100)` (stochastic: `<name>_0m` and `<name>_0s` series).
 
-Not yet: TGARCH/EGARCH, panel pages (`pagestruct`, `pageunstack`), IPS test,
-subroutines/`call`, `include`, matrix algebra beyond declare/fill/element assignment.
+ARCH family: `e.arch(a,g)` (gretl `garch`), `e.arch(a,g,t)` TARCH and `e.arch(a,g,e)` EGARCH
+(gig package, coefficients in the EViews parameterisation, so `@coefs(k)` matches EViews);
+`e.makegarch`, `e.makeresid`, `resid`, `e.output`. A run that does not converge prints a
+warning and keeps the previous estimates, as EViews does.
+Panels: `pagestruct id @date(t)` (gretl `setobs --panel-vars`), `x.uroot(ips)` (gretl's panel
+`adf` prints the Im-Pesaran-Shin test), `x.uroot(llc)` (ADF when the sample is down to one
+unit), `pageunstack(namepat="*_?", page=p) id t @ x y` (a new page with one series per unit).
+A date range in `smpl` on a panel page is not applied (a note says so); `if` conditions are.
+Program structure: `subroutine name(series x, scalar !n, string %s)` ... `endsub` and
+`call name(...)` (expanded inline, nested calls too), `include file[.prg]` (read from the
+program's folder).
+Matrices: `vector(n)`, `rowvector(n)`, `sym(n)`, `coef(n)`, `matrix m = expr`, `m = expr`,
+`m(i,j)` in expressions, `@inverse @transpose @det @identity @kronecker @cholesky
+@eigenvalues @trace @rank @vec @rows @columns @getmaindiagonal @emult @ediv @convert
+@columnextract @rowextract @subextract`, `stom(series|group, m)`, `mtos(m, series|group)`.
+`examples/garch_panel.prg` (with `examples/lib_matrix.prg`) uses all of these.
+
+Not yet: ARCH-M and threshold orders other than 1, `return` inside subroutines,
+`pagestack`, panel estimators (fixed/random effects through `ls` on a panel page).
 
 ## Real programs (`real_prg/`, local testing only: the source repos have no licence)
 | Program | Lines | Untranslated | Ran in gretl |
@@ -60,8 +77,8 @@ subroutines/`call`, `include`, matrix algebra beyond declare/fill/element assign
 | outputgap.prg (HP filter, Okun) | 35 | 0 | yes (US FRED data) |
 | randomwalk.prg (spurious regression) | 31 | 0 | yes |
 | rolling.prg (rolling GARCH VaR) | 43 | 0 | yes (synthetic data) |
-| preston_rolling.prg | 65 | 5 (TGARCH/EGARCH) | not run |
-| uroots.prg (panel unit roots) | 38 | 3 (panel pages, IPS) | not run |
+| preston_rolling.prg (GARCH/TARCH/EGARCH VaR) | 65 | 1 (prose line) | yes (synthetic data, ~800 rolling windows, about 4 min) |
+| uroots.prg (panel unit roots) | 38 | 0 (2 date-range notes) | yes (synthetic panel) |
 
 ## Tests
 ```bash

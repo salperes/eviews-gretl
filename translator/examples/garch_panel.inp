@@ -1,0 +1,97 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+# workfile pages are kept as .gdtb files in gretl's dot directory (ev_pagedir)
+
+# EViews program: TARCH and EGARCH, subroutines and include,
+# matrix algebra, panel pages, IPS test and pageunstack
+# --- include lib_matrix.prg
+# Subroutines used by garch_panel.prg (pulled in with include)
+
+
+# --- end of include lib_matrix.prg
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+series R = 100*ldiff(GDP)
+smpl full
+smpl 1960:1 2019:4
+
+# ARCH family: arch(ARCH order, GARCH order[, t | e])
+catch garch 1 1 ; R const --quiet
+if $error
+    printf "Warning: EG (GARCH) did not converge; previous estimates kept\n"
+else
+    bundle EG = _(coeff = $coeff, vcv = $vcv, lnl = $lnl)
+    series EG_H = $h
+    series EG_RESID = $uhat
+endif
+bundle ET = ev_garch("R c", dataset, "tarch", 1, 1)
+series ET_H = ev_garchseries(ET, "h")
+series ET_RESID = ev_garchseries(ET, "resid")
+series HT = ET_H
+series UT = ET_RESID
+# one-step variance forecast from the TARCH coefficients (as in EViews)
+series HF = ET.coeff[2] + ET.coeff[3]*UT^2 + ET.coeff[4]*UT^2*(UT<0) + ET.coeff[5]*HT
+bundle EE = ev_garch("R c", dataset, "egarch", 1, 1)
+series EE_H = ev_garchseries(EE, "h")
+series EE_RESID = ev_garchseries(EE, "resid")
+series HE = EE_H
+
+# matrix algebra in a subroutine from the include file
+# --- call olsmat
+# least squares by matrix algebra: b = (X'X)^-1 X'y
+series ONE = 1
+list GX = ONE GDP
+matrix YV = {CONS}
+matrix XM = {GX}
+matrix XX = transp(XM)*XM
+matrix BM = inv(XX)*transp(XM)*YV
+scalar nr = rows(XM)
+# --- end of olsmat
+bundle EQC = ev_ls("CONS c GDP", dataset)
+scalar gap = abs(BM[2,1] - EQC.coeff[2])
+# --- call report
+scalar gap_val = gap
+print gap_val
+# --- end of report
+matrix A = zeros(2, 2)
+matrix A = mshape({2, 1, 1, 3}, 2, 2)
+matrix AI = inv(A)
+scalar check = det(A) * tr(AI)
+matrix K = (I(2) ** A)
+matrix EV = eigensym(A)
+matrix C2 = K[,2]
+smpl full
+smpl 2019:1 2019:4
+series C2S = C2
+smpl full
+smpl 1960:1 2019:4
+# --- call report
+scalar check_val = check
+print check_val
+# --- end of report
+
+# panel page: unit root tests and unstacking
+open "../../data/panel_demo.csv"
+scalar ev_N = $nobs
+setobs ID YEAR --panel-vars
+scalar ev_N = $nobs
+adf 2 LY --c
+matrix ev_uid = ev_panelids(ID)
+matrix ev_u1 = ev_unstack(LY)
+matrix ev_ut = ev_unstack(YEAR)[,1]
+string ev_pagedir = $dotdir
+smpl full
+store "@ev_pagedir/panel_demo.gdtb"
+scalar ev_T = rows(ev_ut)
+nulldata ev_T --preserve
+series YEAR = ev_ut    # time variable of the panel (the page is undated)
+loop ev_j = 1..cols(ev_u1)
+    string ev_nm = sprintf("LY_%g", ev_uid[ev_j])
+    series @ev_nm = ev_u1[,ev_j]
+endloop
+scalar ev_N = $nobs
+print LY_11
+print LY_13
+

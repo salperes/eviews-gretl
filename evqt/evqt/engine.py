@@ -429,5 +429,43 @@ class GretlEngine:
         out = self.run(f"eval {expr}")
         return [m.group(1) for ln in out for m in [re.match(r'\[\d+\] "(.*)"$', ln.strip())] if m]
 
+    def is_garch(self, name: str) -> bool:
+        # nested ifs: hansl's ?: evaluates both branches
+        out = self.run(f'scalar ev_g = 0\nif inbundle({name}, "kind")\nif {name}.kind == "garch"\n'
+                       f'ev_g = 1\nendif\nendif\nprintf "%d\\n", ev_g')
+        return "".join(out).strip().endswith("1")
+
     def equation_text(self, name: str) -> str:
-        return "\n".join(self.run(f"ev_print(&{name})", check=True)).strip("\n")
+        fn = "ev_garchprint" if self.is_garch(name) else "ev_print"
+        return "\n".join(self.run(f"{fn}(&{name})", check=True)).strip("\n")
+
+    # -- panel pages --------------------------------------------------------
+    def is_panel(self) -> bool:
+        return self._query('printf "%d\\n", $datatype') == "3"
+
+    def set_panel(self, unit: str, time: str):
+        """EViews pagestruct id @date(t): the page becomes a panel."""
+        self.run(f"smpl full\nsetobs {unit} {time} --panel-vars", check=True)
+        self._read_range()
+        self.refresh()
+
+    def unstack_page(self, name: str, unit: str, time: str, series: list[str], pattern: str = "*?"):
+        """EViews pageunstack: a new page with one series per cross-section unit."""
+        if name in self.wf.pages:
+            raise GretlError(f"page {name} already exists")
+        if not self.is_panel():
+            raise GretlError("the current page is not a panel (Proc > Structure first)")
+        cmds = ["smpl full", f"matrix ev_uid = ev_panelids({unit})",
+                f"matrix ev_ut = ev_unstack({time})[,1]"]
+        cmds += [f"matrix ev_u{k} = ev_unstack({x})" for k, x in enumerate(series, 1)]
+        self.run("\n".join(cmds), check=True)
+        self._save_page()
+        body = ["scalar ev_T = rows(ev_ut)", "nulldata ev_T --preserve", f"series {time} = ev_ut"]
+        for k, x in enumerate(series, 1):
+            nm = pattern.replace("*", x).replace("?", "%g")
+            body += [f"loop ev_j = 1..cols(ev_u{k})", f'string ev_nm = sprintf("{nm}", ev_uid[ev_j])',
+                     f"series @ev_nm = ev_u{k}[,ev_j]", "endloop"]
+        self.run("\n".join(body), check=True)
+        self.wf.pages.append(name)
+        self.wf.page_lists[name] = {}
+        self._enter_page(name)

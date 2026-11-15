@@ -2,7 +2,7 @@
 <gretl-functions>
 <gretl-function-package name="EViewsCompat" minver="2026a">
 <author>EViewsCompat contributors</author>
-<version>0.5</version>
+<version>0.6</version>
 <date>2026-11-15</date>
 <description>EViews-style LS, NLS, ARMA, systems, VAR/VEC, forecasts, Wald, diagnostics and at-functions</description>
 <tags>C10 C20 C51</tags>
@@ -139,7 +139,26 @@ Model options: ev_modelsolve(eqs, identities, dataset, dynamic, quiet, opts)
   overrides use series x_1 in place of x; add factors are series &lt;variable&gt;_a
   (ev_eqres(eq, dataset) makes an equation fit exactly); reps &gt; 0 runs a
   stochastic simulation: ev_modelseries(m, k, &quot;mean&quot;) and (m, k, &quot;sd&quot;).
+
+ARCH models (needs the gig package, installed with gretl)
+  ev_garch(&quot;y c x&quot;, dataset, &quot;garch|tarch|egarch&quot;, narch, ngarch [, quiet])  -&gt; bundle
+      EViews equation.arch(narch, ngarch[, t|e]). Coefficients are in EViews order and
+      parameterisation: mean equation, then C(.) of the variance equation
+      GARCH  : h = w + a e(-1)^2 + b h(-1)
+      TARCH  : h = w + a e(-1)^2 + g e(-1)^2 (e(-1) &lt; 0) + b h(-1)
+      EGARCH : log h = w + a |z(-1)| + g z(-1) + b log h(-1),  z = e/sqrt(h)
+      b.failed = 1 when the estimation does not converge (a warning is printed).
+  ev_garchprint(&amp;b)            EViews-style output with the variance equation
+  ev_garchseries(b [, &quot;h&quot;|&quot;resid&quot;])   conditional variance or residual series
+
+Panel pages
+  setobs id time --panel-vars        (EViews pagestruct id @date(time))
+  adf k x --c                        on a panel prints the Im-Pesaran-Shin test
+  ev_unstack(x)   -&gt; T x N matrix, one column per cross-section unit
+  ev_panelids(id) -&gt; the identifier of each unit, in panel order
 </help>
+<depends count="1">
+gig </depends>
 <gretl-function name="ev_gen" type="series">
  <params count="2">
   <param name="expr" type="string">
@@ -2936,6 +2955,237 @@ if !quiet
   ev_sysprint(&amp;bs)
 endif
 return bs
+</code>
+</gretl-function>
+<gretl-function name="ev_garch" type="bundle">
+ <params count="6">
+  <param name="spec" type="string">
+<description>Mean equation, e.g. y c x</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="model" type="string" optional="true">
+<description>garch, tarch or egarch</description>
+  </param>
+  <param name="narch" type="int" min="0" default="1">
+<description>ARCH order</description>
+  </param>
+  <param name="ngarch" type="int" min="0" default="1">
+<description>GARCH order</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>string md = exists(model) ? tolower(model) : &quot;garch&quot;
+errorif(!instring(&quot; garch tarch egarch &quot;, &quot; &quot; ~ md ~ &quot; &quot;), &quot;model must be garch, tarch or egarch&quot;)
+scalar gtype = md == &quot;garch&quot; ? 1 : (md == &quot;tarch&quot; ? 3 : 7)
+strings tok = strsplit(spec)
+series evg_y = ev_gen(tok[1], vars)
+list X = null
+strings xlab = array(0)
+loop i = 2..nelem(tok)
+  if tolower(tok[i]) == &quot;c&quot;
+    list X += const
+    xlab += &quot;C&quot;
+  else
+    string v = sprintf(&quot;evg_x%d&quot;, i)
+    series @v = ev_gen(tok[i], vars)
+    list X += @v
+    xlab += toupper(tok[i])
+  endif
+endloop
+if nelem(X) &gt; 0
+  bundle m = gig_setup(evg_y, gtype, X)
+else
+  bundle m = gig_setup(evg_y, gtype)
+endif
+gig_set_pq(&amp;m, ngarch, narch)
+gig_estimate(&amp;m, 0)
+scalar failed = !inbundle(m, &quot;criteria&quot;)
+if !failed &amp;&amp; inbundle(m, &quot;errcode&quot;)
+  failed = m.errcode != 0
+endif
+if failed
+  # like EViews: warn and let the program go on (b.failed = 1, no estimates)
+  printf &quot;Warning: %s estimation of %s failed (no convergence)\n&quot;, toupper(md), toupper(tok[1])
+  return _(kind = &quot;garch&quot;, failed = 1, model = md, spec = spec)
+endif
+scalar nm = nelem(X)
+scalar ng = gtype == 1 ? 0 : narch
+scalar nv = 1 + narch + ng + ngarch
+# gig's layout: mean, omega, alpha (narch), gamma (narch, fixed at 0 for GARCH),
+# beta (ngarch), then distribution parameters; the vcv covers the active ones
+matrix pos = seq(1, nm + 1 + narch)
+if gtype != 1
+  pos ~= seq(nm + 2 + narch, nm + 1 + 2 * narch)
+endif
+pos ~= seq(nm + 2 + 2 * narch, nm + 1 + 2 * narch + ngarch)
+matrix act = m.active
+matrix vpos = zeros(1, cols(pos))
+loop i = 1..cols(pos)
+  scalar pi = pos[i]
+  vpos[i] = imaxc(act .= pi)
+endloop
+matrix c = m.coeff[pos]
+if inbundle(m, &quot;vcv&quot;)
+  matrix V = m.vcv[vpos, vpos]
+else
+  # EViews also reports estimates when the covariance cannot be computed
+  printf &quot;Warning: the coefficient covariance could not be computed (singular Hessian)\n&quot;
+  matrix V = mshape(NA, cols(pos), cols(pos))
+endif
+# gig's GJR: h = w + a(|e| - g e)^2 + b h  -&gt;  EViews TARCH:
+# h = w + A e^2 + G e^2 (e &lt; 0) + b h, with A = a(1-g)^2, G = 4ag (delta method)
+if gtype == 3
+  matrix Jm = I(nm + nv)
+  loop i = 1..narch
+    scalar ia = nm + 1 + i
+    scalar ig = nm + 1 + narch + i
+    scalar a = c[ia]
+    scalar g = c[ig]
+    Jm[ia, ia] = (1 - g)^2
+    Jm[ia, ig] = -2 * a * (1 - g)
+    Jm[ig, ia] = 4 * g
+    Jm[ig, ig] = 4 * a
+    c[ia] = a * (1 - g)^2
+    c[ig] = 4 * a * g
+  endloop
+  V = Jm * V * Jm'
+endif
+bundle b
+b.kind = &quot;garch&quot;
+b.failed = 0
+b.model = md
+b.spec = spec
+b.depvar = toupper(tok[1])
+b.method = &quot;ML ARCH - Normal distribution (gig, BFGS)&quot;
+strings lab = array(0)
+loop i = 1..nm + nv
+  lab += sprintf(&quot;C(%d)&quot;, i)
+endloop
+b.clabels = lab
+b.xlab = xlab
+b.nm = nm
+b.narch = narch
+b.ngarch = ngarch
+b.coeff = c
+b.vcv = V
+b.stderr = sqrt(diag(V))
+b.k = rows(c)
+b.lnl = m.criteria[1]
+b.T = m.nobs
+b.h = {m.h}
+b.uhat = {m.uhat}
+series evg_o = obs
+b.tobs = {evg_o}
+# keep only the estimation rows
+matrix okr = ok(b.h) .* ok(b.uhat)
+b.h = selifr(b.h, okr)
+b.uhat = selifr(b.uhat, okr)
+b.tobs = selifr(b.tobs, okr)
+b.sample = sprintf(&quot;%s %s&quot;, obslabel(minc(b.tobs)), obslabel(maxc(b.tobs)))
+b.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
+# variance equation as EViews writes it
+string ve = sprintf(&quot;C(%d)&quot;, nm + 1)
+if gtype == 7
+  loop i = 1..narch
+    ve ~= sprintf(&quot; + C(%d)*ABS(RESID(-%d)/@SQRT(GARCH(-%d)))&quot;, nm + 1 + i, i, i)
+  endloop
+  loop i = 1..narch
+    ve ~= sprintf(&quot; + C(%d)*RESID(-%d)/@SQRT(GARCH(-%d))&quot;, nm + 1 + narch + i, i, i)
+  endloop
+  loop i = 1..ngarch
+    ve ~= sprintf(&quot; + C(%d)*LOG(GARCH(-%d))&quot;, nm + 1 + narch + ng + i, i)
+  endloop
+  ve = &quot;LOG(GARCH) = &quot; ~ ve
+else
+  loop i = 1..narch
+    ve ~= sprintf(&quot; + C(%d)*RESID(-%d)^2&quot;, nm + 1 + i, i)
+  endloop
+  loop i = 1..ng
+    ve ~= sprintf(&quot; + C(%d)*RESID(-%d)^2*(RESID(-%d)&lt;0)&quot;, nm + 1 + narch + i, i, i)
+  endloop
+  loop i = 1..ngarch
+    ve ~= sprintf(&quot; + C(%d)*GARCH(-%d)&quot;, nm + 1 + narch + ng + i, i)
+  endloop
+  ve = &quot;GARCH = &quot; ~ ve
+endif
+b.vareq = ve
+scalar n = b.T
+b.aic = -2 * b.lnl / n + 2 * b.k / n
+b.sc = -2 * b.lnl / n + b.k * log(n) / n
+b.hq = -2 * b.lnl / n + 2 * b.k * log(log(n)) / n
+if !quiet
+  ev_garchprint(&amp;b)
+endif
+return b
+</code>
+</gretl-function>
+<gretl-function name="ev_garchprint" type="void">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code>printf &quot;\nDependent Variable: %s\nMethod: %s\nDate: %s\n&quot;, b.depvar, b.method, b.estdate
+printf &quot;Sample: %s\nIncluded observations: %d\n&quot;, b.sample, b.T
+printf &quot;%s\n\n&quot;, b.vareq
+ev__line(78)
+printf &quot;%-26s%13s%13s%14s%12s\n&quot;, &quot;Variable&quot;, &quot;Coefficient&quot;, &quot;Std. Error&quot;, &quot;z-Statistic&quot;, &quot;Prob.&quot;
+ev__line(78)
+loop i = 1..b.nm
+  scalar z = b.coeff[i] / b.stderr[i]
+  printf &quot;%-26s%13.6f%13.6f%14.6f%12.4f\n&quot;, b.xlab[i], b.coeff[i], b.stderr[i], z, 2 * pvalue(z, abs(z))
+endloop
+printf &quot;\n%38s\n\n&quot;, &quot;Variance Equation&quot;
+loop i = b.nm + 1..b.k
+  scalar z = b.coeff[i] / b.stderr[i]
+  printf &quot;%-26s%13.6f%13.6f%14.6f%12.4f\n&quot;, b.clabels[i], b.coeff[i], b.stderr[i], z, 2 * pvalue(z, abs(z))
+endloop
+ev__line(78)
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Log likelihood&quot;, b.lnl, &quot;Akaike info criterion&quot;, b.aic
+printf &quot;%-22s%14s    %-24s%14.6f\n&quot;, &quot;&quot;, &quot;&quot;, &quot;Schwarz criterion&quot;, b.sc
+printf &quot;%-22s%14s    %-24s%14.6f\n&quot;, &quot;&quot;, &quot;&quot;, &quot;Hannan-Quinn criter.&quot;, b.hq
+ev__line(78)
+</code>
+</gretl-function>
+<gretl-function name="ev_garchseries" type="series">
+ <params count="2">
+  <param name="b" type="bundle">
+<description>ev_garch result</description>
+  </param>
+  <param name="what" type="string" optional="true">
+<description>h (conditional variance) or resid</description>
+  </param>
+ </params>
+<code>string w = exists(what) ? tolower(what) : &quot;h&quot;
+return ev__toseries(w == &quot;h&quot; ? b.h : b.uhat, b.tobs)
+</code>
+</gretl-function>
+<gretl-function name="ev_unstack" type="matrix">
+ <params count="1">
+  <param name="x" type="series">
+<description>Series of a balanced panel</description>
+  </param>
+ </params>
+<code># T x N matrix: one column per cross-section unit
+errorif($datatype != 3, &quot;The current page is not a panel (use pagestruct first)&quot;)
+scalar T = $pd
+scalar N = $nobs / T
+errorif(N != int(N), &quot;The panel must be balanced&quot;)
+set skip_missing off
+return mshape({x}, T, N)
+</code>
+</gretl-function>
+<gretl-function name="ev_panelids" type="matrix">
+ <params count="1">
+  <param name="id" type="series">
+<description>Cross-section identifier</description>
+  </param>
+ </params>
+<code># value of the identifier for each unit, in panel order
+errorif($datatype != 3, &quot;The current page is not a panel&quot;)
+set skip_missing off
+matrix v = {id}
+return v[seq(1, rows(v), $pd)]
 </code>
 </gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">

@@ -352,6 +352,25 @@ class EquationWindow(ObjectWindow):
     def __init__(self, main, name):
         super().__init__(main, f"Equation: {name.upper()}   Workfile: {main.wf_title()}")
         self.name = name
+        try:
+            self.garch = main.engine.is_garch(name)
+        except GretlError:
+            self.garch = False
+        if self.garch:
+            self.set_toolbar(_toolbar([
+                ("View", [("Estimation Output", self.output),
+                          ("Garch Graph: Conditional Variance", self.garch_graph)]),
+                ("Proc", [("Make Residual Series...", lambda: self.make("resid")),
+                          ("Make GARCH Variance Series...", lambda: self.make("h"))]),
+                ("Object", [("Delete", lambda: main.delete_object(name))]),
+                ("|", None),
+                ("Name", lambda: main.rename_object(name)),
+                ("Freeze", self.freeze),
+                ("Estimate", self.estimate),
+                ("Stats", self.output),
+            ]))
+            self.output()
+            return
         self.set_toolbar(_toolbar([
             ("View", [("Estimation Output", self.output),
                       ("Actual, Fitted, Residual Graph", self.afr),
@@ -393,15 +412,32 @@ class EquationWindow(ObjectWindow):
             self.run_text(f'ev_wald({self.name}, "{r.strip()}")')
 
     def make(self, kind):
-        default = f"resid{self.name[-2:]}" if kind == "resid" else f"{self.name}_fit"
+        default = {"resid": f"resid{self.name[-2:]}", "h": f"garch{self.name[-2:]}"}.get(kind, f"{self.name}_fit")
         n, ok = QInputDialog.getText(self, "Make series", "Name for the new series:", text=default)
         if ok and n.strip():
+            if self.garch:
+                what = "h" if kind == "h" else "resid"
+                self.main.execute(f'series {n.strip()} = ev_garchseries({self.name}, "{what}")', hansl=True)
+                return
             fn = "ev_resid" if kind == "resid" else "ev_fit"
             self.main.execute(f"series {n.strip()} = {fn}({self.name})", hansl=True)
 
+    def garch_graph(self):
+        try:
+            self.main.engine.run(f'series ev_gh = ev_garchseries({self.name}, "h")', check=True)
+            self.run_plot("gnuplot ev_gh --time-series --with-lines")
+        except GretlError as e:
+            self.main.error(str(e))
+
     def estimate(self):
         spec = "".join(self.main.engine.run(f'printf "%s\\n", {self.name}.spec')).strip()
-        self.main.equation_dialog(name=self.name, spec=spec, window=self)
+        arch = None
+        if self.garch:
+            out = "".join(self.main.engine.run(
+                f'printf "%s %d %d\\n", {self.name}.model, {self.name}.narch, {self.name}.ngarch')).split()
+            if len(out) >= 3:
+                arch = (out[-3], int(out[-2]), int(out[-1]))
+        self.main.equation_dialog(name=self.name, spec=spec, window=self, arch=arch)
 
     def forecast(self):
         """EViews Forecast dialog: series names, method and forecast sample."""
@@ -844,7 +880,9 @@ class WorkfileWindow(QWidget):
             ("View", [("Spreadsheet of selected", self.open_selected_group),
                       ("Line graph of selected", self.graph_selected)]),
             ("Proc", [("Set Sample...", main.sample_dialog),
-                      ("Generate Series...", main.genr_dialog)]),
+                      ("Generate Series...", main.genr_dialog),
+                      ("Structure/Resize Current Page (Panel)...", main.pagestruct_dialog),
+                      ("Reshape Current Page: Unstack in New Page...", main.unstack_dialog)]),
             ("Object", [("Open Selected", self.open_selected),
                         ("Rename Selected...", self.rename_selected),
                         ("Delete Selected", self.delete_selected)]),
@@ -1277,6 +1315,27 @@ class MainWindow(QMainWindow):
                 return True
             elif cmd == "pagerename" and len(rest) >= 2:
                 self.engine.rename_page(rest[0], rest[1])
+            elif cmd == "pagestruct":
+                m = re.fullmatch(r"(?i)pagestruct(?:\([^)]*\))?\s+(\w+)\s+@date(?:var)?\s*\(\s*(\w+)\s*\)",
+                                 line.strip())
+                if not m:
+                    raise ValueError("use pagestruct id @date(timevar)")
+                self.engine.set_panel(m.group(1), m.group(2))
+                self.ctx.panel = (m.group(1), m.group(2))
+            elif cmd == "pageunstack":
+                left, _, right = " ".join(rest).partition("@")
+                ids, series = left.split(), right.split()
+                op = dict((k.lower(), v.strip().strip('"'))
+                          for k, v in re.findall(r'(\w+)\s*=\s*("[^"]*"|[^,]+)', opts))
+                if not ids or not series:
+                    raise ValueError("use pageunstack id time @ series")
+                panel = getattr(self.ctx, "panel", None)
+                time = panel[1] if panel else (ids[1] if len(ids) > 1 else "")
+                if not time:
+                    raise ValueError("pagestruct the page first (unknown time variable)")
+                name = op.get("page") or f"untitled{len(self.engine.wf.pages) + 1}"
+                self.engine.unstack_page(name, ids[0], time, series, op.get("namepat", "*?"))
+                self.ctx.panel = None
             else:
                 return False
         except (GretlError, IndexError, ValueError) as e:
@@ -1295,6 +1354,39 @@ class MainWindow(QMainWindow):
                     w.spreadsheet()
             except RuntimeError:
                 pass
+
+    def pagestruct_dialog(self):
+        """EViews Workfile Structure dialog, panel case: cross-section id and date series."""
+        wf = self.engine.wf
+        unit, time = QComboBox(), QComboBox()
+        for c in (unit, time):
+            c.setEditable(True)
+            c.addItems(wf.series)
+        if len(wf.series) > 1:
+            time.setCurrentIndex(1)
+        d = _form_dialog(self, "Workfile structure: Dated Panel", [
+            ("Cross section ID series:", unit), ("Date series:", time)])
+        if d and unit.currentText().strip() and time.currentText().strip():
+            self.execute(f"pagestruct {unit.currentText().strip()} @date({time.currentText().strip()})")
+
+    def unstack_dialog(self):
+        """EViews Workfile Unstack dialog: one series per cross-section unit in a new page."""
+        wf = self.engine.wf
+        unit = QComboBox()
+        unit.setEditable(True)
+        unit.addItems(wf.series)
+        panel = getattr(self.ctx, "panel", None)
+        if panel and panel[0] in wf.series:
+            unit.setCurrentText(panel[0])
+        series, pat, page = QLineEdit(), QLineEdit("*?"), QLineEdit(f"untitled{len(wf.pages) + 1}")
+        series.setPlaceholderText("series to unstack, e.g. gdp cpi")
+        d = _form_dialog(self, "Workfile Unstack", [
+            ("Stacking identifier:", unit), ("Series to be unstacked:", series),
+            ("Naming pattern (* series, ? unit):", pat), ("New page name:", page)])
+        if d and series.text().strip():
+            time = panel[1] if panel else ""
+            self.execute(f'pageunstack(namepat="{pat.text().strip()}", page={page.text().strip()}) '
+                         f'{unit.currentText().strip()} {time} @ {series.text().strip()}')
 
     def eviews_dates(self, txt: str) -> str:
         pd = self.engine.wf.pd
@@ -1666,7 +1758,7 @@ class MainWindow(QMainWindow):
             self.add_window(name.strip(), w, (420, 420))
             w.run_text(f"summary {name.strip()}\nnormtest {name.strip()} --jbera")
 
-    def equation_dialog(self, name: str | None = None, spec: str = "", window=None):
+    def equation_dialog(self, name: str | None = None, spec: str = "", window=None, arch=None):
         d = QDialog(self)
         d.setWindowTitle("Equation Estimation")
         lay = QVBoxLayout(d)
@@ -1678,7 +1770,21 @@ class MainWindow(QMainWindow):
         lay.addWidget(sp)
         form = QFormLayout()
         method = QComboBox()
-        method.addItems(["LS - Least Squares (NLS and ARMA)", "ARCH - GARCH(1,1)"])
+        method.addItems(["LS - Least Squares (NLS and ARMA)",
+                         "ARCH - Autoregressive Conditional Heteroskedasticity"])
+        # ARCH options (EViews: model, ARCH order, GARCH order)
+        amodel = QComboBox()
+        amodel.addItems(["GARCH/TARCH (symmetric)", "TARCH (threshold, asymmetric)", "EGARCH"])
+        aord, gord = QSpinBox(), QSpinBox()
+        aord.setRange(1, 9)
+        gord.setRange(0, 9)
+        aord.setValue(1)
+        gord.setValue(1)
+        if arch:
+            method.setCurrentIndex(1)
+            amodel.setCurrentIndex({"garch": 0, "tarch": 1, "egarch": 2}.get(arch[0], 0))
+            aord.setValue(arch[1])
+            gord.setValue(arch[2])
         cov = QComboBox()
         cov.addItems(["Ordinary", "White", "HAC (Newey-West)"])
         wf = self.engine.wf
@@ -1686,7 +1792,17 @@ class MainWindow(QMainWindow):
         form.addRow("Method:", method)
         form.addRow("Sample:", smp)
         form.addRow("Coefficient covariance:", cov)
+        form.addRow("ARCH model:", amodel)
+        form.addRow("ARCH order:", aord)
+        form.addRow("GARCH order:", gord)
         lay.addLayout(form)
+
+        def _arch_rows(i):
+            for w in (amodel, aord, gord):
+                w.setEnabled(i == 1)
+            cov.setEnabled(i == 0)
+        method.currentIndexChanged.connect(_arch_rows)
+        _arch_rows(method.currentIndex())
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(d.accept)
         bb.rejected.connect(d.reject)
@@ -1704,7 +1820,22 @@ class MainWindow(QMainWindow):
         if smp_txt and smp_txt != f"{wf.sample_first} {wf.sample_last}":
             self.execute("smpl " + smp_txt.replace(":", "q" if wf.pd == 4 else ("m" if wf.pd == 12 else ":")))
         if method.currentIndex() == 1:
-            self.execute(f"equation {name}.arch(1,1) {s}")
+            model = ["garch", "tarch", "egarch"][amodel.currentIndex()]
+            a, g = aord.value(), gord.value()
+            flag = {"garch": "", "tarch": ",t", "egarch": ",e"}[model]
+            self.log_append(f"> equation {name}.arch({a},{g}{flag}) {s}")
+            # estimated with the gig package in the EViews parameterisation
+            spec_q = self.fix_case(s).replace('"', "")
+            self.execute(f'bundle {name} = ev_garch("{spec_q}", dataset, "{model}", {a}, {g}, 1)',
+                         hansl=True, quiet=True)
+            self.ctx.equations[name] = "garch"
+            self.ctx.last_eq = name
+            self.refresh()
+            if name in self.engine.wf.bundles:
+                if window is not None:
+                    window.output()
+                else:
+                    self.open_object((name, "equation"))
             return
         opt = {0: "", 1: "(cov=white)", 2: "(cov=hac)"}[cov.currentIndex()]
         self.execute(f"equation {name}.ls{opt} {s}")

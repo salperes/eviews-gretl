@@ -43,5 +43,5 @@ series LG = log(GDP)
 list G = LC LG
 ev_coint("LC LG", dataset, "c", 2)
 bundle V1 = ev_vecm("1 2 LC LG", dataset, "c", 1, 0, "lc lg")
-ev_varirfplot(V1, 8, "plot01.png")
+ev_varirfplot(V1, 8)
 

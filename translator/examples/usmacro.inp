@@ -8,22 +8,22 @@ open "../../data/usmacro.gdt"
 scalar ev_N = $nobs
 
 # growth rates and inflation
-series dlc = ldiff(CONS)
-series dly = ldiff(GDP)
-series infl = ev_pcy(CPI)
-series ffr_ma = ev_movav(FFR, 4)
-scalar g_mean = ev_mean(dly)
+series DLC = ldiff(CONS)
+series DLY = ldiff(GDP)
+series INFL = ev_pcy(CPI)
+series FFR_MA = ev_movav(FFR, 4)
+scalar g_mean = ev_mean(DLY)
 
 smpl full
 smpl 1985:1 2019:4
-bundle eq_cons = ev_ls("dlog(CONS) c dlog(GDP) dlog(CONS(-1)) FFR", dataset)
-bundle eq_cons_wald = ev_wald(eq_cons, "c(2)=0.5, c(4)=0")
-bundle eq_cons_diag = ev_diag(eq_cons, 4)
-ev_freeze(eq_cons, "tab_cons.txt")
+bundle EQ_CONS = ev_ls("dlog(CONS) c dlog(GDP) dlog(CONS(-1)) FFR", dataset)
+bundle EQ_CONS_wald = ev_wald(EQ_CONS, "c(2)=0.5, c(4)=0")
+bundle EQ_CONS_diag = ev_diag(EQ_CONS, 4)
+ev_freeze(EQ_CONS, "TAB_CONS.txt")
 
 # investment with HAC standard errors, trend and seasonals
-bundle eq_inv = ev_ls("log(INV) c log(GDP) FFR @trend    @seas(1) @seas(2) @seas(3)", dataset, "hac")
-bundle eq_inv_wald = ev_wald(eq_inv, "c(5)=0, c(6)=0, c(7)=0")
+bundle EQ_INV = ev_ls("log(INV) c log(GDP) FFR @trend @seas(1) @seas(2) @seas(3)", dataset, "hac")
+bundle EQ_INV_wald = ev_wald(EQ_INV, "c(5)=0, c(6)=0, c(7)=0")
 
 # rolling start dates
 loop for (y=1985; y<=1995; y+=5)
@@ -32,7 +32,7 @@ loop for (y=1985; y<=1995; y+=5)
     smpl ev_t1 2019:4
 endloop
 loop k = 1..3
-    series lag_ffr$k = FFR(-k)
+    series LAG_FFR$k = FFR(-k)
 endloop
 
 scalar big = 0
@@ -43,7 +43,7 @@ else
 endif
 
 smpl full
-bundle eq_untitled1 = ev_ls("dlog(INV) c dlog(GDP)", dataset, "white")
-series res_cons = ev_resid(eq_cons)
+bundle EQ_UNTITLED1 = ev_ls("dlog(INV) c dlog(GDP)", dataset, "white")
+series RES_CONS = ev_resid(EQ_CONS)
 store "usmacro_out.gdt"
 

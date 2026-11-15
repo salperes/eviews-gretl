@@ -1,0 +1,62 @@
+# TARCH / EGARCH in EViews form (checked by rebuilding the variance), panel unstack
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-56s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series r = 100 * ldiff(GDP)
+smpl 1960:1 2019:4
+
+# --- 1. GARCH(1,1) via gig against gretl's own garch
+bundle g = ev_garch("r c", dataset, "garch", 1, 1, 1)
+garch 1 1 ; r const --quiet
+check("GARCH(1,1) beta vs gretl garch", g.coeff[4], $coeff[4], 0.02)
+check("GARCH(1,1) alpha vs gretl garch", g.coeff[3], $coeff[3], 0.05)
+
+# --- 2. TARCH: the EViews-form coefficients rebuild the conditional variance
+bundle tg = ev_garch("r c", dataset, "tarch", 1, 1)
+matrix h = tg.h
+matrix e = tg.uhat
+scalar t = 100
+scalar ht = tg.coeff[2] + tg.coeff[3] * e[t-1]^2 + tg.coeff[4] * e[t-1]^2 * (e[t-1] < 0) + tg.coeff[5] * h[t-1]
+check("TARCH: h(t) = w + a e^2 + g e^2 (e<0) + b h(t-1)", ht, h[t], 1e-4)
+scalar t = 150
+scalar ht = tg.coeff[2] + tg.coeff[3] * e[t-1]^2 + tg.coeff[4] * e[t-1]^2 * (e[t-1] < 0) + tg.coeff[5] * h[t-1]
+check("TARCH: same at another period", ht, h[t], 1e-4)
+check("TARCH variance equation label", instring(tg.vareq, "(RESID(-1)<0)") > 0, 1)
+
+# --- 3. EGARCH: log h = w + a |z| + g z + b log h(-1)
+bundle eg = ev_garch("r c", dataset, "egarch", 1, 1, 1)
+matrix h = eg.h
+matrix e = eg.uhat
+scalar t = 120
+scalar z = e[t-1] / sqrt(h[t-1])
+scalar lh = eg.coeff[2] + eg.coeff[3] * abs(z) + eg.coeff[4] * z + eg.coeff[5] * log(h[t-1])
+check("EGARCH: log h(t) = w + a|z| + g z + b log h(t-1)", exp(lh), h[t], 1e-6)
+series hs = ev_garchseries(eg, "h")
+check("conditional variance series", nobs(hs), eg.T)
+
+# --- 4. panel: unstack and IPS
+smpl 1990:1 2019:4
+matrix M = {log(GDP), log(CONS), log(INV)}
+scalar T = rows(M)
+scalar NT = 3 * T
+nulldata NT --preserve
+series id = 10 + ceil(index / T)
+series tt = 1989 + index - (id - 11) * T
+series y = vec(M)
+setobs id tt --panel-vars
+matrix U = ev_unstack(y)
+matrix ids = ev_panelids(id)
+check("unstack: T x N", rows(U) * 10 + cols(U), T * 10 + 3)
+check("unstack: column 2 is unit 2", U[5, 2], M[5, 2])
+check("panel unit ids", ids[3], 13)
+adf 2 y --c

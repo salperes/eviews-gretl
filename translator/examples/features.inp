@@ -32,7 +32,7 @@ smpl ev_s1 ev_s2
 bundle V1 = ev_varest("1 2 ev_v1 ev_v2 FFR @ c", dataset, 0, "dlog(cons) dlog(gdp) ffr")
 matrix V1_granger = ev_vargranger(V1)
 matrix V1_decomp = ev_vardecomp(V1, 8)
-ev_varirfplot(V1, 10, "plot01.png")
+ev_varirfplot(V1, 10)
 series R_CONS = ev_varresid(V1, 1)
 series R_GDP = ev_varresid(V1, 2)
 series R_FFR = ev_varresid(V1, 3)

@@ -29,7 +29,9 @@ of iCloud-synced folders on purpose.
 - Equation: EViews-style output, Actual/Fitted/Residual graph, residual
   diagnostics, Wald test, make residual/fitted series, re-estimate.
 - Quick menu: Sample, Generate Series, Show, Graph, Series Statistics, Estimate
-  Equation (LS with ordinary/White/HAC covariance, or GARCH(1,1)).
+  Equation (LS with ordinary/White/HAC covariance, or ARCH: GARCH, TARCH or EGARCH with
+  ARCH and GARCH orders; the ARCH equation window shows the variance equation, a
+  conditional variance graph and Make GARCH Variance Series).
 - File: open gdt/csv/xlsx/dta/wf1..., save as .gdt, run EViews programs.
 - Freeze saves the current view to a file (txt, csv or png).
 
@@ -69,8 +71,16 @@ Also: nonlinear system equations (estimated with Levenberg-Marquardt), GMM with 
 add factors (and initialising them so the equations fit), stochastic simulation
 (mean and standard deviation series).
 
-Not yet: EViews workfile pages with panel structure, programs with subroutines, and
-EViews-specific add-ins.
+Panel pages: workfile Proc > Structure/Resize Current Page (cross-section id and date
+series) or `pagestruct id @date(t)`; Proc > Reshape Current Page: Unstack in New Page or
+`pageunstack(namepat="*_?", page=wide) id t @ x` makes one series per unit. On a panel
+page `x.uroot(ips)` gives the Im-Pesaran-Shin test. EViews programs run from File may use
+subroutines, `include` files and matrix algebra (see the translator README).
+
+Not yet: panel estimators on panel pages, EViews-specific add-ins.
+
+Known issue: Qt 6.8 on macOS can crash when accessibility automation tools drive the
+window in the background; normal mouse and keyboard use is not affected.
 
 ## Tests
 ```bash

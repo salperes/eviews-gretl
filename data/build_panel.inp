@@ -1,0 +1,12 @@
+# Builds data/panel_demo.csv: a small balanced panel (3 units x 30 years)
+# from the annual averages of log GDP, consumption and investment
+set verbose off
+open usmacro.gdt --quiet
+dataset compact 1 avg
+smpl 1990 2019
+matrix Y = {log(GDP), log(CONS), log(INV)}
+nulldata 90 --preserve
+series ID = 11 + floor((index - 1) / 30)
+series YEAR = 1990 + (index - 1) % 30
+series LY = vec(Y)
+store panel_demo.csv ID YEAR LY

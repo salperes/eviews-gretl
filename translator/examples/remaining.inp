@@ -53,7 +53,7 @@ bundle V2 = ev_varest("1 2 ev_v3 ev_v4", dataset, 0, "dlog(gdp) dlog(cons)")
 # text object LR
 # text LR: @lr2(@u1) = 0
 ev_svar_lr(&V2, 0, {2, 1})
-ev_varirfplot(V2, 8, "plot01.png")
+ev_varirfplot(V2, 8)
 
 bundle EQC = ev_ls("dlog(CONS) c dlog(CONS(-1)) dlog(GDP)", dataset)
 bundle EQI = ev_ls("dlog(INV) c dlog(INV(-1)) FFR", dataset)

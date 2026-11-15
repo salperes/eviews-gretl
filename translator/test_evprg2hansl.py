@@ -151,8 +151,83 @@ class RealPrograms(unittest.TestCase):
         self.assertEqual(translate_line("eq1.makegarch h", c), ["series h = eq1_h"])
         self.assertEqual(translate_line("hf = @coefs(2)+@coefs(3)*resid(-1)^2", c),
                          ["series hf = eq1.coeff[2]+eq1.coeff[3]*eq1_resid(-1)^2"])
+        # EViews arch(ARCH, GARCH) -> gretl garch GARCH ARCH
+        self.assertEqual(translate_line("equation e9.arch(1,2) yy c", c)[0], "catch garch 2 1 ; yy const --quiet")
+        self.assertEqual(translate_line("equation eq2.arch(1,1,t) yy c", c)[0],
+                         'bundle ev_gb = ev_garch("yy c", dataset, "tarch", 1, 1, 1)')
+        out = translate_line("equation eq3.arch(1,1,e) yy c", c)
+        self.assertEqual(out[0], 'bundle ev_gb = ev_garch("yy c", dataset, "egarch", 1, 1, 1)')
+        self.assertIn("bundle eq3 = ev_gb", out)
+        self.assertEqual(translate_line("eq3.makegarch h", c), ["series h = eq3_h"])
+        self.assertEqual(translate_line("u = resid", c), ["series u = eq3_resid"])
+        self.assertEqual(translate_line("eq3.output", c), ["ev_garchprint(&eq3)"])
         with self.assertRaises(ValueError):
-            translate_line("equation eq2.arch(1,1,t) yy c", c)
+            translate_line("equation eq4.arch(archm=var) yy c", c)
+
+    def test_panel(self):
+        c = Ctx()
+        self.assertEqual(translate_line("pagestruct panelid @date(date)", c)[0], "setobs panelid date --panel-vars")
+        self.assertEqual(translate_line("x.uroot(ips,info=aic,maxlag=10)", c), ["adf 10 x --c --test-down=AIC"])
+        self.assertEqual(translate_line("x.uroot(llc,maxlag=4)", c),
+                         ["if $datatype == 3", "levinlin 4 x", "else", "adf 4 x --c", "endif"])
+        out = translate_line('pageunstack(namepat="*_?",page="un") panelid date @ x', c)
+        self.assertIn("matrix ev_u1 = ev_unstack(x)", out)
+        self.assertIn('string ev_nm = sprintf("x_%g", ev_uid[ev_j])', out)
+        self.assertEqual(c.page, "un")
+        with self.assertRaises(ValueError):
+            translate_line("pageunstack id t @ x", Ctx())
+
+    def test_matrix_algebra(self):
+        c = Ctx()
+        self.assertEqual(tl("vector(3) v"), ["matrix v = zeros(3, 1)"])
+        self.assertEqual(tl("rowvector(4) r = 2"), ["matrix r = ones(1, 4) * 2"])
+        self.assertEqual(translate_line("matrix(2,2) m", c), ["matrix m = zeros(2, 2)"])
+        self.assertEqual(translate_line("matrix b = @inverse(@transpose(x)*x)", c), ["matrix b = inv(transp(x)*x)"])
+        self.assertEqual(translate_line("matrix k = @kronecker(@identity(2), m)", c), ["matrix k = (I(2) ** m)"])
+        self.assertEqual(translate_line("scalar d = @det(m) + m(1,2) * @trace(m)", c), ["scalar d = det(m) + m[1,2] * tr(m)"])
+        self.assertEqual(translate_line("m = @emult(m, m)", c), ["matrix m = (m .* m)"])
+        self.assertEqual(translate_line("matrix e = @subextract(m,1,2,2,2)", c), ["matrix e = m[1:2,2:2]"])
+        self.assertEqual(translate_line("matrix c2 = @columnextract(m,2)", c), ["matrix c2 = m[,2]"])
+        self.assertEqual(translate_line("stom(y, ym)", c), ["matrix ym = {y}"])
+        self.assertEqual(translate_line("mtos(ym, y2)", c), ["series y2 = ym"])
+        self.assertEqual(translate_line("m(1,1) = 5", c), ["m[1,1] = 5"])
+
+
+class Structure(unittest.TestCase):
+    def test_subroutine_and_call(self):
+        prg = """call twice(gdp, 3, "out")
+subroutine twice(series x, scalar !k, string %nm)
+  series {%nm}_new = x * !k
+endsub
+"""
+        h, todos = translate(prg)
+        self.assertIn("series out_new = gdp * 3", h)
+        self.assertEqual(todos, [])
+        h, todos = translate("call nothere(1)\n")
+        self.assertEqual(len(todos), 1)
+
+    def test_nested_calls(self):
+        prg = """subroutine a(series x)
+  call b(x)
+endsub
+subroutine b(series y)
+  series z = y + 1
+endsub
+call a(cons)
+"""
+        self.assertIn("series z = cons + 1", translate(prg)[0])
+
+    def test_include(self):
+        import os, tempfile
+        from evprg2hansl import translate_full
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "lib.prg"), "w") as f:
+            f.write("subroutine sq(series x)\n  series x2 = x^2\nendsub\n")
+        h, todos, _ = translate_full('include "lib"\ncall sq(gdp)\n', base_dir=d)
+        self.assertIn("series x2 = gdp^2", h)
+        self.assertEqual(todos, [])
+        h, todos, _ = translate_full("include nofile\n", base_dir=d)
+        self.assertEqual(len(todos), 1)
 
     def test_group_elements(self):
         c = Ctx()

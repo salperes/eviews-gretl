@@ -3081,6 +3081,211 @@ function series ev_modelseries (bundle ms "ev_modelsolve result", int k[1::1] "E
 end function
 
 # -------------------------------------------------------------------
+# ARCH family (eq.arch): GARCH, TARCH (GJR) and EGARCH, via the gig package
+# -------------------------------------------------------------------
+
+function bundle ev_garch (string spec "Mean equation, e.g. y c x",
+                          list vars "Series used (e.g. dataset)",
+                          string model[null] "garch, tarch or egarch",
+                          int narch[0::1] "ARCH order",
+                          int ngarch[0::1] "GARCH order",
+                          bool quiet[0])
+    string md = exists(model) ? tolower(model) : "garch"
+    errorif(!instring(" garch tarch egarch ", " " ~ md ~ " "), "model must be garch, tarch or egarch")
+    scalar gtype = md == "garch" ? 1 : (md == "tarch" ? 3 : 7)
+    strings tok = strsplit(spec)
+    series evg_y = ev_gen(tok[1], vars)
+    list X = null
+    strings xlab = array(0)
+    loop i = 2..nelem(tok)
+        if tolower(tok[i]) == "c"
+            list X += const
+            xlab += "C"
+        else
+            string v = sprintf("evg_x%d", i)
+            series @v = ev_gen(tok[i], vars)
+            list X += @v
+            xlab += toupper(tok[i])
+        endif
+    endloop
+    if nelem(X) > 0
+        bundle m = gig_setup(evg_y, gtype, X)
+    else
+        bundle m = gig_setup(evg_y, gtype)
+    endif
+    gig_set_pq(&m, ngarch, narch)
+    gig_estimate(&m, 0)
+    scalar failed = !inbundle(m, "criteria")
+    if !failed && inbundle(m, "errcode")
+        failed = m.errcode != 0
+    endif
+    if failed
+        # like EViews: warn and let the program go on (b.failed = 1, no estimates)
+        printf "Warning: %s estimation of %s failed (no convergence)\n", toupper(md), toupper(tok[1])
+        return _(kind = "garch", failed = 1, model = md, spec = spec)
+    endif
+    scalar nm = nelem(X)
+    scalar ng = gtype == 1 ? 0 : narch
+    scalar nv = 1 + narch + ng + ngarch
+    # gig's layout: mean, omega, alpha (narch), gamma (narch, fixed at 0 for GARCH),
+    # beta (ngarch), then distribution parameters; the vcv covers the active ones
+    matrix pos = seq(1, nm + 1 + narch)
+    if gtype != 1
+        pos ~= seq(nm + 2 + narch, nm + 1 + 2 * narch)
+    endif
+    pos ~= seq(nm + 2 + 2 * narch, nm + 1 + 2 * narch + ngarch)
+    matrix act = m.active
+    matrix vpos = zeros(1, cols(pos))
+    loop i = 1..cols(pos)
+        scalar pi = pos[i]
+        vpos[i] = imaxc(act .= pi)
+    endloop
+    matrix c = m.coeff[pos]
+    if inbundle(m, "vcv")
+        matrix V = m.vcv[vpos, vpos]
+    else
+        # EViews also reports estimates when the covariance cannot be computed
+        printf "Warning: the coefficient covariance could not be computed (singular Hessian)\n"
+        matrix V = mshape(NA, cols(pos), cols(pos))
+    endif
+    # gig's GJR: h = w + a(|e| - g e)^2 + b h  ->  EViews TARCH:
+    # h = w + A e^2 + G e^2 (e < 0) + b h, with A = a(1-g)^2, G = 4ag (delta method)
+    if gtype == 3
+        matrix Jm = I(nm + nv)
+        loop i = 1..narch
+            scalar ia = nm + 1 + i
+            scalar ig = nm + 1 + narch + i
+            scalar a = c[ia]
+            scalar g = c[ig]
+            Jm[ia, ia] = (1 - g)^2
+            Jm[ia, ig] = -2 * a * (1 - g)
+            Jm[ig, ia] = 4 * g
+            Jm[ig, ig] = 4 * a
+            c[ia] = a * (1 - g)^2
+            c[ig] = 4 * a * g
+        endloop
+        V = Jm * V * Jm'
+    endif
+    bundle b
+    b.kind = "garch"
+    b.failed = 0
+    b.model = md
+    b.spec = spec
+    b.depvar = toupper(tok[1])
+    b.method = "ML ARCH - Normal distribution (gig, BFGS)"
+    strings lab = array(0)
+    loop i = 1..nm + nv
+        lab += sprintf("C(%d)", i)
+    endloop
+    b.clabels = lab
+    b.xlab = xlab
+    b.nm = nm
+    b.narch = narch
+    b.ngarch = ngarch
+    b.coeff = c
+    b.vcv = V
+    b.stderr = sqrt(diag(V))
+    b.k = rows(c)
+    b.lnl = m.criteria[1]
+    b.T = m.nobs
+    b.h = {m.h}
+    b.uhat = {m.uhat}
+    series evg_o = obs
+    b.tobs = {evg_o}
+    # keep only the estimation rows
+    matrix okr = ok(b.h) .* ok(b.uhat)
+    b.h = selifr(b.h, okr)
+    b.uhat = selifr(b.uhat, okr)
+    b.tobs = selifr(b.tobs, okr)
+    b.sample = sprintf("%s %s", obslabel(minc(b.tobs)), obslabel(maxc(b.tobs)))
+    b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    # variance equation as EViews writes it
+    string ve = sprintf("C(%d)", nm + 1)
+    if gtype == 7
+        loop i = 1..narch
+            ve ~= sprintf(" + C(%d)*ABS(RESID(-%d)/@SQRT(GARCH(-%d)))", nm + 1 + i, i, i)
+        endloop
+        loop i = 1..narch
+            ve ~= sprintf(" + C(%d)*RESID(-%d)/@SQRT(GARCH(-%d))", nm + 1 + narch + i, i, i)
+        endloop
+        loop i = 1..ngarch
+            ve ~= sprintf(" + C(%d)*LOG(GARCH(-%d))", nm + 1 + narch + ng + i, i)
+        endloop
+        ve = "LOG(GARCH) = " ~ ve
+    else
+        loop i = 1..narch
+            ve ~= sprintf(" + C(%d)*RESID(-%d)^2", nm + 1 + i, i)
+        endloop
+        loop i = 1..ng
+            ve ~= sprintf(" + C(%d)*RESID(-%d)^2*(RESID(-%d)<0)", nm + 1 + narch + i, i, i)
+        endloop
+        loop i = 1..ngarch
+            ve ~= sprintf(" + C(%d)*GARCH(-%d)", nm + 1 + narch + ng + i, i)
+        endloop
+        ve = "GARCH = " ~ ve
+    endif
+    b.vareq = ve
+    scalar n = b.T
+    b.aic = -2 * b.lnl / n + 2 * b.k / n
+    b.sc = -2 * b.lnl / n + b.k * log(n) / n
+    b.hq = -2 * b.lnl / n + 2 * b.k * log(log(n)) / n
+    if !quiet
+        ev_garchprint(&b)
+    endif
+    return b
+end function
+
+function void ev_garchprint (bundle *b)
+    printf "\nDependent Variable: %s\nMethod: %s\nDate: %s\n", b.depvar, b.method, b.estdate
+    printf "Sample: %s\nIncluded observations: %d\n", b.sample, b.T
+    printf "%s\n\n", b.vareq
+    ev__line(78)
+    printf "%-26s%13s%13s%14s%12s\n", "Variable", "Coefficient", "Std. Error", "z-Statistic", "Prob."
+    ev__line(78)
+    loop i = 1..b.nm
+        scalar z = b.coeff[i] / b.stderr[i]
+        printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", b.xlab[i], b.coeff[i], b.stderr[i], z, 2 * pvalue(z, abs(z))
+    endloop
+    printf "\n%38s\n\n", "Variance Equation"
+    loop i = b.nm + 1..b.k
+        scalar z = b.coeff[i] / b.stderr[i]
+        printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", b.clabels[i], b.coeff[i], b.stderr[i], z, 2 * pvalue(z, abs(z))
+    endloop
+    ev__line(78)
+    printf "%-22s%14.6f    %-24s%14.6f\n", "Log likelihood", b.lnl, "Akaike info criterion", b.aic
+    printf "%-22s%14s    %-24s%14.6f\n", "", "", "Schwarz criterion", b.sc
+    printf "%-22s%14s    %-24s%14.6f\n", "", "", "Hannan-Quinn criter.", b.hq
+    ev__line(78)
+end function
+
+function series ev_garchseries (bundle b "ev_garch result", string what[null] "h (conditional variance) or resid")
+    string w = exists(what) ? tolower(what) : "h"
+    return ev__toseries(w == "h" ? b.h : b.uhat, b.tobs)
+end function
+
+# -------------------------------------------------------------------
+# Panel helpers (pageunstack)
+# -------------------------------------------------------------------
+
+function matrix ev_unstack (series x "Series of a balanced panel")
+    # T x N matrix: one column per cross-section unit
+    errorif($datatype != 3, "The current page is not a panel (use pagestruct first)")
+    scalar T = $pd
+    scalar N = $nobs / T
+    errorif(N != int(N), "The panel must be balanced")
+    set skip_missing off
+    return mshape({x}, T, N)
+end function
+
+function matrix ev_panelids (series id "Cross-section identifier")
+    # value of the identifier for each unit, in panel order
+    errorif($datatype != 3, "The current page is not a panel")
+    set skip_missing off
+    matrix v = {id}
+    return v[seq(1, rows(v), $pd)]
+end function
+
+# -------------------------------------------------------------------
 # GUI entry (Model menu) and bundle roles
 # -------------------------------------------------------------------
 
