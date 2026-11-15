@@ -425,6 +425,16 @@ w.execute("equation ecr.cointreg(method=dols) log(cons) log(gdp)")
 w.open_object(("ecr", "equation"))
 check("DOLS" in w.windows["ecr"].text.toPlainText(), "cointegrating regression window (DOLS)")
 
+_QID.getInt = staticmethod(lambda *a, **k: (6, True))
+ew.rescorr()
+check("Q-Stat" in ew.text.toPlainText(), "equation view: residual correlogram")
+ew.run_text("bundle ev_qa = ev_ubreak(eqls)")
+check("Quandt-Andrews" in ew.text.toPlainText(), "equation view: Quandt-Andrews")
+w.windows["gcoint"].cause()
+check("Granger" in w.windows["gcoint"].text.toPlainText(), "group view: Granger causality")
+vw2.var_view("bundle ev_w = ev_varwhite(vtest)")
+check("Heteroskedasticity" in vw2.text.toPlainText(), "VAR view: White test")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
 if failures:

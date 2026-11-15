@@ -29,3 +29,23 @@ series lc = log(cons)
 series lgd = log(gdp)
 equation efm.cointreg lc lgd
 equation edo.cointreg(method=dols, lead=2, lag=2) lc lgd
+
+' T5, T10, T12: residual correlogram, Quandt-Andrews, VIF
+smpl 1970q1 2019q4
+equation e1.ls dc c dg ffr
+e1.correlogram(8)
+e1.ubreak(15)
+e1.varinf
+' G5: pairwise Granger causality
+group gg dc dg
+gg.cause(2)
+' V6-V8, Y6: VAR White test, impulse responses with bootstrap bands, VAR as a model, restricted VEC
+smpl 1985q1 2015q4
+var v1.ls 1 2 dc dg ffr @ c
+v1.white
+v1.impulse(8, imp=gen, se=boot, rep=50)
+v1.makemodel(mv)
+smpl 2016q1 2019q4
+mv.solve
+smpl 1960q1 2019q4
+var vec1.ec(c, 1) 1 2 lc lgd

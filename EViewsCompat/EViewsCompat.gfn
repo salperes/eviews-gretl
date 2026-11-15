@@ -1952,7 +1952,7 @@ endloop
 </code>
 </gretl-function>
 <gretl-function name="ev_vecm" type="bundle">
- <params count="6">
+ <params count="8">
   <param name="spec" type="string">
 <description>Lag pairs of the differences, endogenous, then exogenous after the at-sign</description>
   </param>
@@ -1968,6 +1968,12 @@ endloop
   <param name="quiet" type="bool" default="0"/>
   <param name="names" type="string" optional="true">
 <description>Display names, space separated</description>
+  </param>
+  <param name="Rr" type="matrix" optional="true">
+<description>Restrictions on vec(beta): R</description>
+  </param>
+  <param name="qr" type="matrix" optional="true">
+<description>Restrictions on vec(beta): q</description>
   </param>
  </params>
 <code>string AT = &quot;@&quot;
@@ -2028,9 +2034,23 @@ if nelem(X) &gt; 0
 else
   vecm order crank Y --silent @opt
 endif
+scalar lr_r = NA
+scalar lr_p = NA
+if exists(Rr)
+  restrict --full --silent
+    R = Rr
+    q = qr
+  end restrict
+  catch lr_r = $test
+  catch lr_p = $pvalue
+endif
 bundle sys = $system
 bundle b
 b.kind = &quot;vecm&quot;
+if exists(Rr)
+  b.lr_restr = lr_r
+  b.lr_restr_p = lr_p
+endif
 b.spec = spec
 b.case = cs
 b.rank = crank
@@ -5825,6 +5845,510 @@ endloop
 ev__line(78)
 </code>
 </gretl-function>
+<gretl-function name="ev_rescorr" type="matrix">
+ <params count="4">
+  <param name="b" type="bundle">
+<description>Equation with residuals (uhat)</description>
+  </param>
+  <param name="k" type="int" min="1" default="12">
+<description>Lags</description>
+  </param>
+  <param name="squared" type="bool" default="0">
+<description>Correlogram of squared residuals</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># AC, PAC, Ljung-Box Q and its p-value for lags 1..k (EViews eq.correlogram / correlsq)
+matrix u = b.uhat
+if squared
+  u = u.^2
+endif
+u = u - meanc(u)
+scalar T = rows(u)
+matrix ac = zeros(k, 1)
+loop j = 1..k
+  ac[j] = (u[j+1:T]'u[1:T-j]) / (u'u)
+endloop
+# partial autocorrelations by Durbin-Levinson
+matrix pac = zeros(k, 1)
+matrix phi = zeros(k, k)
+loop j = 1..k
+  if j == 1
+    phi[1, 1] = ac[1]
+  else
+    scalar num = ac[j]
+    scalar den = 1
+    loop i = 1..j-1
+      num -= phi[j-1, i] * ac[j-i]
+      den -= phi[j-1, i] * ac[i]
+    endloop
+    phi[j, j] = num / den
+    loop i = 1..j-1
+      phi[j, i] = phi[j-1, i] - phi[j, j] * phi[j-1, j-i]
+    endloop
+  endif
+  pac[j] = phi[j, j]
+endloop
+matrix Q = cum(T * (T + 2) * ac.^2 ./ (T - seq(1, k)'))
+scalar narma = inbundle(b, &quot;narma&quot;) ? b.narma : 0
+matrix pv = zeros(k, 1)
+loop j = 1..k
+  pv[j] = j &gt; narma ? pvalue(c, j - narma, Q[j]) : NA
+endloop
+matrix R = ac ~ pac ~ Q ~ pv
+cnameset(R, defarray(&quot;AC&quot;, &quot;PAC&quot;, &quot;Q-Stat&quot;, &quot;Prob&quot;))
+if !quiet
+  printf &quot;\nCorrelogram of %s\nIncluded observations: %d\n\n&quot;, squared ? &quot;Residuals Squared&quot; : &quot;Residuals&quot;, T
+  printf &quot;%6s%12s%12s%12s%10s\n&quot;, &quot;&quot;, &quot;AC&quot;, &quot;PAC&quot;, &quot;Q-Stat&quot;, &quot;Prob&quot;
+  loop j = 1..k
+    printf &quot;%6d%12.4f%12.4f%12.4f%10.4f\n&quot;, j, ac[j], pac[j], Q[j], pv[j]
+  endloop
+endif
+return R
+</code>
+</gretl-function>
+<gretl-function name="ev_ubreak" type="bundle">
+ <params count="3">
+  <param name="b" type="bundle">
+<description>ev_ls result</description>
+  </param>
+  <param name="trim" type="scalar" default="0.15">
+<description>Trimming fraction (EViews default 15%)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># Quandt-Andrews unknown breakpoint test: Chow F at every date in the trimmed sample
+errorif(!inbundle(b, &quot;X&quot;), &quot;The Quandt-Andrews test needs a least squares equation (ev_ls)&quot;)
+matrix y = b.y
+matrix X = b.X
+scalar n = rows(y)
+scalar k = cols(X)
+scalar t1 = ceil(trim * n)
+scalar t2 = floor((1 - trim) * n)
+matrix Fs = {}
+matrix at = {}
+loop t = t1 + 1..t2
+  matrix m1 = seq(1, n)' .&lt; t
+  bundle a1 = ev__olsr(selifr(y, m1), selifr(X, m1))
+  bundle a2 = ev__olsr(selifr(y, !m1), selifr(X, !m1))
+  scalar ssru = a1.ssr + a2.ssr
+  Fs |= ((b.ssr - ssru) / k) / (ssru / (n - 2 * k))
+  at |= b.tobs[t]
+endloop
+bundle r
+r.F = Fs
+r.tobs = at
+scalar im = imaxc(Fs)
+r.maxF = Fs[im]
+r.maxWald = k * Fs[im]
+r.break = obslabel(at[im])
+r.expF = log(meanc(exp(Fs / 2)))
+r.aveF = meanc(Fs)
+# Andrews (1993) asymptotic p-value of the sup-Wald statistic (gretl qlrpval)
+r.maxWaldp = qlrpval(r.maxWald, k, trim, 1 - trim)
+if !quiet
+  printf &quot;\nQuandt-Andrews unknown breakpoint test\nNull Hypothesis: No breakpoints within %g%% trimmed data\n&quot;, 100 * trim
+  printf &quot;Varying regressors: all equation variables\nEquation Sample: %s\nTest Sample: %s %s\nNumber of breaks compared: %d\n\n&quot;, b.sample, obslabel(at[1]), obslabel(at[rows(at)]), rows(at)
+  printf &quot;%-40s%14s%10s\n&quot;, &quot;Statistic&quot;, &quot;Value&quot;, &quot;Prob.&quot;
+  ev__line(64)
+  printf &quot;%-40s%14.6f%10.4f\n&quot;, sprintf(&quot;Maximum Wald F-statistic (%s)&quot;, r.break), r.maxF, r.maxWaldp
+  printf &quot;%-40s%14.6f\n&quot;, &quot;Exp Wald F-statistic&quot;, r.expF
+  printf &quot;%-40s%14.6f\n&quot;, &quot;Ave Wald F-statistic&quot;, r.aveF
+  ev__line(64)
+  printf &quot;Note: probability from Andrews (1993) via Hansen's approximation (gretl qlrpval)\n&quot;
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_vif" type="matrix">
+ <params count="2">
+  <param name="b" type="bundle">
+<description>ev_ls result</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># coefficient variance (uncentered) and centered variance inflation factors
+errorif(!inbundle(b, &quot;X&quot;), &quot;VIFs need a least squares equation (ev_ls)&quot;)
+matrix X = b.X
+matrix V = b.vcv
+scalar k = cols(X)
+matrix R = zeros(k, 3)
+loop j = 1..k
+  R[j, 1] = V[j, j]
+  matrix xj = X[, j]
+  matrix oth = {}
+  if j == 1
+    oth = X[, 2:k]
+  elif j == k
+    oth = X[, 1:k-1]
+  else
+    oth = X[, 1:j-1] ~ X[, j+1:k]
+  endif
+  matrix e = xj - oth * mols(xj, oth)
+  R[j, 2] = (xj'xj) / (e'e)                 # uncentered VIF
+  matrix d = xj - meanc(xj)
+  R[j, 3] = sdc(xj) &gt; 0 ? (d'd) / (e'e) : NA # centered VIF (NA for the constant)
+endloop
+if !quiet
+  printf &quot;\nVariance Inflation Factors\nIncluded observations: %d\n\n&quot;, b.T
+  printf &quot;%-20s%16s%16s%16s\n&quot;, &quot;Variable&quot;, &quot;Coefficient&quot;, &quot;Uncentered&quot;, &quot;Centered&quot;
+  printf &quot;%-20s%16s%16s%16s\n&quot;, &quot;&quot;, &quot;Variance&quot;, &quot;VIF&quot;, &quot;VIF&quot;
+  ev__line(68)
+  loop j = 1..k
+    if ok(R[j, 3])
+      printf &quot;%-20s%16.6g%16.6f%16.6f\n&quot;, b.labels[j], R[j, 1], R[j, 2], R[j, 3]
+    else
+      printf &quot;%-20s%16.6g%16.6f%16s\n&quot;, b.labels[j], R[j, 1], R[j, 2], &quot;NA&quot;
+    endif
+  endloop
+endif
+return R
+</code>
+</gretl-function>
+<gretl-function name="ev_paneltests" type="bundle">
+ <params count="3">
+  <param name="spec" type="string">
+<description>Equation, e.g. y c x</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>bundle fe = ev_panel(spec, vars, &quot;fixed&quot;, 0, 1)
+bundle re = ev_panel(spec, vars, &quot;random&quot;, 0, 1)
+bundle po = ev_panel(spec, vars, &quot;none&quot;, 0, 1)
+# slopes only (no constant)
+matrix keep = zeros(1, fe.k)
+loop i = 1..fe.k
+  keep[i] = fe.xlab[i] != &quot;C&quot;
+endloop
+matrix d = selifr(fe.coeff - re.coeff, keep')
+matrix Vd = selifc(selifr(fe.vcv - re.vcv, keep'), keep)
+bundle r
+r.hausman = qform(d', inv(Vd))
+r.hdf = rows(d)
+r.hp = pvalue(c, r.hdf, r.hausman)
+scalar N = fe.ncross
+scalar q = N - 1
+r.F = ((po.ssr - fe.ssr) / q) / (fe.ssr / fe.df)
+r.Fdf1 = q
+r.Fdf2 = fe.df
+r.Fp = pvalue(F, q, fe.df, r.F)
+r.chi2 = -2 * (po.lnl - fe.lnl)
+r.chi2p = pvalue(c, q, r.chi2)
+if !quiet
+  printf &quot;\nCorrelated Random Effects - Hausman Test\nTest cross-section random effects\n\n&quot;
+  printf &quot;%-26s%18s%10s%10s\n&quot;, &quot;Test Summary&quot;, &quot;Chi-Sq. Statistic&quot;, &quot;Chi-Sq. d.f.&quot;, &quot;Prob.&quot;
+  ev__line(68)
+  printf &quot;%-26s%18.6f%10d%10.4f\n&quot;, &quot;Cross-section random&quot;, r.hausman, r.hdf, r.hp
+  ev__line(68)
+  printf &quot;\nRedundant Fixed Effects Tests\nTest cross-section fixed effects\n\n&quot;
+  printf &quot;%-26s%14s%14s%10s\n&quot;, &quot;Effects Test&quot;, &quot;Statistic&quot;, &quot;d.f.&quot;, &quot;Prob.&quot;
+  ev__line(68)
+  printf &quot;%-26s%14.6f%14s%10.4f\n&quot;, &quot;Cross-section F&quot;, r.F, sprintf(&quot;(%d,%d)&quot;, q, fe.df), r.Fp
+  printf &quot;%-26s%14.6f%14d%10.4f\n&quot;, &quot;Cross-section Chi-square&quot;, r.chi2, q, r.chi2p
+  ev__line(68)
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_cause" type="matrix">
+ <params count="4">
+  <param name="names" type="string">
+<description>Series, e.g. y x z</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="p" type="int" min="1" default="2">
+<description>Lags</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>strings tok = strsplit(names)
+scalar m = nelem(tok)
+set skip_missing off
+matrix Y = {}
+matrices L = array(m)
+loop i = 1..m
+  series evg_x = ev_gen(tok[i], vars)
+  Y ~= {evg_x}
+  matrix M = {}
+  loop j = 1..p
+    series evg_l = ev_gen(ev__lagx(tok[i], j, vars), vars)
+    M ~= {evg_l}
+  endloop
+  L[i] = M
+endloop
+matrix R = {}
+if !quiet
+  printf &quot;\nPairwise Granger Causality Tests\nLags: %d\n\n&quot;, p
+  printf &quot;%-44s%8s%14s%10s\n&quot;, &quot;Null Hypothesis:&quot;, &quot;Obs&quot;, &quot;F-Statistic&quot;, &quot;Prob.&quot;
+  ev__line(76)
+endif
+loop a = 1..m
+  loop cc = 1..m
+    if a != cc
+      # does tok[c] Granger-cause tok[a]?
+      matrix yv = Y[, a]
+      matrix Xr = ones(rows(yv), 1) ~ L[a]
+      matrix Xu = Xr ~ L[cc]
+      matrix okr = sumr(!ok(yv ~ Xu)) .= 0
+      bundle r0 = ev__olsr(selifr(yv, okr), selifr(Xr, okr))
+      bundle r1 = ev__olsr(selifr(yv, okr), selifr(Xu, okr))
+      scalar n = sumc(okr)
+      scalar Fst = ((r0.ssr - r1.ssr) / p) / (r1.ssr / (n - cols(Xu)))
+      scalar pv = pvalue(F, p, n - cols(Xu), Fst)
+      R |= {cc, a, n, Fst, pv}
+      if !quiet
+        printf &quot;%-44s%8d%14.5f%10.4f\n&quot;, sprintf(&quot; %s does not Granger Cause %s&quot;, toupper(tok[cc]), toupper(tok[a])), n, Fst, pv
+      endif
+    endif
+  endloop
+endloop
+return R
+</code>
+</gretl-function>
+<gretl-function name="ev_varwhite" type="bundle">
+ <params count="2">
+  <param name="v" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># joint White test without cross terms (Lutkepohl/Kelejian system LM)
+matrix U = v.sys.uhat
+matrix X = v.sys.X
+scalar T = rows(U)
+scalar n = cols(U)
+matrix Z = ones(T, 1)
+loop j = 1..cols(X)
+  if sdc(X[, j]) &gt; 0
+    Z ~= X[, j] ~ X[, j].^2
+  endif
+endloop
+matrix P = {}
+loop i = 1..n
+  loop j = i..n
+    P ~= U[, i] .* U[, j]
+  endloop
+endloop
+scalar m = cols(P)
+matrix Pc = P .- meanc(P)
+matrix E = P - Z * mols(P, Z)
+scalar q = cols(Z) - 1
+bundle r
+r.chi2 = T * (m - tr(inv(Pc'Pc / T) * (E'E / T)))
+r.df = m * q
+r.p = pvalue(c, r.df, r.chi2)
+if !quiet
+  printf &quot;\nVAR Residual Heteroskedasticity Tests (Levels and Squares)\nIncluded observations: %d\n\n&quot;, T
+  printf &quot;Joint test:\n%14s%8s%10s\n&quot;, &quot;Chi-sq&quot;, &quot;df&quot;, &quot;Prob.&quot;
+  printf &quot;%14.6f%8d%10.4f\n&quot;, r.chi2, r.df, r.p
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_varimpulse" type="bundle">
+ <params count="7">
+  <param name="v" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="h" type="int" min="1" default="10">
+<description>Horizon</description>
+  </param>
+  <param name="kind" type="string" optional="true">
+<description>chol (default) or gen (generalized)</description>
+  </param>
+  <param name="accum" type="bool" default="0">
+<description>Accumulated responses</description>
+  </param>
+  <param name="reps" type="int" min="0" default="200">
+<description>Bootstrap repetitions for the bands (0: none)</description>
+  </param>
+  <param name="level" type="scalar" default="0.95">
+<description>Band coverage</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>string k = exists(kind) ? tolower(kind) : &quot;chol&quot;
+errorif(k != &quot;chol&quot; &amp;&amp; k != &quot;gen&quot;, &quot;kind must be chol or gen&quot;)
+scalar n = v.n
+matrix A = v.sys.A
+matrix S = v.sys.sigma
+bundle r
+r.irf = ev__irfs(A, S, n, h, k, accum)
+if reps &gt; 0
+  # residual bootstrap: rebuild the data with resampled residuals, re-estimate by OLS
+  matrix U = v.sys.uhat
+  matrix X = v.sys.X
+  matrix Y = v.sys.Y
+  matrix B = v.coeff
+  scalar T = rows(U)
+  scalar p = maxr(v.lags)
+  matrix lg = v.lags
+  matrix draws = zeros(reps, h * n * n)
+  loop b = 1..reps
+    matrix Ub = U[mrandgen(i, 1, T, T, 1),]
+    matrix Yb = Y
+    matrix Xb = X
+    loop t = 1..T
+      # rebuild the lagged regressors from the simulated values
+      matrix row = X[t,]
+      scalar col = v.hasc
+      loop i = 1..n
+        loop jj = 1..cols(lg)
+          scalar j = lg[jj]
+          col++
+          if t - j &gt;= 1
+            row[col] = Yb[t - j, i]
+          endif
+        endloop
+      endloop
+      Xb[t,] = row
+      Yb[t,] = row * B + Ub[t,]
+    endloop
+    matrix Bb = mols(Yb, Xb)
+    matrix Eb = Yb - Xb * Bb
+    # companion matrix of the bootstrap estimates
+    matrix Ab = zeros(n * p, n * p)
+    loop i = 1..n
+      scalar col = v.hasc
+      loop ii = 1..n
+        loop jj = 1..cols(lg)
+          scalar j = lg[jj]
+          col++
+          Ab[i, (j - 1) * n + ii] = Bb[col, i]
+        endloop
+      endloop
+    endloop
+    if p &gt; 1
+      Ab[n + 1:n * p, 1:n * (p - 1)] = I(n * (p - 1))
+    endif
+    draws[b,] = vec(ev__irfs(Ab, Eb'Eb / T, n, h, k, accum))'
+  endloop
+  scalar a = (1 - level) / 2
+  r.lo = mshape(quantile(draws, a)', h, n * n)
+  r.hi = mshape(quantile(draws, 1 - a)', h, n * n)
+  r.reps = reps
+endif
+r.kind = k
+r.accum = accum
+if !quiet
+  printf &quot;\n%s%s impulse responses, horizon %d%s\n&quot;, accum ? &quot;Accumulated &quot; : &quot;&quot;, k == &quot;gen&quot; ? &quot;Generalized&quot; : &quot;Cholesky (one S.D.)&quot;, h, reps &gt; 0 ? sprintf(&quot;, %d bootstrap draws&quot;, reps) : &quot;&quot;
+  loop s = 1..n
+    printf &quot;\nResponse to %s:\n%6s&quot;, v.ylab[s], &quot;Period&quot;
+    loop t = 1..n
+      printf &quot;%16s&quot;, v.ylab[t]
+    endloop
+    printf &quot;\n&quot;
+    loop t = 1..h
+      printf &quot;%6d&quot;, t
+      loop i = 1..n
+        printf &quot;%16.6f&quot;, r.irf[t, (s - 1) * n + i]
+      endloop
+      printf &quot;\n&quot;
+    endloop
+  endloop
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_var2eqs" type="bundles">
+ <params count="2">
+  <param name="v" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+ </params>
+<code># each VAR equation as a least-squares equation bundle, for ev_modelsolve (var.makemodel)
+bundles out = array(0)
+scalar n = v.n
+matrix lg = v.lags
+loop i = 1..n
+  string spec = v.ytok[i]
+  if v.hasc
+    spec ~= &quot; c&quot;
+  endif
+  loop ii = 1..n
+    loop jj = 1..cols(lg)
+      spec ~= &quot; &quot; ~ ev__lagx(v.ytok[ii], lg[jj], vars)
+    endloop
+  endloop
+  loop x = 1..nelem(v.xtok)
+    if tolower(v.xtok[x]) != &quot;c&quot;
+      spec ~= &quot; &quot; ~ v.xtok[x]
+    endif
+  endloop
+  bundle e = defbundle()
+  e.kind = &quot;ls&quot;
+  e.spec = spec
+  e.coeff = v.coeff[, i]
+  e.sigma = sqrt(v.sys.sigma[i, i])
+  out += e
+endloop
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_vecrestrict" type="bundle">
+ <params count="4">
+  <param name="v" type="bundle">
+<description>ev_vecm result</description>
+  </param>
+  <param name="restr" type="string">
+<description>e.g. B(1,1)=1, B(1,2)=-1</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># linear restrictions on vec(beta); EViews B(i,j) = gretl beta[j, i]
+matrix beta = v.beta
+scalar nb = rows(beta)
+scalar r = cols(beta)
+# restrictions are separated by commas outside B(i,j)
+strings parts = strsplit(regsub(regsub(restr, &quot;\s&quot;, &quot;&quot;), &quot;,(?![0-9]+\))&quot;, &quot;;&quot;), &quot;;&quot;)
+matrix R = {}
+matrix q = {}
+loop i = 1..nelem(parts)
+  string pt = parts[i]
+  errorif(!instring(pt, &quot;=&quot;), &quot;Each restriction needs '=': &quot; ~ pt)
+  strings lrs = strsplit(pt, &quot;=&quot;)
+  matrix row = zeros(1, nb * r)
+  string t = regsub(toupper(lrs[1]), &quot;-&quot;, &quot;+-&quot;)
+  strings terms = strsplit(t, &quot;+&quot;)
+  loop jj = 1..nelem(terms)
+    string term = terms[jj]
+    if term != &quot;&quot;
+      errorif(instring(term, &quot;A(&quot;), &quot;Restrictions on the adjustment coefficients A() are not supported&quot;)
+      string sc = regsub(term, &quot;\*?B\(.*&quot;, &quot;&quot;)
+      scalar coef = sc == &quot;&quot; ? 1 : (sc == &quot;-&quot; ? -1 : atof(sc))
+      scalar ri = atof(regsub(term, &quot;.*B\(([0-9]+),.*&quot;, &quot;\1&quot;))
+      scalar cj = atof(regsub(term, &quot;.*B\([0-9]+,([0-9]+)\).*&quot;, &quot;\1&quot;))
+      row[(ri - 1) * nb + cj] = row[(ri - 1) * nb + cj] + coef
+    endif
+  endloop
+  R |= row
+  q |= atof(lrs[2])
+endloop
+bundle w = ev_vecm(v.spec, vars, v.case, v.rank, 1, null, R, q)
+w.restr = restr
+if !quiet
+  printf &quot;\nCointegration Restrictions: %s\n&quot;, restr
+  printf &quot;Restricted cointegrating vector(s) (rows = variables):\n&quot;
+  matrix br = w.beta
+  print br
+  if inbundle(w, &quot;lr_restr&quot;)
+    printf &quot;LR test for binding restrictions: Chi-square(%d) = %g, Prob. = %.4f\n&quot;, rows(q) - r * r, w.lr_restr, w.lr_restr_p
+  endif
+endif
+return w
+</code>
+</gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
  <params count="5">
   <param name="spec" type="string">
@@ -6954,6 +7478,33 @@ loop j = 1..jmax
   endif
 endloop
 return O
+</code>
+</gretl-function>
+<gretl-function name="ev__irfs" type="matrix" private="1">
+ <params count="6">
+  <param name="A" type="matrix" const="true"/>
+  <param name="S" type="matrix" const="true"/>
+  <param name="n" type="scalar"/>
+  <param name="h" type="scalar"/>
+  <param name="kind" type="string"/>
+  <param name="accum" type="bool"/>
+ </params>
+<code># responses (h x n^2; column (s-1)*n+t: variable t to shock s)
+scalar np = rows(A)
+matrix J = I(n) ~ zeros(n, np - n)
+matrix P = kind == &quot;gen&quot; ? S ./ sqrt(diag(S)') : cholesky(S)
+matrix R = zeros(h, n * n)
+matrix Ap = I(np)
+loop t = 1..h
+  matrix Phi = J * Ap * J'
+  matrix M = Phi * P
+  R[t,] = vec(M)'
+  Ap = Ap * A
+endloop
+if accum
+  R = cum(R)
+endif
+return R
 </code>
 </gretl-function>
 <sample-script>

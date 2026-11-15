@@ -372,6 +372,33 @@ class Phase2Estimators(unittest.TestCase):
             translate_line("equation e11.censored(t) y c x", c)
 
 
+class Phase2Tests(unittest.TestCase):
+    def test_views(self):
+        c = Ctx()
+        translate_line("equation e.ls y c x", c)
+        self.assertEqual(translate_line("e.correlogram(8)", c), ["matrix e_corr = ev_rescorr(e, 8, 0)"])
+        self.assertEqual(translate_line("e.correlsq(4)", c), ["matrix e_corr = ev_rescorr(e, 4, 1)"])
+        self.assertEqual(translate_line("e.ubreak(15)", c), ["bundle e_ubreak = ev_ubreak(e, 0.15)"])
+        self.assertEqual(translate_line("e.varinf", c), ["matrix e_vif = ev_vif(e)"])
+        translate_line("group g y x", c)
+        self.assertEqual(translate_line("g.cause(4)", c), ['matrix g_cause = ev_cause("y x", dataset, 4)'])
+        translate_line("pagestruct id @date(t)", c)
+        translate_line("equation ep.ls(cx=r) y c x", c)
+        self.assertEqual(translate_line("ep.ranhaus", c), ["bundle ep_ptest = ev_paneltests(ep.spec, dataset)"])
+
+    def test_var(self):
+        c = Ctx()
+        translate_line("var v.ls 1 2 y1 y2 @ c", c)
+        self.assertEqual(translate_line("v.white", c), ["bundle v_white = ev_varwhite(v)"])
+        self.assertEqual(translate_line("v.impulse(10, imp=gen, a, se=boot, rep=200)", c),
+                         ['bundle v_irf = ev_varimpulse(v, 10, "gen", 1, 200, 0.95)'])
+        out = translate_line("v.makemodel(mv)", c)
+        self.assertIn("bundles ev_vm_v = ev_var2eqs(v, dataset)", out)
+        self.assertIn("bundle v_eq2 = ev_vm_v[2]", out)
+        out = translate_line("mv.solve", c)
+        self.assertIn("bundles ev_mb = defarray(v_eq1, v_eq2)", out)
+
+
 class Structure(unittest.TestCase):
     def test_subroutine_and_call(self):
         prg = """call twice(gdp, 3, "out")

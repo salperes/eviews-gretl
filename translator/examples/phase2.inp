@@ -45,3 +45,36 @@ series LGD = log(GDP)
 bundle EFM = ev_cointreg("LC LGD", dataset, "fmols", 1, 1, "const")
 bundle EDO = ev_cointreg("LC LGD", dataset, "dols", 2, 2, "const")
 
+# T5, T10, T12: residual correlogram, Quandt-Andrews, VIF
+smpl full
+smpl 1970:1 2019:4
+bundle E1 = ev_ls("DC c DG FFR", dataset)
+matrix E1_corr = ev_rescorr(E1, 8, 0)
+bundle E1_ubreak = ev_ubreak(E1, 0.15)
+matrix E1_vif = ev_vif(E1)
+# G5: pairwise Granger causality
+list GG = DC DG
+matrix GG_cause = ev_cause("DC DG", dataset, 2)
+# V6-V8, Y6: VAR White test, impulse responses with bootstrap bands, VAR as a model, restricted VEC
+smpl full
+smpl 1985:1 2015:4
+bundle V1 = ev_varest("1 2 DC DG FFR @ c", dataset, 0, "dc dg ffr")
+bundle V1_white = ev_varwhite(V1)
+bundle V1_irf = ev_varimpulse(V1, 8, "gen", 0, 50, 0.95)
+bundles ev_vm_V1 = ev_var2eqs(V1, dataset)
+bundle V1_eq1 = ev_vm_V1[1]
+bundle V1_eq2 = ev_vm_V1[2]
+bundle V1_eq3 = ev_vm_V1[3]
+smpl full
+smpl 2016:1 2019:4
+bundles ev_mb = defarray(V1_eq1, V1_eq2, V1_eq3)
+strings ev_mi = array(0)
+bundle ev_mo = _(suffix = "_0", addfactors = 0, reps = 0)
+bundle MV = ev_modelsolve(ev_mb, ev_mi, dataset, 1, 0, ev_mo)
+series DC_0 = ev_modelseries(MV, 1)
+series DG_0 = ev_modelseries(MV, 2)
+series FFR_0 = ev_modelseries(MV, 3)
+smpl full
+smpl 1960:1 2019:4
+bundle VEC1 = ev_vecm("1 2 LC LGD", dataset, "c", 1, 0, "lc lgd")
+

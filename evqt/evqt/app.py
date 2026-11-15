@@ -352,7 +352,8 @@ class GroupWindow(ObjectWindow):
                       ("Descriptive Stats", lambda: self.run_text(f"summary {name}")),
                       ("Covariance / Correlation", lambda: self.run_text(f"corr {name}")),
                       ("Cointegration Test: Engle-Granger", lambda: self.coint("eg")),
-                      ("Cointegration Test: Phillips-Ouliaris", lambda: self.coint("po"))]),
+                      ("Cointegration Test: Phillips-Ouliaris", lambda: self.coint("po")),
+                      ("Granger Causality...", self.cause)]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
             ("Name", lambda: main.rename_object(name)),
@@ -361,6 +362,11 @@ class GroupWindow(ObjectWindow):
             ("Sample", main.sample_dialog),
         ]))
         self.spreadsheet()
+
+    def cause(self):
+        k, ok = QInputDialog.getInt(self, "Lag Specification", "Lags to include:", 2, 1, 24)
+        if ok:
+            self.run_text(f'matrix ev_ca = ev_cause("{" ".join(self.members())}", dataset, {k})')
 
     def coint(self, method):
         self.run_text(f'bundle ev_cg = ev_cointeg("{" ".join(self.members())}", dataset, "{method}")')
@@ -410,7 +416,9 @@ class EquationWindow(ObjectWindow):
         if self.kind == "panel":
             self.set_toolbar(_toolbar([
                 ("View", [("Estimation Output", self.output),
-                          ("Actual, Fitted, Residual Graph", self.afr)]),
+                          ("Actual, Fitted, Residual Graph", self.afr),
+                          ("Fixed/Random Effects Testing: Hausman and Redundant Fixed Effects",
+                           lambda: self.run_text(f"bundle ev_pt = ev_paneltests({name}.spec, dataset)"))]),
                 ("Proc", [("Make Residual Series...", lambda: self.make("resid")),
                           ("Make Fitted Series...", lambda: self.make("fit"))]),
                 ("Object", [("Delete", lambda: main.delete_object(name))]),
@@ -448,7 +456,10 @@ class EquationWindow(ObjectWindow):
                       ("Stability Diagnostics: Chow Breakpoint Test...", lambda: self.chow(0)),
                       ("Stability Diagnostics: Chow Forecast Test...", lambda: self.chow(1)),
                       ("Stability Diagnostics: Ramsey RESET Test...", self.reset),
-                      ("Stability Diagnostics: Recursive Estimates (CUSUM)...", self.rls)]),
+                      ("Stability Diagnostics: Recursive Estimates (CUSUM)...", self.rls),
+                      ("Stability Diagnostics: Quandt-Andrews Breakpoint Test", lambda: self.run_text(f"bundle ev_qa = ev_ubreak({name})")),
+                      ("Residual Diagnostics: Correlogram - Q-statistics...", self.rescorr),
+                      ("Coefficient Diagnostics: Variance Inflation Factors", lambda: self.run_text(f"matrix ev_vf = ev_vif({name})"))]),
             ("Proc", [("Make Residual Series...", lambda: self.make("resid")),
                       ("Make Fitted Series...", lambda: self.make("fit"))]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
@@ -494,6 +505,11 @@ class EquationWindow(ObjectWindow):
                 return
             fn = "ev_resid" if kind == "resid" else "ev_fit"
             self.main.execute(f"series {n.strip()} = {fn}({self.name})", hansl=True)
+
+    def rescorr(self):
+        k, ok = QInputDialog.getInt(self, "Correlogram Specification", "Lags to include:", 12, 1, 100)
+        if ok:
+            self.run_text(f"matrix ev_rc = ev_rescorr({self.name}, {k})")
 
     def hettest(self):
         ty, ok = QInputDialog.getItem(self, "Heteroskedasticity Tests", "Test type:",
@@ -668,7 +684,8 @@ class VarWindow(ObjectWindow):
                       ("Residuals: Graphs", self.resid_graph),
                       ("Lag Structure: AR Roots Table", lambda: self.var_view(f"matrix ev_vroots = ev_varroots({name})")),
                       ("Residual Tests: Serial Correlation LM...", self.var_lm),
-                      ("Residual Tests: Normality (Cholesky)", lambda: self.var_view(f"bundle ev_n = ev_varnorm({name})"))]),
+                      ("Residual Tests: Normality (Cholesky)", lambda: self.var_view(f"bundle ev_n = ev_varnorm({name})")),
+                      ("Residual Tests: White Heteroskedasticity (No Cross Terms)", lambda: self.var_view(f"bundle ev_w = ev_varwhite({name})"))]),
             ("Proc", [("Make Residuals", self.make_resids),
                       ("Forecast...", self.var_forecast),
                       ("Estimate Structural Factorization...", self.svar)]),

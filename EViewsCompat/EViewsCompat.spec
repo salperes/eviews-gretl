@@ -22,7 +22,8 @@ public = ev_gen ev_ls ev_print ev_plot ev_wald ev_diag ev_freeze \
   ev_pp ev_cointeg ev_seasadj ev_varroots ev_varlm ev_varnorm ev_varfcast ev_varfseries \
   ev_pagecol ev_freqconv ev_left ev_right ev_mid ev_instr ev_word ev_dateval ev_datestr ev_date \
   ev_table ev_tset ev_tsetnum ev_tget ev_twidth ev_ttext ev_tprint ev_tsave \
-  ev_mlreg ev_mlprint ev_wls ev_cointreg ev_dpanel ev_coefprint ev_ls_gui
+  ev_mlreg ev_mlprint ev_wls ev_cointreg ev_dpanel ev_coefprint \
+  ev_rescorr ev_ubreak ev_vif ev_paneltests ev_cause ev_varwhite ev_varimpulse ev_var2eqs ev_vecrestrict ev_ls_gui
 gui-main = ev_ls_gui
 bundle-print = ev_print
 bundle-plot = ev_plot

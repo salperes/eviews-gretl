@@ -1,0 +1,100 @@
+# Phase 2 tests and VAR/VEC additions against gretl
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+smpl 1970:1 2019:4
+bundle e = ev_ls("dlog(CONS) c dlog(GDP) FFR", dataset, null, 1)
+# --- T5 residual correlogram
+matrix C = ev_rescorr(e, 6, 0, 1)
+series u = ev_resid(e)
+matrix G = corrgm(u, 6)
+check("residual AC(2) = gretl corrgm", C[2, 1], G[2, 1], 1e-8)
+check("residual PAC(3) = gretl corrgm", C[3, 2], G[3, 2], 1e-8)
+# --- T10 Quandt-Andrews against gretl qlrtest
+ols dc const dg FFR --quiet
+qlrtest --quiet
+scalar qt = $test
+scalar qp = $pvalue
+bundle qa = ev_ubreak(e, 0.15, 0)
+printf "gretl qlrtest: test %g p %g; ours maxF %g maxWald %g p %g\n", qt, qp, qa.maxF, qa.maxWald, qa.maxWaldp
+check("Quandt-Andrews max statistic = gretl qlrtest", qt == qa.maxF || abs(qt - qa.maxWald) < 1e-6 * (1 + qt), 1)
+check("Quandt-Andrews p-value = gretl qlrtest", qa.maxWaldp, qp, 1e-6)
+# --- T12 VIF
+matrix V = ev_vif(e, 0)
+ols dc const dg FFR --quiet
+vif --quiet
+matrix gv = $result
+check("centered VIF of FFR = gretl vif", V[3, 3], gv[2], 1e-6)
+# --- G5 pairwise Granger causality vs OLS + omit
+matrix GC = ev_cause("dlog(CONS) dlog(GDP)", dataset, 2, 0)
+ols dc const dc(-1) dc(-2) dg(-1) dg(-2) --quiet
+omit dg_1 dg_2 --test-only --quiet
+check("Granger: dlog(GDP) does not cause dlog(CONS) = OLS F", GC[1, 4], $test)
+# --- V8 White test: one-variable VAR = univariate White without cross terms
+smpl 1985:1 2015:4
+bundle v1 = ev_varest("1 2 dg", dataset, 1)
+bundle W1 = ev_varwhite(v1, 1)
+ols dg const dg(-1) dg(-2) --quiet
+modtest --white-nocross --quiet
+check("V8 White (one variable) = gretl modtest --white-nocross", W1.chi2, $test, 1e-6)
+bundle v = ev_varest("1 2 dc dg FFR", dataset, 1)
+bundle W = ev_varwhite(v, 0)
+check("V8 joint White df = 6 products x 12 regressors", W.df, 6 * 12)
+# --- V7 impulse responses: Cholesky point estimates, bands, generalized, accumulated
+matrix R0 = ev_varirf(v, 8, 1)
+bundle ir = ev_varimpulse(v, 8, "chol", 0, 100, 0.9, 1)
+check("V7 Cholesky responses = ev_varirf", ir.irf[3, 4], R0[3, 4], 1e-8)
+check("V7 bootstrap band contains the estimate (impact)", ir.lo[1, 1] <= ir.irf[1, 1] && ir.irf[1, 1] <= ir.hi[1, 1], 1)
+bundle ig = ev_varimpulse(v, 8, "gen", 0, 0, 0.95, 1)
+check("V7 generalized response of the first variable = Cholesky (ordering)", ig.irf[1, 1], ir.irf[1, 1], 1e-8)
+bundle ia = ev_varimpulse(v, 8, "chol", 1, 0, 0.95, 1)
+check("V7 accumulated = cumulative sum", ia.irf[5, 2], sumc(ir.irf[1:5, 2]), 1e-8)
+# --- Y6 VAR as a model: dynamic solution = VAR dynamic forecast
+bundles ve = ev_var2eqs(v, dataset)
+smpl 2016:1 2019:4
+strings noid = array(0)
+bundle ms = ev_modelsolve(ve, noid, dataset, 1, 1)
+bundle fc = ev_varfcast(v, dataset, 1, 1)
+check("Y6 model from a VAR: solution = VAR forecast (FFR, 2019:4)", ms.sol[16, 3], fc.fcast[16, 3], 1e-6)
+# --- V6 restricted VEC
+smpl 1960:1 2019:4
+series lc = log(CONS)
+series ly = log(GDP)
+bundle vv = ev_vecm("1 2 lc ly", dataset, "c", 1, 1)
+bundle vr = ev_vecrestrict(vv, "B(1,1)=1, B(1,2)=-1", dataset, 0)
+check("V6 restricted beta: B(1,1) = 1", vr.beta[1, 1], 1, 1e-8)
+check("V6 restricted beta: B(1,2) = -1", vr.beta[2, 1], -1, 1e-8)
+check("V6 LR test reported", ok(vr.lr_restr) && vr.lr_restr >= 0, 1)
+# --- T15 panel tests
+open ../../data/panel_demo.csv --quiet
+setobs ID YEAR --panel-vars
+series ly1 = LY(-1)
+bundle pt = ev_paneltests("LY c LY(-1)", dataset, 0)
+# Hausman as EViews defines it: difference of the FE and RE covariance matrices
+# (gretl's own Hausman statistic uses another variance estimate: about 1.96 here)
+panel LY const ly1 --fixed-effects --quiet
+scalar bf = $coeff[2]
+scalar vf = $vcv[2, 2]
+panel LY const ly1 --random-effects --quiet
+scalar br = $coeff[2]
+scalar vr2 = $vcv[2, 2]
+check("T15 Hausman = (bFE-bRE)^2 / (VFE-VRE)", pt.hausman, (bf - br)^2 / (vf - vr2), 1e-8)
+ols LY const ly1 --quiet
+scalar ssrp = $ess
+genr unitdum
+list D = du_*
+ols LY const ly1 D --quiet
+scalar Fm = ((ssrp - $ess) / (nelem(D) - 1)) / ($ess / $df)
+check("T15 redundant fixed effects F = LSDV F", pt.F, Fm, 1e-6)

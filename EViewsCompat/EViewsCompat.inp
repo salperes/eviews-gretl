@@ -2272,7 +2272,9 @@ function bundle ev_vecm (string spec "Lag pairs of the differences, endogenous, 
                          string tcase[null] "Trend case a, b, c (default), d or e",
                          int crank[1::1] "Number of cointegrating equations",
                          bool quiet[0],
-                         string names[null] "Display names, space separated")
+                         string names[null] "Display names, space separated",
+                         matrix Rr[null] "Restrictions on vec(beta): R",
+                         matrix qr[null] "Restrictions on vec(beta): q")
     string AT = "@"
     string cs = exists(tcase) ? tolower(tcase) : "c"
     errorif(!instring(" a b c d e ", " " ~ cs ~ " "), "trend case must be a, b, c, d or e")
@@ -2331,9 +2333,23 @@ function bundle ev_vecm (string spec "Lag pairs of the differences, endogenous, 
     else
         vecm order crank Y --silent @opt
     endif
+    scalar lr_r = NA
+    scalar lr_p = NA
+    if exists(Rr)
+        restrict --full --silent
+            R = Rr
+            q = qr
+        end restrict
+        catch lr_r = $test
+        catch lr_p = $pvalue
+    endif
     bundle sys = $system
     bundle b
     b.kind = "vecm"
+    if exists(Rr)
+        b.lr_restr = lr_r
+        b.lr_restr_p = lr_p
+    endif
     b.spec = spec
     b.case = cs
     b.rank = crank
@@ -5714,6 +5730,466 @@ function bundle ev_dpanel (string y "Dependent variable",
         ev__line(78)
     endif
     return b
+end function
+
+# -------------------------------------------------------------------
+# Equation views: residual correlogram, Quandt-Andrews, VIF
+# -------------------------------------------------------------------
+
+function matrix ev_rescorr (bundle b "Equation with residuals (uhat)", int k[1::12] "Lags",
+                            bool squared[0] "Correlogram of squared residuals", bool quiet[0])
+    # AC, PAC, Ljung-Box Q and its p-value for lags 1..k (EViews eq.correlogram / correlsq)
+    matrix u = b.uhat
+    if squared
+        u = u.^2
+    endif
+    u = u - meanc(u)
+    scalar T = rows(u)
+    matrix ac = zeros(k, 1)
+    loop j = 1..k
+        ac[j] = (u[j+1:T]'u[1:T-j]) / (u'u)
+    endloop
+    # partial autocorrelations by Durbin-Levinson
+    matrix pac = zeros(k, 1)
+    matrix phi = zeros(k, k)
+    loop j = 1..k
+        if j == 1
+            phi[1, 1] = ac[1]
+        else
+            scalar num = ac[j]
+            scalar den = 1
+            loop i = 1..j-1
+                num -= phi[j-1, i] * ac[j-i]
+                den -= phi[j-1, i] * ac[i]
+            endloop
+            phi[j, j] = num / den
+            loop i = 1..j-1
+                phi[j, i] = phi[j-1, i] - phi[j, j] * phi[j-1, j-i]
+            endloop
+        endif
+        pac[j] = phi[j, j]
+    endloop
+    matrix Q = cum(T * (T + 2) * ac.^2 ./ (T - seq(1, k)'))
+    scalar narma = inbundle(b, "narma") ? b.narma : 0
+    matrix pv = zeros(k, 1)
+    loop j = 1..k
+        pv[j] = j > narma ? pvalue(c, j - narma, Q[j]) : NA
+    endloop
+    matrix R = ac ~ pac ~ Q ~ pv
+    cnameset(R, defarray("AC", "PAC", "Q-Stat", "Prob"))
+    if !quiet
+        printf "\nCorrelogram of %s\nIncluded observations: %d\n\n", squared ? "Residuals Squared" : "Residuals", T
+        printf "%6s%12s%12s%12s%10s\n", "", "AC", "PAC", "Q-Stat", "Prob"
+        loop j = 1..k
+            printf "%6d%12.4f%12.4f%12.4f%10.4f\n", j, ac[j], pac[j], Q[j], pv[j]
+        endloop
+    endif
+    return R
+end function
+
+function bundle ev_ubreak (bundle b "ev_ls result", scalar trim[0.15] "Trimming fraction (EViews default 15%)",
+                           bool quiet[0])
+    # Quandt-Andrews unknown breakpoint test: Chow F at every date in the trimmed sample
+    errorif(!inbundle(b, "X"), "The Quandt-Andrews test needs a least squares equation (ev_ls)")
+    matrix y = b.y
+    matrix X = b.X
+    scalar n = rows(y)
+    scalar k = cols(X)
+    scalar t1 = ceil(trim * n)
+    scalar t2 = floor((1 - trim) * n)
+    matrix Fs = {}
+    matrix at = {}
+    loop t = t1 + 1..t2
+        matrix m1 = seq(1, n)' .< t
+        bundle a1 = ev__olsr(selifr(y, m1), selifr(X, m1))
+        bundle a2 = ev__olsr(selifr(y, !m1), selifr(X, !m1))
+        scalar ssru = a1.ssr + a2.ssr
+        Fs |= ((b.ssr - ssru) / k) / (ssru / (n - 2 * k))
+        at |= b.tobs[t]
+    endloop
+    bundle r
+    r.F = Fs
+    r.tobs = at
+    scalar im = imaxc(Fs)
+    r.maxF = Fs[im]
+    r.maxWald = k * Fs[im]
+    r.break = obslabel(at[im])
+    r.expF = log(meanc(exp(Fs / 2)))
+    r.aveF = meanc(Fs)
+    # Andrews (1993) asymptotic p-value of the sup-Wald statistic (gretl qlrpval)
+    r.maxWaldp = qlrpval(r.maxWald, k, trim, 1 - trim)
+    if !quiet
+        printf "\nQuandt-Andrews unknown breakpoint test\nNull Hypothesis: No breakpoints within %g%% trimmed data\n", 100 * trim
+        printf "Varying regressors: all equation variables\nEquation Sample: %s\nTest Sample: %s %s\nNumber of breaks compared: %d\n\n", \
+          b.sample, obslabel(at[1]), obslabel(at[rows(at)]), rows(at)
+        printf "%-40s%14s%10s\n", "Statistic", "Value", "Prob."
+        ev__line(64)
+        printf "%-40s%14.6f%10.4f\n", sprintf("Maximum Wald F-statistic (%s)", r.break), r.maxF, r.maxWaldp
+        printf "%-40s%14.6f\n", "Exp Wald F-statistic", r.expF
+        printf "%-40s%14.6f\n", "Ave Wald F-statistic", r.aveF
+        ev__line(64)
+        printf "Note: probability from Andrews (1993) via Hansen's approximation (gretl qlrpval)\n"
+    endif
+    return r
+end function
+
+function matrix ev_vif (bundle b "ev_ls result", bool quiet[0])
+    # coefficient variance (uncentered) and centered variance inflation factors
+    errorif(!inbundle(b, "X"), "VIFs need a least squares equation (ev_ls)")
+    matrix X = b.X
+    matrix V = b.vcv
+    scalar k = cols(X)
+    matrix R = zeros(k, 3)
+    loop j = 1..k
+        R[j, 1] = V[j, j]
+        matrix xj = X[, j]
+        matrix oth = {}
+        if j == 1
+            oth = X[, 2:k]
+        elif j == k
+            oth = X[, 1:k-1]
+        else
+            oth = X[, 1:j-1] ~ X[, j+1:k]
+        endif
+        matrix e = xj - oth * mols(xj, oth)
+        R[j, 2] = (xj'xj) / (e'e)                 # uncentered VIF
+        matrix d = xj - meanc(xj)
+        R[j, 3] = sdc(xj) > 0 ? (d'd) / (e'e) : NA # centered VIF (NA for the constant)
+    endloop
+    if !quiet
+        printf "\nVariance Inflation Factors\nIncluded observations: %d\n\n", b.T
+        printf "%-20s%16s%16s%16s\n", "Variable", "Coefficient", "Uncentered", "Centered"
+        printf "%-20s%16s%16s%16s\n", "", "Variance", "VIF", "VIF"
+        ev__line(68)
+        loop j = 1..k
+            if ok(R[j, 3])
+                printf "%-20s%16.6g%16.6f%16.6f\n", b.labels[j], R[j, 1], R[j, 2], R[j, 3]
+            else
+                printf "%-20s%16.6g%16.6f%16s\n", b.labels[j], R[j, 1], R[j, 2], "NA"
+            endif
+        endloop
+    endif
+    return R
+end function
+
+# -------------------------------------------------------------------
+# Panel tests: correlated random effects (Hausman), redundant fixed effects
+# -------------------------------------------------------------------
+
+function bundle ev_paneltests (string spec "Equation, e.g. y c x", list vars "Series used (e.g. dataset)",
+                               bool quiet[0])
+    bundle fe = ev_panel(spec, vars, "fixed", 0, 1)
+    bundle re = ev_panel(spec, vars, "random", 0, 1)
+    bundle po = ev_panel(spec, vars, "none", 0, 1)
+    # slopes only (no constant)
+    matrix keep = zeros(1, fe.k)
+    loop i = 1..fe.k
+        keep[i] = fe.xlab[i] != "C"
+    endloop
+    matrix d = selifr(fe.coeff - re.coeff, keep')
+    matrix Vd = selifc(selifr(fe.vcv - re.vcv, keep'), keep)
+    bundle r
+    r.hausman = qform(d', inv(Vd))
+    r.hdf = rows(d)
+    r.hp = pvalue(c, r.hdf, r.hausman)
+    scalar N = fe.ncross
+    scalar q = N - 1
+    r.F = ((po.ssr - fe.ssr) / q) / (fe.ssr / fe.df)
+    r.Fdf1 = q
+    r.Fdf2 = fe.df
+    r.Fp = pvalue(F, q, fe.df, r.F)
+    r.chi2 = -2 * (po.lnl - fe.lnl)
+    r.chi2p = pvalue(c, q, r.chi2)
+    if !quiet
+        printf "\nCorrelated Random Effects - Hausman Test\nTest cross-section random effects\n\n"
+        printf "%-26s%18s%10s%10s\n", "Test Summary", "Chi-Sq. Statistic", "Chi-Sq. d.f.", "Prob."
+        ev__line(68)
+        printf "%-26s%18.6f%10d%10.4f\n", "Cross-section random", r.hausman, r.hdf, r.hp
+        ev__line(68)
+        printf "\nRedundant Fixed Effects Tests\nTest cross-section fixed effects\n\n"
+        printf "%-26s%14s%14s%10s\n", "Effects Test", "Statistic", "d.f.", "Prob."
+        ev__line(68)
+        printf "%-26s%14.6f%14s%10.4f\n", "Cross-section F", r.F, sprintf("(%d,%d)", q, fe.df), r.Fp
+        printf "%-26s%14.6f%14d%10.4f\n", "Cross-section Chi-square", r.chi2, q, r.chi2p
+        ev__line(68)
+    endif
+    return r
+end function
+
+# -------------------------------------------------------------------
+# Pairwise Granger causality (group.cause)
+# -------------------------------------------------------------------
+
+function matrix ev_cause (string names "Series, e.g. y x z", list vars "Series used (e.g. dataset)",
+                          int p[1::2] "Lags", bool quiet[0])
+    strings tok = strsplit(names)
+    scalar m = nelem(tok)
+    set skip_missing off
+    matrix Y = {}
+    matrices L = array(m)
+    loop i = 1..m
+        series evg_x = ev_gen(tok[i], vars)
+        Y ~= {evg_x}
+        matrix M = {}
+        loop j = 1..p
+            series evg_l = ev_gen(ev__lagx(tok[i], j, vars), vars)
+            M ~= {evg_l}
+        endloop
+        L[i] = M
+    endloop
+    matrix R = {}
+    if !quiet
+        printf "\nPairwise Granger Causality Tests\nLags: %d\n\n", p
+        printf "%-44s%8s%14s%10s\n", "Null Hypothesis:", "Obs", "F-Statistic", "Prob."
+        ev__line(76)
+    endif
+    loop a = 1..m
+        loop cc = 1..m
+            if a != cc
+                # does tok[c] Granger-cause tok[a]?
+                matrix yv = Y[, a]
+                matrix Xr = ones(rows(yv), 1) ~ L[a]
+                matrix Xu = Xr ~ L[cc]
+                matrix okr = sumr(!ok(yv ~ Xu)) .= 0
+                bundle r0 = ev__olsr(selifr(yv, okr), selifr(Xr, okr))
+                bundle r1 = ev__olsr(selifr(yv, okr), selifr(Xu, okr))
+                scalar n = sumc(okr)
+                scalar Fst = ((r0.ssr - r1.ssr) / p) / (r1.ssr / (n - cols(Xu)))
+                scalar pv = pvalue(F, p, n - cols(Xu), Fst)
+                R |= {cc, a, n, Fst, pv}
+                if !quiet
+                    printf "%-44s%8d%14.5f%10.4f\n", sprintf(" %s does not Granger Cause %s", toupper(tok[cc]), toupper(tok[a])), n, Fst, pv
+                endif
+            endif
+        endloop
+    endloop
+    return R
+end function
+
+# -------------------------------------------------------------------
+# VAR: White heteroskedasticity test, impulse responses with bands, VAR -> model
+# -------------------------------------------------------------------
+
+function bundle ev_varwhite (bundle v "ev_varest result", bool quiet[0])
+    # joint White test without cross terms (Lutkepohl/Kelejian system LM)
+    matrix U = v.sys.uhat
+    matrix X = v.sys.X
+    scalar T = rows(U)
+    scalar n = cols(U)
+    matrix Z = ones(T, 1)
+    loop j = 1..cols(X)
+        if sdc(X[, j]) > 0
+            Z ~= X[, j] ~ X[, j].^2
+        endif
+    endloop
+    matrix P = {}
+    loop i = 1..n
+        loop j = i..n
+            P ~= U[, i] .* U[, j]
+        endloop
+    endloop
+    scalar m = cols(P)
+    matrix Pc = P .- meanc(P)
+    matrix E = P - Z * mols(P, Z)
+    scalar q = cols(Z) - 1
+    bundle r
+    r.chi2 = T * (m - tr(inv(Pc'Pc / T) * (E'E / T)))
+    r.df = m * q
+    r.p = pvalue(c, r.df, r.chi2)
+    if !quiet
+        printf "\nVAR Residual Heteroskedasticity Tests (Levels and Squares)\nIncluded observations: %d\n\n", T
+        printf "Joint test:\n%14s%8s%10s\n", "Chi-sq", "df", "Prob."
+        printf "%14.6f%8d%10.4f\n", r.chi2, r.df, r.p
+    endif
+    return r
+end function
+
+function matrix ev__irfs (const matrix A, const matrix S, scalar n, scalar h, string kind, bool accum)
+    # responses (h x n^2; column (s-1)*n+t: variable t to shock s)
+    scalar np = rows(A)
+    matrix J = I(n) ~ zeros(n, np - n)
+    matrix P = kind == "gen" ? S ./ sqrt(diag(S)') : cholesky(S)
+    matrix R = zeros(h, n * n)
+    matrix Ap = I(np)
+    loop t = 1..h
+        matrix Phi = J * Ap * J'
+        matrix M = Phi * P
+        R[t,] = vec(M)'
+        Ap = Ap * A
+    endloop
+    if accum
+        R = cum(R)
+    endif
+    return R
+end function
+
+function bundle ev_varimpulse (bundle v "ev_varest result", int h[1::10] "Horizon",
+                               string kind[null] "chol (default) or gen (generalized)",
+                               bool accum[0] "Accumulated responses",
+                               int reps[0::200] "Bootstrap repetitions for the bands (0: none)",
+                               scalar level[0.95] "Band coverage",
+                               bool quiet[0])
+    string k = exists(kind) ? tolower(kind) : "chol"
+    errorif(k != "chol" && k != "gen", "kind must be chol or gen")
+    scalar n = v.n
+    matrix A = v.sys.A
+    matrix S = v.sys.sigma
+    bundle r
+    r.irf = ev__irfs(A, S, n, h, k, accum)
+    if reps > 0
+        # residual bootstrap: rebuild the data with resampled residuals, re-estimate by OLS
+        matrix U = v.sys.uhat
+        matrix X = v.sys.X
+        matrix Y = v.sys.Y
+        matrix B = v.coeff
+        scalar T = rows(U)
+        scalar p = maxr(v.lags)
+        matrix lg = v.lags
+        matrix draws = zeros(reps, h * n * n)
+        loop b = 1..reps
+            matrix Ub = U[mrandgen(i, 1, T, T, 1),]
+            matrix Yb = Y
+            matrix Xb = X
+            loop t = 1..T
+                # rebuild the lagged regressors from the simulated values
+                matrix row = X[t,]
+                scalar col = v.hasc
+                loop i = 1..n
+                    loop jj = 1..cols(lg)
+                        scalar j = lg[jj]
+                        col++
+                        if t - j >= 1
+                            row[col] = Yb[t - j, i]
+                        endif
+                    endloop
+                endloop
+                Xb[t,] = row
+                Yb[t,] = row * B + Ub[t,]
+            endloop
+            matrix Bb = mols(Yb, Xb)
+            matrix Eb = Yb - Xb * Bb
+            # companion matrix of the bootstrap estimates
+            matrix Ab = zeros(n * p, n * p)
+            loop i = 1..n
+                scalar col = v.hasc
+                loop ii = 1..n
+                    loop jj = 1..cols(lg)
+                        scalar j = lg[jj]
+                        col++
+                        Ab[i, (j - 1) * n + ii] = Bb[col, i]
+                    endloop
+                endloop
+            endloop
+            if p > 1
+                Ab[n + 1:n * p, 1:n * (p - 1)] = I(n * (p - 1))
+            endif
+            draws[b,] = vec(ev__irfs(Ab, Eb'Eb / T, n, h, k, accum))'
+        endloop
+        scalar a = (1 - level) / 2
+        r.lo = mshape(quantile(draws, a)', h, n * n)
+        r.hi = mshape(quantile(draws, 1 - a)', h, n * n)
+        r.reps = reps
+    endif
+    r.kind = k
+    r.accum = accum
+    if !quiet
+        printf "\n%s%s impulse responses, horizon %d%s\n", accum ? "Accumulated " : "", \
+          k == "gen" ? "Generalized" : "Cholesky (one S.D.)", h, reps > 0 ? sprintf(", %d bootstrap draws", reps) : ""
+        loop s = 1..n
+            printf "\nResponse to %s:\n%6s", v.ylab[s], "Period"
+            loop t = 1..n
+                printf "%16s", v.ylab[t]
+            endloop
+            printf "\n"
+            loop t = 1..h
+                printf "%6d", t
+                loop i = 1..n
+                    printf "%16.6f", r.irf[t, (s - 1) * n + i]
+                endloop
+                printf "\n"
+            endloop
+        endloop
+    endif
+    return r
+end function
+
+function bundles ev_var2eqs (bundle v "ev_varest result", list vars "Series used (e.g. dataset)")
+    # each VAR equation as a least-squares equation bundle, for ev_modelsolve (var.makemodel)
+    bundles out = array(0)
+    scalar n = v.n
+    matrix lg = v.lags
+    loop i = 1..n
+        string spec = v.ytok[i]
+        if v.hasc
+            spec ~= " c"
+        endif
+        loop ii = 1..n
+            loop jj = 1..cols(lg)
+                spec ~= " " ~ ev__lagx(v.ytok[ii], lg[jj], vars)
+            endloop
+        endloop
+        loop x = 1..nelem(v.xtok)
+            if tolower(v.xtok[x]) != "c"
+                spec ~= " " ~ v.xtok[x]
+            endif
+        endloop
+        bundle e = defbundle()
+        e.kind = "ls"
+        e.spec = spec
+        e.coeff = v.coeff[, i]
+        e.sigma = sqrt(v.sys.sigma[i, i])
+        out += e
+    endloop
+    return out
+end function
+
+# -------------------------------------------------------------------
+# Restricted VEC: cointegrating vector restrictions B(r,c) (EViews text form)
+# -------------------------------------------------------------------
+
+function bundle ev_vecrestrict (bundle v "ev_vecm result", string restr "e.g. B(1,1)=1, B(1,2)=-1",
+                                list vars "Series used (e.g. dataset)", bool quiet[0])
+    # linear restrictions on vec(beta); EViews B(i,j) = gretl beta[j, i]
+    matrix beta = v.beta
+    scalar nb = rows(beta)
+    scalar r = cols(beta)
+    # restrictions are separated by commas outside B(i,j)
+    strings parts = strsplit(regsub(regsub(restr, "\s", ""), ",(?![0-9]+\))", ";"), ";")
+    matrix R = {}
+    matrix q = {}
+    loop i = 1..nelem(parts)
+        string pt = parts[i]
+        errorif(!instring(pt, "="), "Each restriction needs '=': " ~ pt)
+        strings lrs = strsplit(pt, "=")
+        matrix row = zeros(1, nb * r)
+        string t = regsub(toupper(lrs[1]), "-", "+-")
+        strings terms = strsplit(t, "+")
+        loop jj = 1..nelem(terms)
+            string term = terms[jj]
+            if term != ""
+                errorif(instring(term, "A("), "Restrictions on the adjustment coefficients A() are not supported")
+                string sc = regsub(term, "\*?B\(.*", "")
+                scalar coef = sc == "" ? 1 : (sc == "-" ? -1 : atof(sc))
+                scalar ri = atof(regsub(term, ".*B\(([0-9]+),.*", "\1"))
+                scalar cj = atof(regsub(term, ".*B\([0-9]+,([0-9]+)\).*", "\1"))
+                row[(ri - 1) * nb + cj] = row[(ri - 1) * nb + cj] + coef
+            endif
+        endloop
+        R |= row
+        q |= atof(lrs[2])
+    endloop
+    bundle w = ev_vecm(v.spec, vars, v.case, v.rank, 1, null, R, q)
+    w.restr = restr
+    if !quiet
+        printf "\nCointegration Restrictions: %s\n", restr
+        printf "Restricted cointegrating vector(s) (rows = variables):\n"
+        matrix br = w.beta
+        print br
+        if inbundle(w, "lr_restr")
+            printf "LR test for binding restrictions: Chi-square(%d) = %g, Prob. = %.4f\n", rows(q) - r * r, w.lr_restr, w.lr_restr_p
+        endif
+    endif
+    return w
 end function
 
 # -------------------------------------------------------------------

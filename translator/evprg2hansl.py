@@ -1281,6 +1281,19 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if ty not in ("bpg", "harvey", "glejser", "arch", "white"):
             raise ValueError(f"hettest type {ty} not supported")
         return [f'bundle {o}_het = ev_hettest({o}, "{ty}", {nl})']
+    if ml in ("correlogram", "correlsq") and ctx.equations.get(o, "ls") in ("ls", "tsls", "ardl", "cointreg"):
+        k = (opts or args or "12").strip() or "12"
+        return [f"matrix {o}_corr = ev_rescorr({o}, {k}, {int(ml == 'correlsq')})"]
+    if ml == "ubreak" and ctx.equations.get(o, "ls") == "ls":
+        t = (opts or "15").strip() or "15"
+        return [f"bundle {o}_ubreak = ev_ubreak({o}, {float(t) / 100:g})"]
+    if ml == "varinf" and ctx.equations.get(o, "ls") == "ls":
+        return [f"matrix {o}_vif = ev_vif({o})"]
+    if ml in ("ranhaus", "fixedtest") and ctx.equations.get(o) == "panel":
+        return [f"bundle {o}_ptest = ev_paneltests({o}.spec, dataset)"]
+    if ml == "cause" and o in ctx.groups:
+        m = re.match(r"\s*(\d+)", opts or "")
+        return [f'matrix {o}_cause = ev_cause("{" ".join(ctx.groups[o])}", dataset, {m.group(1) if m else 2})']
     if ml == "reset" and ctx.equations.get(o, "ls") == "ls":
         n = (opts or "1").strip() or "1"
         return [f"bundle {o}_reset = ev_reset({o}, {n})"]
@@ -1330,6 +1343,13 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if ml == "testexog" and ctx.equations.get(o) == "vecm":
             raise ValueError("Granger tests are for VAR objects")
         if ml == "impulse":
+            iop = [x.strip().lower() for x in (opts or "").split(",") if x.strip()]
+            iod = _opts(opts)
+            if ctx.equations.get(o) == "var" and (iod.get("imp", "").startswith("gen") or "a" in iop
+                                                 or iod.get("se", "").startswith("boot")):
+                kind = "gen" if iod.get("imp", "").startswith("gen") else "chol"
+                reps = iod.get("rep", "100") if iod.get("se", "").startswith("boot") else "0"
+                return [f'bundle {o}_irf = ev_varimpulse({o}, {h}, "{kind}", {int("a" in iop)}, {reps}, 0.95)']
             if "t" in _opts(opts):
                 return [f"matrix {o}_irf = ev_varirf({o}, {h})"]
             return [f"ev_varirfplot({o}, {h}{_plot_file_arg(ctx)})"]
@@ -1346,6 +1366,20 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if ml == "ls":
             return _var_call(obj, opts, args, ctx)
         if ctx.equations.get(o) == "var":
+            if ml == "white":
+                return [f"bundle {o}_white = ev_varwhite({o})"]
+            if ml == "makemodel":
+                mname = translate_name(args.split()[0] if args.strip() else (opts or f"{o}_model").strip(), ctx)
+                ctx.models[mname] = {"eqs": [], "ids": [], "suffix": "_0", "overrides": [], "addf": False}
+                ctx.equations[mname] = "model"
+                out = [f"bundles ev_vm_{o} = ev_var2eqs({o}, dataset)"]
+                for k, nm in enumerate(ctx.var_endo.get(o, []), 1):
+                    e = f"{o}_eq{k}"
+                    out.append(f"bundle {e} = ev_vm_{o}[{k}]")
+                    ctx.eq_dep[e] = nm
+                    ctx.equations[e] = "ls"
+                    ctx.models[mname]["eqs"].append(e)
+                return out
             if ml == "arroots":
                 return [f"matrix {o}_roots = ev_varroots({o})"]
             if ml == "arlm":
