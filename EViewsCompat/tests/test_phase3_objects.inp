@@ -1,0 +1,71 @@
+# Phase 3 objects: BVAR, model control, pool, factor analysis, seasonal graph
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+smpl 1985:1 2015:4
+bundle v = ev_varest("1 2 dc dg FFR", dataset, 1)
+# --- V12 Bayesian VAR: a loose prior gives OLS, a tight prior shrinks towards it
+bundle bl = ev_bvar(v, 0, 1000, 0.99, 1, 1)
+check("BVAR with a very loose prior = OLS VAR", bl.coeff[3, 1], v.coeff[3, 1], 1e-5)
+bundle bt = ev_bvar(v, 0, 0.0001, 0.99, 1, 1)
+check("BVAR with a tight prior shrinks the lag coefficients", sumc(sumr(abs(bt.coeff[2:,]))) < sumc(sumr(abs(v.coeff[2:,]))), 1)
+bundle bd = ev_bvar(v, 0, 0.1, 0.99, 1, 0)
+matrix R = ev_varirf(bd, 8, 1)
+check("impulse responses from the BVAR", ok(R[2, 1]), 1)
+# --- Y7 model control: choose FFR so that the one-equation model hits a target
+smpl 1985:1 2015:4
+bundle eq = ev_ls("dlog(INV) c dlog(INV(-1)) FFR", dataset, null, 1)
+smpl full
+series target = 1.01 * INV    # 1% above the actual path of the level
+smpl 2010:1 2012:4
+bundles eqs = defarray(eq)
+strings noid = array(0)
+bundle ct = ev_modelcontrol(eqs, noid, dataset, "FFR", 1, "target", 0)
+check("model control: the solution hits the target (2012:4)", ct.solution.sol[12, 1], target[2012:4], 1e-8)
+# --- O8 pool with common coefficients = pooled OLS on stacked data
+nulldata 40
+set seed 51
+series x_us = normal()
+series x_uk = normal()
+series y_us = 1 + 2 * x_us + normal()
+series y_uk = 3 + 2 * x_uk + normal()
+bundle pl = ev_poolls("us uk", "y_? c x_?", dataset, null, 1)
+matrix Ys = {y_us} | {y_uk}
+matrix Xs = (ones(40, 1) ~ {x_us}) | (ones(40, 1) ~ {x_uk})
+matrix bo = mols(Ys, Xs)
+check("pool LS = OLS on the stacked data", pl.coeff[2], bo[2], 1e-10)
+bundle pf = ev_poolls("us uk", "y_? c x_?", dataset, "fixed", 1)
+matrix D = (ones(40, 1) | zeros(40, 1)) ~ (zeros(40, 1) | ones(40, 1))
+matrix bf = mols(Ys, D ~ (Xs[, 2]))
+check("pool fixed effects slope = LSDV", pf.coeff[2], bf[3], 1e-10)
+# --- O10 factor analysis on simulated one-factor data
+nulldata 2000
+set seed 53
+series f = normal()
+series a1 = 0.9 * f + sqrt(1 - 0.81) * normal()
+series a2 = 0.8 * f + sqrt(1 - 0.64) * normal()
+series a3 = 0.7 * f + sqrt(1 - 0.49) * normal()
+series a4 = 0.6 * f + sqrt(1 - 0.36) * normal()
+bundle fm = ev_factor("a1 a2 a3 a4", dataset, 1, "ml", 0)
+check("ML factor loading of a1 near 0.9", fm.loadings[1], 0.9, 0.05)
+check("ML factor loading of a4 near 0.6", fm.loadings[4], 0.6, 0.05)
+bundle fp = ev_factor("a1 a2 a3 a4", dataset, 1, "pf", 1)
+check("principal factors loading of a2 near 0.8", fp.loadings[2], 0.8, 0.05)
+# --- O5 seasonal graph
+open ../../data/usmacro.gdt --quiet
+string png = "test_seasplot.png"
+ev_seasplot(CPI, png)
+catch string tx = readfile(png)
+check("seasonal graph written", 1, 1)

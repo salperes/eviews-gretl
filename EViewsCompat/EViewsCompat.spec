@@ -27,7 +27,8 @@ public = ev_gen ev_ls ev_print ev_plot ev_wald ev_diag ev_freeze \
   ev_ngperron ev_zivot ev_panelur ev_cf ev_smooth ev_ipolate ev_pcomp ev_pcscore ev_kdplot \
   ev_dateadd ev_datediff ev_makedate ev_wfind ev_wdrop ev_wkeep ev_wunique ev_wreplace ev_wsort ev_covp ev_cumprod ev_cummax ev_ifirst ev_ilast \
   ev_garchx ev_truncreg ev_heckit ev_robustls ev_stepls ev_switchreg ev_threshold ev_breakls ev_midaslags ev_midas ev_glm ev_enet ev_paneliv ev_panelre2 \
-  ev_influence ev_ellipse ev_covprint ev_gradients ev_breitung ev_ets ev_testequal ev_vratio ev_xcorr ev_spectrum ev_varhist ev_sysrestests ev_modelfit ev_ls_gui
+  ev_influence ev_ellipse ev_covprint ev_gradients ev_breitung ev_ets ev_testequal ev_vratio ev_xcorr ev_spectrum ev_varhist ev_sysrestests ev_modelfit \
+  ev_bvar ev_modelcontrol ev_poolls ev_factor ev_seasplot ev_ls_gui
 gui-main = ev_ls_gui
 bundle-print = ev_print
 bundle-plot = ev_plot

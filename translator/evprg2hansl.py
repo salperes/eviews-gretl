@@ -82,6 +82,10 @@ class Ctx:
     cvals: dict = field(default_factory=dict)      # starting values of c(i) (param, c(i) = v)
     graph_cmds: dict = field(default_factory=dict) # graph name -> commands that draw it
     graph_opts: dict = field(default_factory=dict) # graph name -> gnuplot settings
+    vec_restr: dict = field(default_factory=dict)  # VEC name -> restriction text (append(coint))
+    pools: dict = field(default_factory=dict)      # pool name -> identifiers
+    spools: dict = field(default_factory=dict)     # spool name -> object names
+    graph_names: dict = field(default_factory=dict)  # graph -> {element: legend text}
     args_used: set = field(default_factory=set)     # program arguments %0 %1 ...
 
 
@@ -843,8 +847,14 @@ def _graph_cmd(kind: str, members: list[str], ctx: Ctx) -> list[str]:
             raise ValueError("scatter needs two series")
         members = members[1:] + members[:1]   # gretl: x variable last
         return [f"gnuplot {' '.join(members)} {_plot_out(ctx)}"]
-    if kind in ("pie", "seasplot"):
-        raise ValueError(f"{kind} graphs are not available in gretl")
+    if kind == "pie":
+        raise ValueError("pie graphs are not available in gretl")
+    if kind == "seasplot":
+        outs = []
+        for mbr in (ctx.groups.get(members[0], members) if len(members) == 1 else members):
+            f = _plot_out(ctx).split("=", 1)[1]
+            outs.append(f"ev_seasplot({mbr}" + ("" if f == "display" else f", {f}") + ")")
+        return outs
     if kind in ("hist", "boxplot", "qqplot", "kernel", "distplot"):
         outs = []
         for mbr in (ctx.groups.get(members[0], members) if len(members) == 1 else members):
@@ -1019,6 +1029,33 @@ def _vec_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     last = out[-1]
     m = re.fullmatch(r'bundle (\S+) = ev_varest\("([^"]*)", dataset, 0, "([^"]*)"\)', last)
     out[-1] = f'bundle {m.group(1)} = ev_vecm("{m.group(2)}", dataset, "{case}", {rank}, 0, "{m.group(3)}")'
+    v = m.group(1)
+    restr = ctx.vec_restr.get(v.lower())
+    if restr:
+        if re.search(r"(?i)\bA\s*\(", restr):
+            # adjustment restrictions: gretl restrict on a VEC estimated at the top level (rank 1)
+            if rank != "1":
+                raise ValueError("restrictions on A() are supported for rank 1 only")
+            endo = ctx.var_endo.get(v, [])
+            lags = [int(x) for x in re.findall(r"\d+", spec.split("@")[0])[:2]]
+            order = (lags[1] if len(lags) > 1 else 1) + 1
+            opt = {"a": "--nc", "b": "--rc", "c": "--uc", "d": "--crt", "e": "--ct"}[case]
+            lines = []
+            for part in re.split(r",(?![^()]*\))", restr):
+                part = part.strip()
+                if not part:
+                    continue
+                part = re.sub(r"(?i)\bB\s*\(\s*1\s*,\s*(\d+)\s*\)", r"b[\1]", part)
+                part = re.sub(r"(?i)\bA\s*\(\s*(\d+)\s*,\s*1\s*\)", r"a[\1]", part)
+                if re.search(r"(?i)[AB]\s*\(", part):
+                    raise ValueError("VEC restriction not understood: " + part)
+                lines.append("    " + part)
+            out += [f"vecm {order} 1 {' '.join(endo)} --silent {opt}", "restrict --full --silent"] + lines + [
+                "end restrict", f"{v}.beta = $jbeta", f"{v}.alpha = $jalpha",
+                f"{v}.lr_restr = $test", f"{v}.lr_restr_p = $pvalue",
+                f'printf "Restricted VEC: LR test of the restrictions = %g, Prob. = %.4f\\n", {v}.lr_restr, {v}.lr_restr_p']
+        else:
+            out.append(f'bundle {v} = ev_vecrestrict({v}, "{restr}", dataset)')
     return out
 
 
@@ -1353,6 +1390,42 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return [f"ev_svar(&{o}, {translate_name(a, ctx)}, {translate_name(b, ctx)})"]
     if o in ctx.tables:
         return _table_method(o, ml, opts, args, ctx)
+    if o in ctx.pools:
+        if ml == "ls":
+            op = _opts(opts)
+            cx = "fixed" if op.get("cx", "")[:1].lower() == "f" else "none"
+            if op.get("cx", "")[:1].lower() == "r":
+                raise ValueError("pool random effects: stack the pool with pagestack and use ls(cx=r)")
+            spec = re.sub(r"\s+", " ", program_vars(args.strip(), ctx))
+            ctx.equations[o + "_eq"] = "pool"
+            return [f'bundle {o}_eq = ev_poolls("{" ".join(ctx.pools[o])}", "{spec}", dataset, "{cx}")']
+        raise ValueError(f"pool method .{meth} not supported (ls)")
+    if o in ctx.spools:
+        if ml == "append":
+            ctx.spools[o] += [translate_name(x, ctx) for x in re.split(r"[\s,]+", args.strip()) if x]
+            return [f"# spool {o}: {args.strip()}"]
+        if ml in ("save", "print", "display", "show"):
+            fmt = _opts(opts).get("t", "txt").lower()
+            f = args.strip().strip('"') or o
+            if not re.search(r"\.\w+$", f):
+                f += ".txt"
+            inner = []
+            for k, obj in enumerate(ctx.spools[o], 1):
+                if obj.lower() in ctx.graph_cmds:
+                    inner += _graph_method(obj.lower(), "save", "t=png", f"{re.sub(r'[.]\w+$', '', f)}_{obj}.png", ctx)
+                    inner.append(f'printf "\\n[graph {obj}: {re.sub(r"[.]\w+$", "", f)}_{obj}.png]\\n"')
+                elif obj in ctx.tables:
+                    inner.append(f"ev_tprint({obj})")
+                else:
+                    kind = ctx.equations.get(obj)
+                    pr = {"vecm": "ev_vecprint", "var": "ev_varprint", "panel": "ev_panelprint", "garch": "ev_garchprint",
+                          "binary": "ev_binaryprint", "ardl": "ev_ardlprint", "mlreg": "ev_mlprint",
+                          "system": "ev_sysprint"}.get(kind, "ev_print" if kind in ("ls", "tsls") else "ev_coefprint")
+                    inner.append(f"{pr}(&{obj})" if kind else f"print {obj}")
+            if ml == "save":
+                return [f'outfile "{f}" --quiet'] + ["    " + x for x in inner] + ["end outfile"]
+            return inner
+        raise ValueError(f"spool method .{meth} not supported (append, save, print)")
     if o in ctx.logls:
         if ml == "append":
             ctx.logls[o].append(args.strip())
@@ -1370,7 +1443,24 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             return _sspace_ml(o, ctx)
         if ml in ("output", "results"):
             return [f"ev_coefprint(&{o})"]
-        raise ValueError(f"sspace method .{meth} not supported")
+        if ml == "makestates":
+            states = ctx.sspaces.get(o + "#states")
+            if not states:
+                raise ValueError("makestates: estimate the sspace first (.ml)")
+            kind = _opts(opts).get("t", "pred").lower()
+            pat = args.strip() or "*"
+            out = [f"matrices ev_M = ev_ssm_{o}(ev_ccfull_{o})",
+                   "bundle ev_kb = ksetup(ev_ssY .- ev_M[5], ev_M[1], ev_M[2], ev_M[3], ev_M[4])"]
+            out += (["ev_kb.inistate = zeros(rows(ev_M[2]) - 1, 1) | 1",
+                     "ev_kb.inivar = (I(rows(ev_M[2]) - 1) * 1e7) ** 1 ~ zeros(rows(ev_M[2]) - 1, 1) | zeros(1, rows(ev_M[2]))"]
+                    if ctx.sspaces.get(o + "#const") else ["ev_kb.diffuse = 1"])
+            out.append("kfilter(&ev_kb)")
+            if kind.startswith("smooth"):
+                out.append("ksmooth(&ev_kb)")
+            for k, st in enumerate(states, 1):
+                out.append(f"series {translate_name(pat.replace('*', st), ctx)} = ev_kb.state[, {k}]")
+            return out
+        raise ValueError(f"sspace method .{meth} not supported (append, ml, makestates)")
     if o in ctx.samples and ml == "set":
         ctx.samples[o] = args.strip() or "@all"
         return [f"# sample object {o}: {ctx.samples[o]}"]
@@ -1402,6 +1492,22 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             return [f"# model {o}: identity {a}"]
         if ml == "solve":
             return _model_solve(o, opts, ctx)
+        if ml == "control":
+            toks = args.split()
+            if len(toks) != 3:
+                raise ValueError("control: give instrument, target and trajectory")
+            inst, tgt, traj = (translate_name(t, ctx) for t in toks)
+            names = [_dep_base(ctx.eq_dep[e]) for e in md["eqs"]] + [_dep_base(x.split("=", 1)[0].strip()) for x in md["ids"]]
+            low = [n.lower() for n in names]
+            if tgt.lower() not in low:
+                raise ValueError(f"control: {tgt} is not an endogenous variable of the model")
+            k = low.index(tgt.lower()) + 1
+            q = lambda arr: ", ".join(f'"{a}"' for a in arr)
+            ids = [f"{x}" for x in md["ids"]]
+            return [f"bundles ev_mb = defarray({', '.join(md['eqs'])})" if md["eqs"] else "bundles ev_mb = array(0)",
+                    f"strings ev_mi = defarray({q(ids)})" if ids else "strings ev_mi = array(0)",
+                    f'bundle {o}_ctl = ev_modelcontrol(ev_mb, ev_mi, dataset, "{inst}", {k}, "{traj}")',
+                    f"series {inst} = ev__toseries({o}_ctl.instrument, {o}_ctl.tobs)"]
         if ml == "scenario":
             nm = args.strip().strip('"')
             if nm.lower().startswith("base"):
@@ -1652,6 +1758,9 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
                     for k, n in enumerate(args.split(), 1)]
         if ml == "ls":
             return _var_call(obj, opts, args, ctx)
+        if ml == "append" and (opts or "").strip().lower() == "coint":
+            ctx.vec_restr[o.lower()] = args.strip()
+            return [f"# VEC {o}: restrictions {args.strip()}"]
         if ctx.equations.get(o) == "var":
             if ml == "white":
                 return [f"bundle {o}_white = ev_varwhite({o})"]
@@ -1923,6 +2032,29 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         return [f"bundle {name} = ev_table({translate_expr(r or '1', ctx)}, {translate_expr(c or '1', ctx)})"]
     if word == "copy":
         return _copy(cmd_opts, rest, ctx)
+    if word == "pool":
+        toks = rest.split()
+        if len(toks) < 2:
+            raise ValueError("pool: give a name and the cross-section identifiers")
+        ctx.pools[translate_name(toks[0], ctx)] = toks[1:]
+        return [f"# pool {toks[0]}: {' '.join(toks[1:])}"]
+    if word == "spool":
+        name = translate_name(rest.split()[0], ctx) if rest.strip() else "spool01"
+        ctx.spools[name] = []
+        return [f"# spool {name}"]
+    if word == "factor":
+        m = re.fullmatch(r"(?i)factor\s+(\w+)\.(ml|pf|ipf)(?:\(([^)]*)\))?\s+(.+)", s)
+        if not m:
+            raise ValueError("factor: use factor f.ml(n=2) x1 x2 x3 (or .pf)")
+        name, meth, opts, args = m.groups()
+        name = translate_name(name, ctx)
+        nf = _opts(opts).get("n", "1") or "1"
+        mems = args.split()
+        if len(mems) == 1 and translate_name(mems[0], ctx) in ctx.groups:
+            mems = ctx.groups[translate_name(mems[0], ctx)]
+        names = " ".join(translate_name(x, ctx) for x in mems)
+        ctx.equations[name] = "factor"
+        return [f'bundle {name} = ev_factor("{names}", dataset, {nf}, "{"ml" if meth.lower() == "ml" else "pf"}")']
     if word in ("logl", "sspace"):
         name = translate_name(rest.split()[0], ctx) if rest.strip() else f"{word}01"
         (ctx.logls if word == "logl" else ctx.sspaces)[name] = []
@@ -1953,6 +2085,18 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         ctx.equations[name] = "system"
         return [f"# system {name} declared"]
     if word == "var":
+        mb = re.fullmatch(r"var\s+([\w{}!%$]+)\.bvar(?:\(([^)]*)\))?\s+(.+)", s, flags=re.IGNORECASE)
+        if mb:
+            name, opts, spec = mb.groups()
+            op = _opts(opts)
+            if op.get("prior", "lit").lower()[:3] not in ("lit", "min"):
+                raise ValueError("bvar: only the Litterman/Minnesota prior is supported")
+            out = _var_call(name, None, spec, ctx)
+            nm = translate_name(name, ctx)
+            g = lambda k, d: op.get(k, d) or d
+            out.append(f"{nm} = ev_bvar({nm}, {g('mu1', '0')}, {g('l1', '0.1')}, {g('l2', '0.99')}, {g('l3', '1')})")
+            out[-1] = "bundle " + out[-1]
+            return out
         m = re.fullmatch(r"var\s+([\w{}!%$]+)\.ec(?:\(([^)]*)\))?\s+(.+)", s, flags=re.IGNORECASE)
         if m:
             return _vec_call(*m.groups(), ctx)
@@ -2402,6 +2546,22 @@ def _graph_method(g: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> lis
             raise Ignored("element option")
         sets.append(f"set linetype {k} {' '.join(parts)}")
         return [f"# graph {g}: {sets[-1]}"]
+    if ml == "name":
+        k = re.match(r"\s*(\d+)", o)
+        txt = re.search(r'"([^"]*)"', a)
+        if not (k and txt):
+            raise Ignored("name option")
+        ctx.graph_names.setdefault(g, {})[int(k.group(1))] = txt.group(1)
+        return [f"# graph {g}: legend {k.group(1)} = {txt.group(1)}"]
+    if ml == "options":
+        low = (o + " " + a).lower()
+        if "-grid" in low or "gridnone" in low:
+            sets.append("unset grid")
+        elif "grid" in low:
+            sets.append("set grid")
+        else:
+            raise Ignored("graph option")
+        return [f"# graph {g}: {sets[-1]}"]
     if ml == "legend":
         low = (o + " " + a).lower()
         if "-display" in low:
@@ -2421,10 +2581,15 @@ def _graph_method(g: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> lis
             fmt = {"png": "png", "pdf": "pdf", "eps": "eps", "emf": "png", "gif": "png", "jpg": "png"}.get(fmt, "png")
             f = a.strip('"') or g
             dest = f if re.search(r"\.\w+$", f) else f + "." + fmt
+        names = ctx.graph_names.get(g, {})
         for c in ctx.graph_cmds.get(g, []):
             if not c.startswith("gnuplot"):
                 out.append(c)
                 continue
+            mems = c.split("--")[0].split()[1:]
+            for k, txt in names.items():
+                if 1 <= k <= len(mems):
+                    out.append(f'setinfo {mems[k - 1]} --graph-name="{txt}"')
             c2 = re.sub(r'\s--output=\S+', "", c)
             target = f'--output="{dest}"' if dest else _plot_out(ctx)
             out.append(f"{c2} {target}{block}")
@@ -2525,12 +2690,16 @@ def _sspace_ml(o: str, ctx: Ctx) -> list[str]:
         raise ValueError("sspace needs @signal and @state equations")
     states = [s_[0] for s_ in sta]
     n, r = len(sig), len(states)
+    has_const = any(_parse_ss_terms(x[1], states, lagged=True)[1] != "0" for x in sta)
+    rr = r + 1 if has_const else r
     nums = _cnums([x[1] + " " + x[2] for x in sig + sta])
     fn = f"ev_ssm_{o}"
     tx = lambda e: _cref(translate_expr(e, ctx))
     body = [f"function matrices {fn} (const matrix c)",
-            f"    matrix Z = zeros({n}, {r})", f"    matrix T = zeros({r}, {r})",
-            f"    matrix Q = zeros({r}, {r})", f"    matrix R = zeros({n}, {n})", f"    matrix a = zeros(1, {n})"]
+            f"    matrix Z = zeros({n}, {rr})", f"    matrix T = zeros({rr}, {rr})",
+            f"    matrix Q = zeros({rr}, {rr})", f"    matrix R = zeros({n}, {n})", f"    matrix a = zeros(1, {n})"]
+    if has_const:
+        body.append(f"    T[{rr}, {rr}] = 1")
     for i, (lhs, rhs, var) in enumerate(sig, 1):
         coef, const = _parse_ss_terms(rhs, states, lagged=False)
         for st, cexp in coef.items():
@@ -2539,16 +2708,19 @@ def _sspace_ml(o: str, ctx: Ctx) -> list[str]:
         body.append(f"    R[{i}, {i}] = {tx(var)}")
     for i, (lhs, rhs, var) in enumerate(sta, 1):
         coef, const = _parse_ss_terms(rhs, states, lagged=True)
-        if const != "0":
-            raise ValueError("sspace: constants in state equations are not supported")
         for st, cexp in coef.items():
             body.append(f"    T[{i}, {states.index(st) + 1}] = {tx(cexp)}")
         body.append(f"    Q[{i}, {i}] = {tx(var)}")
+        if const != "0":
+            # a state constant: an extra state fixed at one (see the initial state below)
+            body.append(f"    T[{i}, {r + 1}] = {tx(const)}")
+            has_const = True
     body += ["    return defarray(Z, T, Q, R, a)", "end function",
              f"function scalar ev_ssll_{o} (const matrix c, const matrix Y)",
              f"    matrices M = {fn}(c)",
-             "    bundle kb = ksetup(Y .- M[5], M[1], M[2], M[3], M[4])",
-             "    kb.diffuse = 1",
+             "    bundle kb = ksetup(Y .- M[5], M[1], M[2], M[3], M[4])"] + (
+            [f"    kb.inistate = zeros({rr - 1}, 1) | 1", f"    kb.inivar = (I({rr - 1}) * 1e7) ** 1 ~ zeros({rr - 1}, 1) | zeros(1, {rr})"]
+            if has_const else ["    kb.diffuse = 1"]) + [
              "    scalar err = kfilter(&kb)",
              "    if err",
              "        return -1e100",
@@ -2573,7 +2745,9 @@ def _sspace_ml(o: str, ctx: Ctx) -> list[str]:
     ctx.equations[o] = "sspace"
     # only the c(i) the model uses
     keep = ", ".join(str(k) for k in nums)
-    out += [f"matrix ev_ix = {{{keep}}}", "ev_cc = ev_cc[ev_ix]", "ev_cv = ev_cv[ev_ix, ev_ix]"]
+    out += [f"matrix ev_ccfull_{o} = ev_cc", f"matrix ev_ix = {{{keep}}}", "ev_cc = ev_cc[ev_ix]", "ev_cv = ev_cv[ev_ix, ev_ix]"]
+    ctx.sspaces[o + "#states"] = states
+    ctx.sspaces[o + "#const"] = has_const
     return out + _coef_bundle(o, nums, "Maximum likelihood (BFGS, Kalman filter)", sigs.upper())
 
 

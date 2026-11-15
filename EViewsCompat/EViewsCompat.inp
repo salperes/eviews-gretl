@@ -8700,6 +8700,398 @@ function matrix ev_modelfit (bundle ms "ev_modelsolve result", bool quiet[0])
 end function
 
 # -------------------------------------------------------------------
+# Phase 3 objects: Bayesian VAR, model control, pool, factor, seasonal graph
+# -------------------------------------------------------------------
+
+function bundle ev_bvar (bundle v "ev_varest result (provides data, lags, deterministic terms)",
+                         scalar mu1[0] "Prior mean of the own first lag",
+                         scalar L1[0.1] "Overall tightness", scalar L2[0.99] "Cross-variable tightness",
+                         scalar L3[1] "Lag decay", bool quiet[0])
+    # Litterman / Minnesota prior, equation by equation (EViews BVAR, Litterman prior):
+    # prior s.d. of lag l of variable j in equation i: L1 / l^L3 (own), L1 L2 s_i / (l^L3 s_j) (others);
+    # deterministic terms get a flat prior; s_i from univariate AR regressions
+    matrix Y = v.sys.Y
+    matrix X = v.sys.X
+    scalar n = v.n
+    matrix lg = v.lags
+    scalar T = rows(Y)
+    # residual s.d. of an AR(p) for each variable (same lags)
+    matrix sd = zeros(n, 1)
+    loop i = 1..n
+        matrix cols1 = zeros(1, cols(X))
+        if v.hasc
+            cols1[1] = 1
+        endif
+        scalar c0 = v.hasc
+        loop ii = 1..n
+            loop jj = 1..cols(lg)
+                c0++
+                if ii == i
+                    cols1[c0] = 1
+                endif
+            endloop
+        endloop
+        matrix Xi = selifc(X, cols1)
+        matrix e = Y[, i] - Xi * mols(Y[, i], Xi)
+        sd[i] = sqrt(e'e / (T - cols(Xi)))
+    endloop
+    matrix B = zeros(cols(X), n)
+    matrices VV = array(n)
+    loop i = 1..n
+        matrix b0 = zeros(cols(X), 1)
+        matrix pv = 1e8 * ones(cols(X), 1)          # flat prior for deterministic terms
+        scalar c0 = v.hasc
+        loop jv = 1..n
+            loop jj = 1..cols(lg)
+                c0++
+                scalar l = lg[jj]
+                if jv == i
+                    pv[c0] = (L1 / l^L3)^2
+                    if l == 1
+                        b0[c0] = mu1
+                    endif
+                else
+                    pv[c0] = (L1 * L2 * sd[i] / (l^L3 * sd[jv]))^2
+                endif
+            endloop
+        endloop
+        matrix Vi = inv(I(rows(pv)) .* (1 ./ pv) + X'X / sd[i]^2)     # diagonal prior precision
+        B[, i] = Vi * (b0 ./ pv + X'Y[, i] / sd[i]^2)
+        VV[i] = Vi
+    endloop
+    bundle b = v
+    b.kind = "var"
+    b.bvar = 1
+    b.coeff = B
+    bundle sy = v.sys
+    sy.coeff = B
+    # companion matrix of the posterior means (for impulse responses and forecasts)
+    scalar p = maxr(lg)
+    matrix A = zeros(n * p, n * p)
+    loop i = 1..n
+        scalar c0 = v.hasc
+        loop ii = 1..n
+            loop jj = 1..cols(lg)
+                c0++
+                A[i, (lg[jj] - 1) * n + ii] = B[c0, i]
+            endloop
+        endloop
+    endloop
+    if p > 1
+        A[n + 1:n * p, 1:n * (p - 1)] = I(n * (p - 1))
+    endif
+    sy.A = A
+    matrix U = Y - X * B
+    sy.uhat = U
+    sy.sigma = U'U / T
+    b.sys = sy
+    matrix se = zeros(cols(X), n)
+    loop i = 1..n
+        matrix Vi = VV[i]
+        se[, i] = sqrt(diag(Vi))
+    endloop
+    b.se = se
+    b.prior = sprintf("Litterman/Minnesota prior: mu1 = %g, L1 = %g, L2 = %g, L3 = %g", mu1, L1, L2, L3)
+    if !quiet
+        printf "\nBayesian VAR Estimates\n%s\nSample: %s\nIncluded observations: %d\n\n", b.prior, v.sample, T
+        printf "%-20s", ""
+        loop i = 1..n
+            printf "%16s", v.ylab[i]
+        endloop
+        printf "\n"
+        loop r = 1..rows(B)
+            printf "%-20s", v.clab[r]
+            loop i = 1..n
+                printf "%16.6f", B[r, i]
+            endloop
+            printf "\n%-20s", ""
+            loop i = 1..n
+                printf "%16s", sprintf("(%.6f)", se[r, i])
+            endloop
+            printf "\n"
+        endloop
+    endif
+    return b
+end function
+
+function bundle ev_modelcontrol (bundles eqs "Model equations", strings idents "Identities", list vars "Series used",
+                                 string instrument "Exogenous series to set (the instrument)",
+                                 scalar target "Number of the endogenous variable to control",
+                                 string trajectory "Series with the target path",
+                                 bool quiet[0])
+    # EViews model.control: find the instrument path for which the solution of the target
+    # variable follows the trajectory (period by period, secant iterations)
+    series evc_tr = ev_gen(trajectory, vars)
+    set skip_missing off
+    matrix tp = {evc_tr}
+    scalar kpos = inlist(vars, instrument)
+    errorif(kpos == 0, instrument ~ " is not in the list of series")
+    string sname = instrument ~ "_ctl"
+    series @sname = vars[kpos]
+    list V2 = vars @sname
+    bundle o = _(overrides = defarray(instrument), suffix = "_ctl")
+    series evc_o = obs
+    matrix tob = {evc_o}
+    scalar T = rows(tob)
+    scalar maxit = 0
+    loop t = 1..T
+        scalar tt = tob[t]
+        scalar x0 = @sname[tt]
+        bundle ms = ev_modelsolve(eqs, idents, V2, 1, 1, o)
+        scalar f0 = ms.sol[t, target] - tp[t]
+        if abs(f0) < 1e-10 * (1 + abs(tp[t]))
+            continue
+        endif
+        scalar x1 = x0 + (abs(x0) > 0 ? 0.01 * abs(x0) : 0.01)
+        loop it = 1..60
+            series @sname = obs == tt ? x1 : @sname
+            bundle ms = ev_modelsolve(eqs, idents, V2, 1, 1, o)
+            scalar f1 = ms.sol[t, target] - tp[t]
+            maxit = max(maxit, it)
+            if abs(f1) < 1e-10 * (1 + abs(tp[t]))
+                break
+            endif
+            scalar x2 = x1 - f1 * (x1 - x0) / (f1 - f0)
+            x0 = x1
+            f0 = f1
+            x1 = x2
+        endloop
+    endloop
+    bundle ms = ev_modelsolve(eqs, idents, V2, 1, 1, o)
+    bundle r
+    r.solution = ms
+    r.instrument = {@sname}
+    r.tobs = tob
+    r.maxit = maxit
+    if !quiet
+        printf "\nModel control: instrument %s set so that %s follows %s (%d secant steps at most)\n", \
+          toupper(instrument), ms.names[target], toupper(trajectory), maxit
+    endif
+    return r
+end function
+
+function bundle ev_poolls (string ids "Cross-section identifiers, e.g. us uk jp",
+                           string spec "Pool specification with ?, e.g. y? c x?",
+                           list vars "Series used (e.g. dataset)",
+                           string cx[null] "none (default) or fixed", bool quiet[0])
+    # pool object estimation with common coefficients: stacks y_id, x_id for each identifier
+    strings u = strsplit(ids)
+    strings tok = strsplit(spec)
+    scalar N = nelem(u)
+    string ce = exists(cx) ? tolower(cx) : "none"
+    ce = ce == "f" ? "fixed" : ce
+    set skip_missing off
+    matrix Y = {}
+    matrix X = {}
+    matrix G = {}
+    strings lab = array(0)
+    loop j = 2..nelem(tok)
+        lab += toupper(tok[j])
+    endloop
+    loop i = 1..N
+        series evp_y = ev_gen(strsub(tok[1], "?", u[i]), vars)
+        matrix xi = {}
+        loop j = 2..nelem(tok)
+            if tolower(tok[j]) == "c"
+                xi ~= ones(rows({evp_y}), 1)
+            else
+                series evp_x = ev_gen(strsub(tok[j], "?", u[i]), vars)
+                xi ~= {evp_x}
+            endif
+        endloop
+        matrix okr = sumr(!ok({evp_y} ~ xi)) .= 0
+        Y |= selifr({evp_y}, okr)
+        X |= selifr(xi, okr)
+        G |= i * ones(sumc(okr), 1)
+    endloop
+    scalar n = rows(Y)
+    bundle b
+    if ce == "fixed"
+        # within transformation; the constant becomes the average effect (as EViews)
+        matrix Yw = Y
+        matrix Xw = X
+        loop i = 1..N
+            matrix m = G .= i
+            Yw = Yw - m .* meanc(selifr(Y, m))
+            Xw = Xw - m .* meanc(selifr(X, m))
+        endloop
+        matrix keep = sdc(X)' .> 0
+        matrix Xv = selifc(Xw, keep')
+        matrix e = {}
+        matrix bv = mols(Yw, Xv, &e)
+        scalar df = n - N - cols(Xv)
+        matrix V = (e'e / df) * inv(Xv'Xv)
+        # assemble with the constant (mean of the effects)
+        matrix bb = zeros(cols(X), 1)
+        matrix VV = zeros(cols(X), cols(X))
+        scalar c1 = 0
+        loop j = 1..cols(X)
+            if keep[j]
+                c1++
+                bb[j] = bv[c1]
+            endif
+        endloop
+        loop j = 1..cols(X)
+            if !keep[j]
+                bb[j] = meanc(Y - selifc(X, keep') * bv)
+            endif
+        endloop
+        b.coeff = bb
+        matrix Vfull = mshape(NA, cols(X), cols(X))
+        matrix idx = selifc(seq(1, cols(X)), keep')
+        Vfull[idx, idx] = V
+        b.vcv = Vfull
+        b.ssr = e'e
+        b.method = "Pooled Least Squares (Cross-section fixed effects)"
+    else
+        matrix e = {}
+        matrix bb = mols(Y, X, &e)
+        b.coeff = bb
+        b.vcv = (e'e / (n - cols(X))) * inv(X'X)
+        b.ssr = e'e
+        b.method = "Pooled Least Squares"
+    endif
+    b.kind = "pool"
+    b.depvar = toupper(tok[1])
+    b.labels = lab
+    b.T = n
+    b.ncross = N
+    b.k = rows(b.coeff)
+    b.stderr = sqrt(diag(b.vcv))
+    b.tstat = b.coeff ./ b.stderr
+    matrix pv = zeros(b.k, 1)
+    loop i = 1..b.k
+        pv[i] = 2 * pvalue(t, n - b.k, abs(b.tstat[i]))
+    endloop
+    b.pval = pv
+    if !quiet
+        ev_coefprint(&b)
+        printf "Cross-sections included: %d   Total pool (balanced or not) observations: %d\n", N, n
+    endif
+    return b
+end function
+
+function bundle ev_factor (string names "Series, e.g. x1 x2 x3 x4", list vars "Series used (e.g. dataset)",
+                           int nf[1::1] "Number of factors", string method[null] "ml (default) or pf (principal factors)",
+                           bool quiet[0])
+    # factor analysis of the correlation matrix: maximum likelihood or iterated principal factors
+    string m = exists(method) ? tolower(method) : "ml"
+    strings tok = strsplit(names)
+    scalar p = nelem(tok)
+    set skip_missing off
+    matrix X = {}
+    loop i = 1..p
+        series evf_x = ev_gen(tok[i], vars)
+        X ~= {evf_x}
+    endloop
+    X = selifr(X, sumr(!ok(X)) .= 0)
+    scalar n = rows(X)
+    matrix R = mcorr(X)
+    # start: principal components, communalities = squared multiple correlations
+    matrix psi = 1 ./ diag(inv(R))
+    matrix Lm = {}
+    if m == "pf"
+        matrix h2 = 1 - 1 ./ diag(inv(R))
+        loop it = 1..500
+            matrix Rr = R - diag(R) .* I(p) + h2 .* I(p)
+            matrix EV = {}
+            matrix lam = eigensym(Rr, &EV)
+            lam = mreverse(lam)
+            EV = mreverse(EV')'
+            matrix lp = lam[1:nf]
+            Lm = EV[, 1:nf] .* sqrt(lp .* (lp .> 0))'
+            matrix h2n = sumr(Lm.^2)
+            scalar dd = maxc(abs(h2n - h2))
+            h2 = h2n
+            if dd < 1e-9
+                break
+            endif
+        endloop
+        psi = 1 - h2
+    else
+        # ML: minimise log|S| + tr(R inv(S)) with S = L L' + Psi (Joreskog), via BFGS on log(psi)
+        matrix th = log(1 ./ diag(inv(R)))
+        set max_verbose off
+        catch scalar fv = BFGSmax(&th, "ev__faml(th, R, nf)")
+        matrix ps = exp(th)
+        matrix Rs = R ./ sqrt(ps * ps')
+        matrix EV = {}
+        matrix lam = eigensym(Rs, &EV)
+        lam = mreverse(lam)
+        EV = mreverse(EV')'
+        matrix lp = lam[1:nf] - 1
+        Lm = (sqrt(ps) .* EV[, 1:nf]) .* sqrt(lp .* (lp .> 0))'
+        psi = ps
+    endif
+    # sign convention: largest loading positive
+    loop j = 1..nf
+        if Lm[imaxc(abs(Lm[, j])), j] < 0
+            Lm[, j] = -Lm[, j]
+        endif
+    endloop
+    bundle r
+    r.loadings = Lm
+    r.uniqueness = psi
+    r.communality = 1 - psi
+    r.method = m
+    r.names = tok
+    r.n = n
+    if !quiet
+        printf "\nFactor Analysis\nMethod: %s\nNumber of factors: %d\nIncluded observations: %d\n\n", \
+          m == "ml" ? "Maximum Likelihood" : "Iterated Principal Factors", nf, n
+        printf "%-14s", "Variable"
+        loop j = 1..nf
+            printf "%12s", sprintf("F%d", j)
+        endloop
+        printf "%14s%14s\n", "Communality", "Uniqueness"
+        loop i = 1..p
+            printf "%-14s", toupper(tok[i])
+            loop j = 1..nf
+                printf "%12.6f", Lm[i, j]
+            endloop
+            printf "%14.6f%14.6f\n", 1 - psi[i], psi[i]
+        endloop
+    endif
+    return r
+end function
+
+function scalar ev__faml (const matrix th, const matrix R, scalar nf)
+    # concentrated ML criterion for given uniquenesses (Joreskog 1967)
+    matrix ps = exp(th)
+    scalar p = rows(R)
+    matrix Rs = R ./ sqrt(ps * ps')
+    matrix lam = mreverse(eigensym(Rs))
+    matrix rest = lam[nf + 1:p]
+    scalar f = sumc(log(rest)) - sumc(rest) + (p - nf)
+    return ok(f) ? f : -1e100
+end function
+
+function void ev_seasplot (series x "Quarterly or monthly series", string out[null] "Graph file (default: display)")
+    # seasonal subseries graph: one line per quarter / month across the years
+    errorif($pd != 4 && $pd != 12, "Seasonal graphs need quarterly or monthly data")
+    scalar s = $pd
+    set skip_missing off
+    matrix v = {x}
+    series evs_m = $obsminor
+    scalar first = evs_m[$t1]
+    # pad so that the first row starts with season 1
+    matrix pad = mshape(NA, first - 1, 1)
+    matrix w = pad | v
+    scalar ny = ceil(rows(w) / s)
+    w = w | mshape(NA, ny * s - rows(w), 1)
+    matrix M = mshape(w, s, ny)'
+    strings cn = array(0)
+    loop j = 1..s
+        cn += s == 4 ? sprintf("Q%d", j) : sprintf("M%d", j)
+    endloop
+    cnameset(M, cn)
+    string o = exists(out) ? out : "display"
+    plot M
+        options with-lines
+    end plot --output="@o"
+end function
+
+# -------------------------------------------------------------------
 # Panel least squares on a panel page: ls(cx=f|r, per=f)
 # -------------------------------------------------------------------
 

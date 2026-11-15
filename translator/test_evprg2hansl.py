@@ -136,8 +136,7 @@ class RealPrograms(unittest.TestCase):
         self.assertEqual(translate_line("graph p.line y ytrend", c),
                          ["gnuplot y ytrend --time-series --with-lines --output=display"])
         self.assertEqual(translate_line('p.addtext(t) "Title"', c), ['# graph p: set title "Title"'])
-        with self.assertRaises(Ignored):
-            translate_line("p.options gridnone", c)
+        self.assertEqual(translate_line("p.options gridnone", c), ["# graph p: unset grid"])
         translate_line("group g2 dly du", c)
         self.assertEqual(translate_line("freeze(gr) g2.scat", c), ["gnuplot du dly --output=display"])
 
