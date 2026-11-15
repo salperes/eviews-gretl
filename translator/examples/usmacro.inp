@@ -1,0 +1,49 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: US consumption and investment (FRED data)
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+
+# growth rates and inflation
+series dlc = ldiff(CONS)
+series dly = ldiff(GDP)
+series infl = ev_pcy(CPI)
+series ffr_ma = ev_movav(FFR, 4)
+scalar g_mean = ev_mean(dly)
+
+smpl full
+smpl 1985:1 2019:4
+bundle eq_cons = ev_ls("dlog(CONS) c dlog(GDP) dlog(CONS(-1)) FFR", dataset)
+bundle eq_cons_wald = ev_wald(eq_cons, "c(2)=0.5, c(4)=0")
+bundle eq_cons_diag = ev_diag(eq_cons, 4)
+ev_freeze(eq_cons, "tab_cons.txt")
+
+# investment with HAC standard errors, trend and seasonals
+bundle eq_inv = ev_ls("log(INV) c log(GDP) FFR @trend    @seas(1) @seas(2) @seas(3)", dataset, "hac")
+bundle eq_inv_wald = ev_wald(eq_inv, "c(5)=0, c(6)=0, c(7)=0")
+
+# rolling start dates
+loop for (y=1985; y<=1995; y+=5)
+    smpl full
+    scalar ev_t1 = obsnum(sprintf("%d:1", y))
+    smpl ev_t1 2019:4
+endloop
+loop k = 1..3
+    series lag_ffr$k = FFR(-k)
+endloop
+
+scalar big = 0
+if g_mean > 0.005 && big == 0
+    scalar big = 1
+else
+    scalar big = 2
+endif
+
+smpl full
+bundle eq_untitled1 = ev_ls("dlog(INV) c dlog(GDP)", dataset, "white")
+series res_cons = ev_resid(eq_cons)
+store "usmacro_out.gdt"
+

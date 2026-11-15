@@ -1,0 +1,116 @@
+# Regression tests: EViewsCompat vs gretl built-ins
+# Run: gretlcli -b tests/test_evcompat.inp   (from the EViewsCompat folder)
+set verbose off
+include ../EViewsCompat.inp
+string gd = $gretldir
+open "@gd/data/misc/denmark.gdt" --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b))
+        printf "FAIL  %-40s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+# --- 1. ev_ls vs native ols with transformed regressors
+bundle b = ev_ls("dlog(LRM) c dlog(LRY) LRM(-1) IBO IDE", dataset)
+series dlrm = ldiff(LRM)
+series dlry = ldiff(LRY)
+series lrm1 = LRM(-1)
+ols dlrm const dlry lrm1 IBO IDE --quiet
+check("coeff[2]", b.coeff[2], $coeff[2])
+check("stderr[3]", b.stderr[3], $stderr[3])
+check("R2", b.rsq, $rsq)
+check("DW", b.dw, $dw)
+check("T", b.T, $T)
+check("AIC (EViews = gretl AIC / T)", b.aic, $aic / $T)
+check("SC (EViews = gretl BIC / T)", b.sc, $bic / $T)
+check("HQ (EViews = gretl HQC / T)", b.hq, $hqc / $T)
+check("F-stat", b.F, $Fstat)
+
+# --- 2. Wald vs native restrict
+restrict --quiet
+  b[4] = 0
+  b[5] = 0
+end restrict
+scalar Fnat = $test
+bundle w = ev_wald(b, "c(4)=0, c(5)=0", 1)
+check("Wald F joint", w.F, Fnat)
+restrict --quiet
+  b[4] - b[5] = 0
+end restrict
+bundle w2 = ev_wald(b, "c(4)=c(5)", 1)
+check("Wald F c(4)=c(5)", w2.F, $test)
+
+# --- 3. Diagnostics vs native modtest
+ols dlrm const dlry lrm1 IBO IDE --quiet
+modtest 2 --autocorr --quiet
+scalar bgF = $test
+bundle d = ev_diag(b, 2, 1)
+check("BG F(2)", d.bg_F, bgF, 1e-4)
+modtest --white --quiet
+check("White Obs*R2", d.white_obsr2, $test, 1e-4)
+series uh = $uhat
+normtest uh --jbera --quiet
+check("JB", d.jb, $test, 1e-4)
+
+# --- 4. Robust covariance
+bundle bw = ev_ls("dlog(LRM) c dlog(LRY) LRM(-1)", dataset, "white", 1)
+set force_hc on
+ols dlrm const dlry lrm1 --robust --quiet
+set force_hc off
+check("White SE[2]", bw.stderr[2], $stderr[2])
+bundle bh = ev_ls("dlog(LRM) c dlog(LRY) LRM(-1)", dataset, "hac", 1)
+ols dlrm const dlry lrm1 --robust --quiet
+check("HAC SE[2]", bh.stderr[2], $stderr[2])
+
+# --- 5. At-functions
+series trd = ev_gen("@trend", dataset)
+check("@trend first obs", trd[1], 0)
+series s2 = ev_gen("@seas(2)", dataset)
+check("@seas(2) sum", sum(s2), sum($obsminor == 2))
+series pc = ev_gen("@pch(LRY)", dataset)
+check("@pch", pc[5], LRY[5] / LRY[4] - 1)
+series ma = ev_gen("@movav(LRY,4)", dataset)
+check("@movav", ma[8], (LRY[5] + LRY[6] + LRY[7] + LRY[8]) / 4)
+check("@stdev (n-1)", ev_stdev(LRY), sqrt(sum((LRY - mean(LRY))^2) / (nobs(LRY) - 1)))
+check("@var (n)", ev_var(LRY), sum((LRY - mean(LRY))^2) / nobs(LRY))
+check("@elem", ev_elem(LRY, "1980:1"), LRY[obsnum("1980:1")])
+
+# --- 6. Equation with @trend, seasonal dummies and no constant
+bundle b3 = ev_ls("LRM LRY @trend @seas(1) @seas(2) @seas(3) @seas(4)", dataset, null, 1)
+series t0 = obs - 1
+series q1 = $obsminor == 1
+series q2 = $obsminor == 2
+series q3 = $obsminor == 3
+series q4 = $obsminor == 4
+ols LRM LRY t0 q1 q2 q3 q4 --quiet
+check("no-const coeff[2]", b3.coeff[2], $coeff[2])
+
+# --- 7. Printed output and freeze
+ev_print(&b)
+ev_diag(b)
+ev_wald(b, "c(4)=0, c(5)=0")
+string tdir = $workdir
+ev_freeze(b, tdir ~ "/evtest.csv")
+ev_freeze(b, tdir ~ "/evtest.txt")
+ev_freeze(b, tdir ~ "/evtest.tex")
+ev_freeze(b, tdir ~ "/evtest.html")
+
+# --- 8. Errors are reported cleanly
+catch bundle bad = ev_ls("LRM c NOPE", dataset, null, 1)
+check("unknown series raises error", $error != 0, 1)
+catch bundle bad2 = ev_wald(b, "c(9)=0", 1)
+check("out-of-range c() raises error", $error != 0, 1)
+
+# --- 9. eq.fit / eq.makeresid as series
+ols dlrm const dlry lrm1 IBO IDE --quiet
+series uh_nat = $uhat
+series yh_nat = $yhat
+series uh_ev = ev_resid(b)
+series yh_ev = ev_fit(b)
+check("ev_resid nobs", nobs(uh_ev), nobs(uh_nat))
+check("ev_resid 1980:1", uh_ev[1980:1], uh_nat[1980:1])
+check("ev_fit 1985:2", yh_ev[1985:2], yh_nat[1985:2])
+check("ev_resid first obs is NA", missing(uh_ev[1974:1]), 1)

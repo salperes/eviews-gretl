@@ -1,0 +1,4 @@
+# Build EViewsCompat.gfn  (run from this folder: gretlcli -b build.inp)
+set verbose off
+include EViewsCompat.inp
+makepkg EViewsCompat.gfn

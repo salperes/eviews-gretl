@@ -1,0 +1,67 @@
+# EViewsCompat on real FRED data (../data/usmacro.gdt), checked against gretl built-ins
+set verbose off
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b))
+        printf "FAIL  %-40s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+smpl 1985:1 2019:4    # pre-COVID, post-Volcker
+
+# 1. Consumption function in growth rates, EViews:
+#    ls dlog(cons) c dlog(gdp) dlog(cons(-1)) ffr
+bundle eq = ev_ls("dlog(CONS) c dlog(GDP) dlog(CONS(-1)) FFR", dataset)
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+series dc1 = dc(-1)
+ols dc const dg dc1 FFR --quiet
+check("coeff dlog(GDP)", eq.coeff[2], $coeff[2])
+check("stderr FFR", eq.stderr[4], $stderr[4])
+check("R2", eq.rsq, $rsq)
+check("Schwarz (EViews scale)", eq.sc, $bic / $T)
+check("T", eq.T, $T)
+
+# 2. Wald: short-run elasticity = 0.5 and no rate effect
+bundle w = ev_wald(eq, "c(2)=0.5, c(4)=0")
+restrict --quiet
+  b[2] = 0.5
+  b[4] = 0
+end restrict
+check("Wald F", w.F, $test)
+
+# 3. Residual diagnostics
+bundle d = ev_diag(eq, 4)
+ols dc const dg dc1 FFR --quiet
+modtest 4 --autocorr --quiet
+check("BG F(4)", d.bg_F, $test, 1e-4)
+modtest --white --quiet
+check("White Obs*R2", d.white_obsr2, $test, 1e-4)
+
+# 4. Investment equation with HAC, trend and seasonals (seasonally adjusted data,
+#    so seasonals should be insignificant)
+bundle eqi = ev_ls("log(INV) c log(GDP) FFR @trend @seas(1) @seas(2) @seas(3)", dataset, "hac")
+series li = log(INV)
+series lg = log(GDP)
+series tt = obs - 1
+series s1 = $obsminor == 1
+series s2 = $obsminor == 2
+series s3 = $obsminor == 3
+ols li const lg FFR tt s1 s2 s3 --robust --quiet
+check("HAC coeff log(GDP)", eqi.coeff[2], $coeff[2])
+check("HAC stderr log(GDP)", eqi.stderr[2], $stderr[2])
+bundle ws = ev_wald(eqi, "c(5)=0, c(6)=0, c(7)=0")
+printf "Seasonal dummies joint p-value: %.4f (expect large: data are SA)\n", ws.Fp
+
+# 5. @-functions on real data
+series infl = ev_gen("@pcy(CPI)", dataset)
+check("@pcy(CPI) 2000:1", infl[2000:1], 100 * (CPI[2000:1] / CPI[1999:1] - 1))
+series ma = ev_gen("@movav(FFR, 4)", dataset)
+check("@movav(FFR,4) 2000:4", ma[2000:4], (FFR[2000:1] + FFR[2000:2] + FFR[2000:3] + FFR[2000:4]) / 4)
+
+# 6. Freeze
+ev_freeze(eq, $workdir ~ "/usmacro_cons.csv")

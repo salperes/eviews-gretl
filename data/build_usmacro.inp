@@ -1,0 +1,22 @@
+# Build quarterly US macro dataset from FRED CSVs (raw/).
+# Run from this folder:  gretlcli -b "$PWD/build_usmacro.inp"
+set verbose off
+open raw/GDPC1.csv --quiet
+join raw/PCECC96.csv PCECC96
+join raw/GPDIC1.csv GPDIC1
+join raw/FEDFUNDS.csv FEDFUNDS --aggr=avg
+join raw/CPIAUCSL.csv CPIAUCSL --aggr=avg
+rename GDPC1 GDP
+rename PCECC96 CONS
+rename GPDIC1 INV
+rename FEDFUNDS FFR
+rename CPIAUCSL CPI
+setinfo GDP --description="Real GDP, bn chained 2017 USD (FRED GDPC1)"
+setinfo CONS --description="Real personal consumption (FRED PCECC96)"
+setinfo INV --description="Real gross private domestic investment (FRED GPDIC1)"
+setinfo FFR --description="Effective federal funds rate, quarterly avg (FRED FEDFUNDS)"
+setinfo CPI --description="CPI all items, quarterly avg (FRED CPIAUCSL)"
+summary --simple
+printf "pd=%d  range %s - %s\n", $pd, obslabel(1), obslabel($nobs)
+string here = getenv("PWD")
+store "@here/usmacro.gdt"

@@ -1,0 +1,22 @@
+set verbose off
+include EViewsCompat.gfn
+open denmark --quiet
+
+# EViews:  ls dlog(lrm) c dlog(lry) lrm(-1) ibo ide
+bundle eq1 = ev_ls("dlog(LRM) c dlog(LRY) LRM(-1) IBO IDE", dataset)
+
+# EViews:  eq1.wald c(4)=0, c(5)=0
+bundle w = ev_wald(eq1, "c(4)=0, c(5)=0")
+
+# EViews:  View > Residual Diagnostics
+bundle d = ev_diag(eq1, 2)
+
+# EViews:  White / HAC coefficient covariance
+bundle eq2 = ev_ls("dlog(LRM) c dlog(LRY) LRM(-1)", dataset, "hac")
+
+# EViews:  series g = @pch(lry)  /  series sm = @movav(lry, 4)
+series g = ev_gen("@pch(LRY)", dataset)
+series sm = ev_gen("@movav(LRY, 4)", dataset)
+
+# EViews:  Freeze the estimation table
+ev_freeze(eq1, "eq1.csv")

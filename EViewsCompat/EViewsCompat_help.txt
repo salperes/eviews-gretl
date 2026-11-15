@@ -1,0 +1,42 @@
+EViewsCompat: EViews-style estimation and functions for gretl
+
+GUI: Model > Linear models > EViews-style equation (LS)
+  Type the equation exactly as in EViews' "Equation Estimation" box, e.g.
+      dlog(lrm) c dlog(lry) lrm(-1) ibo ide
+  and select (at least) the series the equation uses. The result window
+  shows the EViews-style table; its graph button draws Actual/Fitted/Residual.
+  Save the result as an icon to keep it in the session (like an EViews
+  workfile object).
+
+Note: hansl names are case-sensitive, so type series names as they appear
+in gretl. EViews keywords (c, log, d, dlog, the @-functions) are not.
+
+Functions (CLI / console). "dataset" means: all series in the dataset.
+
+  ev_ls(spec, dataset [, cov] [, quiet])  -> bundle
+      Least squares. spec in EViews syntax. cov: "ordinary" (default),
+      "white" or "hac". Prints the EViews-style table unless quiet = 1.
+      Supported terms: c, x, x(-k), log(x), d(x), dlog(x), exp(), abs(),
+      sqr(), any gretl expression, @trend, @seas(k), @pch, @pc,
+      @pchy, @pcy, @movav(x,n), @movsum(x,n), @cumsum,
+      @mean, @stdev.
+      Bundle members: coeff, stderr, tstat, pval, vcv, rsq, adjrsq, sigma,
+      ssr, lnl, dw, aic, sc, hq, F, Fp, T, k, uhat, yhat, y, X, sample.
+      aic/sc/hq use EViews' per-observation scaling (gretl value / T).
+
+  ev_wald(eq, "c(2)=0, c(3)=c(4)")      -> bundle (F, Fp, chi2, chi2p)
+      Linear coefficient restrictions in EViews c(i) notation.
+
+  ev_diag(eq [, lags])                  -> bundle
+      Jarque-Bera, Breusch-Godfrey LM (default 2 lags), White test with
+      cross terms; F and Obs*R-squared versions as in EViews.
+
+  ev_freeze(eq, "file.csv")             save table (.txt .csv .tex .html)
+      Relative names are written in the gretl working directory.
+
+  ev_print(&eq), ev_plot(&eq)           print table / Actual-Fitted-Residual
+
+  ev_gen("expr", dataset)               EViews expression -> series
+  ev_trend(), ev_seas(k), ev_pch(x), ev_pc(x), ev_pchy(x), ev_pcy(x),
+  ev_movav(x,n), ev_movsum(x,n), ev_mean(x), ev_stdev(x) (n-1),
+  ev_var(x) (population, n), ev_obs(x), ev_elem(x, "1990:1")

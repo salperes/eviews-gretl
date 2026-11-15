@@ -1,0 +1,527 @@
+# ===================================================================
+# EViewsCompat: EViews-style estimation, tests and functions for gretl
+# ===================================================================
+# Note: the at-sign is a string-substitution operator in hansl, so this
+# file never writes it literally; it is built as string AT where needed.
+
+# -------------------------------------------------------------------
+# Private helpers
+# -------------------------------------------------------------------
+
+function string ev__translate (string s)
+    # Rewrite an EViews expression into hansl syntax.
+    string AT = "@"
+    string e = s
+    # EViews function names -> hansl / package equivalents
+    e = regsub(e, "(?i)\bdlog\(", "ldiff(")
+    e = regsub(e, "(?i)\bd\(", "diff(")
+    e = regsub(e, "(?i)\blog\(", "log(")
+    e = regsub(e, "(?i)\bexp\(", "exp(")
+    e = regsub(e, "(?i)\babs\(", "abs(")
+    e = regsub(e, "(?i)\bsqr\(", "sqrt(")
+    # EViews at-functions
+    e = regsub(e, "(?i)" ~ AT ~ "trend(\(\))?", "(obs-1)")
+    e = regsub(e, "(?i)" ~ AT ~ "seas\(", "ev_seas(")
+    e = regsub(e, "(?i)" ~ AT ~ "pchy\(", "ev_pchy(")
+    e = regsub(e, "(?i)" ~ AT ~ "pcy\(", "ev_pcy(")
+    e = regsub(e, "(?i)" ~ AT ~ "pch\(", "ev_pch(")
+    e = regsub(e, "(?i)" ~ AT ~ "pc\(", "ev_pc(")
+    e = regsub(e, "(?i)" ~ AT ~ "movav\(", "ev_movav(")
+    e = regsub(e, "(?i)" ~ AT ~ "movsum\(", "ev_movsum(")
+    e = regsub(e, "(?i)" ~ AT ~ "cumsum\(", "cum(")
+    e = regsub(e, "(?i)" ~ AT ~ "mean\(", "ev_mean(")
+    e = regsub(e, "(?i)" ~ AT ~ "stdev\(", "ev_stdev(")
+    e = regsub(e, "(?i)" ~ AT ~ "abs\(", "abs(")
+    e = regsub(e, "(?i)" ~ AT ~ "log\(", "log(")
+    errorif(instring(e, AT), sprintf("Unsupported EViews function in '%s'", s))
+    return e
+end function
+
+function scalar ev__fit (const matrix y, const matrix Z, scalar *ssr,
+                         scalar *df)
+    # Least squares via generalized inverse (safe if Z is rank-deficient).
+    # Returns centered R-squared; fills SSR and rank(Z).
+    matrix e = y - Z * (ginv(Z'Z) * (Z'y))
+    ssr = e'e
+    df = rank(Z)
+    matrix d = y - meanc(y)
+    return 1 - ssr / (d'd)
+end function
+
+function void ev__line (int n[1::78])
+    string s = ""
+    loop n
+        s ~= "="
+    endloop
+    printf "%s\n", s
+end function
+
+# -------------------------------------------------------------------
+# Expression evaluation (EViews syntax -> series)
+# -------------------------------------------------------------------
+
+function series ev_gen (string expr "EViews expression, e.g. dlog(y)",
+                        list vars "Series referenced in the expression")
+    # Evaluate an EViews-syntax expression and return the series.
+    string evx_e = ev__translate(expr)
+    strings evx_nms = varnames(vars)
+    strings evx_ids = strsplit(regsub(evx_e, "[^A-Za-z0-9_]+", " "))
+    # Refer to each series as vars.NAME rather than copying it: a copy made
+    # inside a function holds only in-sample values, while vars.NAME(-k)
+    # can reach pre-sample observations, as gretl and EViews do for lags.
+    strings evx_done = array(0)
+    loop evx_j = 1..nelem(evx_ids)
+        string evx_id = evx_ids[evx_j]
+        if rows(instrings(evx_nms, evx_id)) > 0 && rows(instrings(evx_done, evx_id)) == 0
+            evx_e = regsub(evx_e, "(?<![A-Za-z0-9_.])" ~ evx_id ~ "(?![A-Za-z0-9_])", "vars." ~ evx_id)
+            evx_done += evx_id
+        endif
+    endloop
+    if instring(evx_e, "ev_")
+        # expression calls package functions: catch is not allowed here
+        series evx_out = @evx_e
+    else
+        catch series evx_out = @evx_e
+    endif
+    errorif($error, sprintf("Cannot evaluate '%s' (hansl: %s). Check the series names and that they are in the list you passed.", expr, evx_e))
+    return evx_out
+end function
+
+# -------------------------------------------------------------------
+# Least squares, EViews style
+# -------------------------------------------------------------------
+
+function bundle ev_ls (string spec "Equation, e.g. y c x x(-1)",
+                       list vars[null] "Series used (e.g. dataset)",
+                       string cov[null] "ordinary, white or hac",
+                       bool quiet[0] "Suppress printed output")
+    errorif(!exists(vars), "Pass the series to use as second argument, e.g. ev_ls(\"y c x\", dataset)")
+    string evx_cov = exists(cov) ? tolower(cov) : "ordinary"
+    errorif(!instring(" ordinary white hac ", " " ~ evx_cov ~ " "), "cov must be ordinary, white or hac")
+    strings evx_tok = strsplit(spec)
+    errorif(nelem(evx_tok) < 2, "The specification needs a dependent variable and at least one regressor")
+
+    series evx_y = ev_gen(evx_tok[1], vars)
+    list evx_X = null
+    strings evx_lab = array(0)
+    scalar evx_hascon = 0
+    loop evx_i = 2..nelem(evx_tok)
+        string evx_t = evx_tok[evx_i]
+        if tolower(evx_t) == "c"
+            list evx_X += const
+            evx_lab += "C"
+            evx_hascon = 1
+        else
+            string evx_v = sprintf("evx_r%d", evx_i)
+            series @evx_v = ev_gen(evx_t, vars)
+            list evx_X += @evx_v
+            evx_lab += toupper(evx_t)
+        endif
+    endloop
+
+    scalar evx_n0 = $nobs
+    if evx_cov == "white"
+        set force_hc on
+        ols evx_y evx_X --robust --quiet
+    elif evx_cov == "hac"
+        errorif($datatype != 2, "HAC covariance needs time-series data")
+        ols evx_y evx_X --robust --quiet
+    else
+        ols evx_y evx_X --quiet
+    endif
+
+    bundle b
+    b.spec = spec
+    b.depvar = toupper(evx_tok[1])
+    b.labels = evx_lab
+    b.covtype = evx_cov
+    b.coeff = $coeff
+    b.stderr = $stderr
+    b.vcv = $vcv
+    b.T = $T
+    b.k = $ncoeff
+    b.rsq = $rsq
+    b.adjrsq = 1 - (1 - $rsq) * ($T - 1) / ($T - $ncoeff)
+    b.sigma = $sigma
+    b.ssr = $ess
+    b.lnl = $lnl
+    b.dw = $dw
+    b.hascon = evx_hascon
+    b.adjusted = $T < evx_n0
+    b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+
+    series evx_u = $uhat
+    series evx_f = $yhat
+    smpl ok(evx_u) --restrict
+    b.y = {evx_y}
+    b.X = {evx_X}
+    b.uhat = {evx_u}
+    b.yhat = {evx_f}
+    series evx_o = obs
+    b.tobs = {evx_o}
+    b.sample =sprintf("%s %s", obslabel($t1), obslabel($t2))
+
+    scalar n = b.T
+    scalar k = b.k
+    matrix d = b.y - meanc(b.y)
+    b.meany = meanc(b.y)
+    b.sdy = sqrt(d'd / (n - 1))
+    b.aic = -2 * b.lnl / n + 2 * k / n
+    b.sc = -2 * b.lnl / n + k * log(n) / n
+    b.hq = -2 * b.lnl / n + 2 * k * log(log(n)) / n
+    if evx_hascon && k > 1
+        b.F = (b.rsq / (k - 1)) / ((1 - b.rsq) / (n - k))
+        b.Fp = pvalue(F, k - 1, n - k, b.F)
+    else
+        b.F = NA
+        b.Fp = NA
+    endif
+    b.tstat = b.coeff ./ b.stderr
+    matrix p = zeros(k, 1)
+    loop i = 1..k
+        p[i] = 2 * pvalue(t, n - k, abs(b.tstat[i]))
+    endloop
+    b.pval = p
+
+    if !quiet
+        ev_print(&b)
+    endif
+    return b
+end function
+
+function void ev_print (bundle *b)
+    errorif(!inbundle(b, "coeff"), "Not an ev_ls result")
+    printf "\nDependent Variable: %s\n", b.depvar
+    printf "Method: Least Squares\n"
+    printf "Date: %s\n", b.estdate
+    printf "Sample%s: %s\n", b.adjusted ? " (adjusted)" : "", b.sample
+    printf "Included observations: %d%s\n", b.T, b.adjusted ? " after adjustments" : ""
+    if b.covtype == "white"
+        printf "White heteroskedasticity-consistent standard errors & covariance\n"
+    elif b.covtype == "hac"
+        printf "HAC standard errors & covariance (Bartlett kernel, Newey-West)\n"
+    endif
+    printf "\n"
+    ev__line(78)
+    printf "%-26s%13s%13s%14s%12s\n", "Variable", "Coefficient", "Std. Error", "t-Statistic", "Prob."
+    ev__line(78)
+    loop i = 1..b.k
+        printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+    endloop
+    ev__line(78)
+    printf "%-22s%14.6f    %-24s%14.6f\n", "R-squared", b.rsq, "Mean dependent var", b.meany
+    printf "%-22s%14.6f    %-24s%14.6f\n", "Adjusted R-squared", b.adjrsq, "S.D. dependent var", b.sdy
+    printf "%-22s%14.6f    %-24s%14.6f\n", "S.E. of regression", b.sigma, "Akaike info criterion", b.aic
+    printf "%-22s%14.6f    %-24s%14.6f\n", "Sum squared resid", b.ssr, "Schwarz criterion", b.sc
+    printf "%-22s%14.6f    %-24s%14.6f\n", "Log likelihood", b.lnl, "Hannan-Quinn criter.", b.hq
+    if ok(b.F)
+        printf "%-22s%14.6f    %-24s%14.6f\n", "F-statistic", b.F, "Durbin-Watson stat", b.dw
+        printf "%-22s%14.6f\n", "Prob(F-statistic)", b.Fp
+    else
+        printf "%-22s%14s    %-24s%14.6f\n", "", "", "Durbin-Watson stat", b.dw
+    endif
+    ev__line(78)
+end function
+
+function void ev_plot (bundle *b)
+    # EViews View > Actual, Fitted, Residual
+    errorif(!inbundle(b, "uhat"), "Not an ev_ls result")
+    matrix M = b.y ~ b.yhat ~ b.uhat
+    cnameset(M, defarray("Actual", "Fitted", "Residual"))
+    gnuplot 1 2 3 --matrix=M --time-series --with-lines --y2axis=3 --output=display \
+      {set title "Actual, Fitted, Residual"; set ylabel "Actual / Fitted"; set y2label "Residual";}
+end function
+
+# -------------------------------------------------------------------
+# Wald coefficient restrictions:  "c(2)=0, c(3)=c(4)"
+# -------------------------------------------------------------------
+
+function bundle ev_wald (bundle b "ev_ls result",
+                         string restr "Restrictions, e.g. c(2)=0, c(3)=0",
+                         bool quiet[0])
+    errorif(!inbundle(b, "coeff"), "First argument must be an ev_ls result")
+    strings R = strsplit(restr, ",")
+    scalar J = nelem(R)
+    scalar k = b.k
+    scalar n = b.T
+    matrix Rm = zeros(J, k)
+    matrix q = zeros(J, 1)
+    matrix evw_c = zeros(k, 1)
+    loop j = 1..J
+        strings sides = strsplit(R[j], "=")
+        errorif(nelem(sides) != 2, sprintf("Restriction '%s' must contain exactly one '='", R[j]))
+        string ex = sprintf("(%s)-(%s)", sides[1], sides[2])
+        ex = regsub(ex, "(?i)\bc\(([0-9]+)\)", "evw_c[\1]")
+        matrix idx = {}
+        evw_c = zeros(k, 1)
+        catch scalar f0 = @ex
+        errorif($error, sprintf("Cannot parse restriction '%s' (coefficients are c(1)..c(%d))", R[j], k))
+        loop i = 1..k
+            evw_c = zeros(k, 1)
+            evw_c[i] = 1
+            Rm[j, i] = (@ex) - f0
+        endloop
+        # linearity check at a random point
+        evw_c = mnormal(k, 1)
+        errorif(abs((@ex) - (Rm[j,] * evw_c + f0)) > 1e-8 * (1 + abs(f0)), sprintf("Restriction '%s' is not linear", R[j]))
+        q[j] = -f0
+    endloop
+    matrix dev = Rm * b.coeff - q
+    scalar W = qform(dev', inv(qform(Rm, b.vcv)))
+    bundle w
+    w.restr = restr
+    w.chi2 = W
+    w.chi2p = pvalue(X, J, W)
+    w.F = W / J
+    w.Fp = pvalue(F, J, n - k, w.F)
+    w.df1 = J
+    w.df2 = n - k
+    w.R = Rm
+    w.q = q
+    if !quiet
+        printf "\nWald Test:\nEquation: %s\n\n", b.spec
+        printf "%-20s%14s%14s%14s\n", "Test Statistic", "Value", "df", "Probability"
+        printf "%-20s%14.6f%14s%14.4f\n", "F-statistic", w.F, sprintf("(%d, %d)", J, n - k), w.Fp
+        printf "%-20s%14.6f%14d%14.4f\n", "Chi-square", w.chi2, J, w.chi2p
+        printf "\nNull Hypothesis: %s\n\n", toupper(restr)
+    endif
+    return w
+end function
+
+# -------------------------------------------------------------------
+# Residual diagnostics (View > Residual Diagnostics)
+# -------------------------------------------------------------------
+
+function bundle ev_diag (bundle b "ev_ls result",
+                         int nlags[1::2] "Serial correlation LM nlags",
+                         bool quiet[0])
+    errorif(!inbundle(b, "uhat"), "First argument must be an ev_ls result")
+    matrix u = b.uhat
+    matrix Xm = b.X
+    scalar n = rows(u)
+    scalar k = cols(Xm)
+    bundle r
+
+    # Jarque-Bera
+    matrix uc = u - meanc(u)
+    scalar m2 = meanc(uc.^2)
+    r.skew = meanc(uc.^3) / m2^1.5
+    r.kurt = meanc(uc.^4) / m2^2
+    r.jb = n / 6 * (r.skew^2 + (r.kurt - 3)^2 / 4)
+    r.jbp = pvalue(X, 2, r.jb)
+
+    # Breusch-Godfrey (presample residuals set to zero, as EViews)
+    matrix UL = zeros(n, nlags)
+    loop j = 1..nlags
+        UL[j+1:n, j] = u[1:n-j]
+    endloop
+    scalar ssr0 = 0
+    scalar df0 = 0
+    scalar ssr1 = 0
+    scalar df1 = 0
+    scalar r2 = ev__fit(u, Xm ~ UL, &ssr1, &df1)
+    ev__fit(u, Xm, &ssr0, &df0)
+    r.bg_lags = nlags
+    r.bg_obsr2 = n * r2
+    r.bg_chi2p = pvalue(X, nlags, r.bg_obsr2)
+    r.bg_F = ((ssr0 - ssr1) / nlags) / (ssr1 / (n - df1))
+    r.bg_Fp = pvalue(F, nlags, n - df1, r.bg_F)
+
+    # White test with cross terms
+    matrix nc = selifc(Xm, sdc(Xm) .> 1e-12)
+    matrix Z = ones(n, 1) ~ nc
+    loop i = 1..cols(nc)
+        loop j = i..cols(nc)
+            Z ~= nc[,i] .* nc[,j]
+        endloop
+    endloop
+    scalar ssrw = 0
+    scalar dfw = 0
+    scalar r2w = ev__fit(u.^2, Z, &ssrw, &dfw)
+    scalar m = dfw - 1
+    r.white_obsr2 = n * r2w
+    r.white_df = m
+    r.white_chi2p = pvalue(X, m, r.white_obsr2)
+    r.white_F = (r2w / m) / ((1 - r2w) / (n - dfw))
+    r.white_Fp = pvalue(F, m, n - dfw, r.white_F)
+
+    if !quiet
+        printf "\nResidual Diagnostics\nEquation: %s\n", b.spec
+        ev__line(70)
+        printf "Normality: Jarque-Bera\n"
+        printf "  %-26s%12.6f    Prob.%21.4f\n", "Jarque-Bera", r.jb, r.jbp
+        printf "  %-26s%12.6f    %-14s%12.6f\n", "Skewness", r.skew, "Kurtosis", r.kurt
+        ev__line(70)
+        printf "Breusch-Godfrey Serial Correlation LM Test (%d lags)\n", nlags
+        printf "  %-26s%12.6f    %-18s%8.4f\n", "F-statistic", r.bg_F, sprintf("Prob. F(%d,%d)", nlags, n - df1), r.bg_Fp
+        printf "  %-26s%12.6f    %-18s%8.4f\n", "Obs*R-squared", r.bg_obsr2, sprintf("Prob. Chi-Square(%d)", nlags), r.bg_chi2p
+        ev__line(70)
+        printf "Heteroskedasticity Test: White (with cross terms)\n"
+        printf "  %-26s%12.6f    %-18s%8.4f\n", "F-statistic", r.white_F, sprintf("Prob. F(%d,%d)", m, n - dfw), r.white_Fp
+        printf "  %-26s%12.6f    %-18s%8.4f\n", "Obs*R-squared", r.white_obsr2, sprintf("Prob. Chi-Square(%d)", m), r.white_chi2p
+        ev__line(70)
+    endif
+    return r
+end function
+
+# -------------------------------------------------------------------
+# Freeze: save the estimation table to a file
+# -------------------------------------------------------------------
+
+function void ev_freeze (bundle b "ev_ls result",
+                         string fname "Output file: .txt, .csv, .tex or .html")
+    errorif(!inbundle(b, "coeff"), "First argument must be an ev_ls result")
+    string ext = tolower(regsub(fname, ".*\.", ""))
+    if ext == "txt"
+        outfile @fname --quiet
+            ev_print(&b)
+        end outfile
+    elif ext == "csv"
+        outfile @fname --quiet
+            printf "Variable,Coefficient,Std. Error,t-Statistic,Prob.\n"
+            loop i = 1..b.k
+                printf "\"%s\",%.10g,%.10g,%.10g,%.10g\n", b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+            endloop
+            printf "\nR-squared,%.10g\nAdjusted R-squared,%.10g\nS.E. of regression,%.10g\n", b.rsq, b.adjrsq, b.sigma
+            printf "Sum squared resid,%.10g\nLog likelihood,%.10g\nDurbin-Watson stat,%.10g\n", b.ssr, b.lnl, b.dw
+            printf "Akaike info criterion,%.10g\nSchwarz criterion,%.10g\nIncluded observations,%d\n", b.aic, b.sc, b.T
+        end outfile
+    elif ext == "tex"
+        outfile @fname --quiet
+            printf "\\begin{tabular}{lrrrr}\n\\hline\n"
+            printf "Variable & Coefficient & Std. Error & t-Statistic & Prob. \\\\\n\\hline\n"
+            loop i = 1..b.k
+                printf "%s & %.6f & %.6f & %.4f & %.4f \\\\\n", b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+            endloop
+            printf "\\hline\nR-squared & %.6f & & Durbin-Watson & %.4f \\\\\n", b.rsq, b.dw
+            printf "Observations & %d & & S.E. of regression & %.6f \\\\\n\\hline\n\\end{tabular}\n", b.T, b.sigma
+        end outfile
+    elif ext == "html"
+        outfile @fname --quiet
+            printf "<table border=\"1\" cellpadding=\"4\">\n<caption>Dependent Variable: %s (%s)</caption>\n", b.depvar, b.sample
+            printf "<tr><th>Variable</th><th>Coefficient</th><th>Std. Error</th><th>t-Statistic</th><th>Prob.</th></tr>\n"
+            loop i = 1..b.k
+                printf "<tr><td>%s</td><td>%.6f</td><td>%.6f</td><td>%.4f</td><td>%.4f</td></tr>\n", b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+            endloop
+            printf "<tr><td>R-squared</td><td>%.6f</td><td colspan=\"2\">Durbin-Watson stat</td><td>%.4f</td></tr>\n", b.rsq, b.dw
+            printf "<tr><td>Observations</td><td>%d</td><td colspan=\"2\">S.E. of regression</td><td>%.6f</td></tr>\n</table>\n", b.T, b.sigma
+        end outfile
+    else
+        funcerr "Unsupported extension: use .txt, .csv, .tex or .html"
+    endif
+    printf "Frozen table written to %s\n", fname
+end function
+
+# -------------------------------------------------------------------
+# EViews at-function equivalents
+# -------------------------------------------------------------------
+
+function series ev_trend (void)
+    series t = obs - 1
+    return t
+end function
+
+function series ev_seas (int k[1::])
+    errorif(k > $pd, sprintf("Season %d exceeds data frequency %d", k, $pd))
+    series s = $obsminor == k
+    return s
+end function
+
+function series ev_pch (series x)
+    return x / x(-1) - 1
+end function
+
+function series ev_pc (series x)
+    return 100 * (x / x(-1) - 1)
+end function
+
+function series ev_pchy (series x)
+    return x / x(-$pd) - 1
+end function
+
+function series ev_pcy (series x)
+    return 100 * (x / x(-$pd) - 1)
+end function
+
+function series ev_movav (series x, int n[1::])
+    if n == 1
+        return x
+    endif
+    return movavg(x, n)
+end function
+
+function series ev_movsum (series x, int n[1::])
+    if n == 1
+        return x
+    endif
+    return n * movavg(x, n)
+end function
+
+function scalar ev_mean (series x)
+    return mean(x)
+end function
+
+function scalar ev_stdev (series x)
+    # sample standard deviation (n-1), as EViews
+    return sd(x)
+end function
+
+function scalar ev_var (series x)
+    # population variance (divisor n), as EViews
+    return sd(x)^2 * (nobs(x) - 1) / nobs(x)
+end function
+
+function scalar ev_obs (series x)
+    return nobs(x)
+end function
+
+function scalar ev_elem (series x, string ob "Observation, e.g. 1990:1")
+    return x[obsnum(ob)]
+end function
+
+# -------------------------------------------------------------------
+# Fitted values and residuals as series (eq.fit / eq.makeresid)
+# -------------------------------------------------------------------
+
+function series ev__toseries (const matrix v, const matrix tobs)
+    series s = NA
+    loop i = 1..rows(v)
+        scalar t = tobs[i]
+        s[t] = v[i]
+    endloop
+    return s
+end function
+
+function series ev_resid (bundle b "ev_ls result")
+    errorif(!inbundle(b, "tobs"), "Not an ev_ls result (or estimated with an older EViewsCompat)")
+    return ev__toseries(b.uhat, b.tobs)
+end function
+
+function series ev_fit (bundle b "ev_ls result")
+    errorif(!inbundle(b, "tobs"), "Not an ev_ls result (or estimated with an older EViewsCompat)")
+    return ev__toseries(b.yhat, b.tobs)
+end function
+
+# -------------------------------------------------------------------
+# GUI entry (Model menu) and bundle roles
+# -------------------------------------------------------------------
+
+# gretl's dialog limits each string field to 31 characters, so the
+# equation can be split over three fields that are joined with spaces.
+function bundle ev_ls_gui (string spec "Equation (EViews syntax)",
+                           string spec2[null] "  ...continued (optional)",
+                           string spec3[null] "  ...continued (optional)",
+                           list vars "Series used in the equation",
+                           int cov[1:3:1] "Coefficient covariance" {"Ordinary", "White", "HAC (Newey-West)"})
+    # optional parts may arrive empty or as the literal text "null"
+    string s = spec
+    if exists(spec2) && strstrip(spec2) != "" && strstrip(spec2) != "null"
+        s ~= " " ~ spec2
+    endif
+    if exists(spec3) && strstrip(spec3) != "" && strstrip(spec3) != "null"
+        s ~= " " ~ spec3
+    endif
+    strings cv = defarray("ordinary", "white", "hac")
+    bundle b = ev_ls(s, vars, cv[cov])    # prints the table into the result window
+    return b
+end function

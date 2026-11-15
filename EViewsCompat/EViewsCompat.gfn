@@ -1,0 +1,689 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gretl-functions>
+<gretl-function-package name="EViewsCompat" minver="2026a">
+<author>EViewsCompat contributors</author>
+<version>0.1</version>
+<date>2026-11-15</date>
+<description>EViews-style least squares, Wald, residual diagnostics, freeze and at-functions</description>
+<tags>C10 C20 C51</tags>
+<label>EViews-style equation (LS)</label>
+<menu-attachment>MAINWIN/Model/LinearModels</menu-attachment>
+<help>
+EViewsCompat: EViews-style estimation and functions for gretl
+
+GUI: Model &gt; Linear models &gt; EViews-style equation (LS)
+  Type the equation exactly as in EViews' &quot;Equation Estimation&quot; box, e.g.
+      dlog(lrm) c dlog(lry) lrm(-1) ibo ide
+  and select (at least) the series the equation uses. The result window
+  shows the EViews-style table; its graph button draws Actual/Fitted/Residual.
+  Save the result as an icon to keep it in the session (like an EViews
+  workfile object).
+
+Note: hansl names are case-sensitive, so type series names as they appear
+in gretl. EViews keywords (c, log, d, dlog, the @-functions) are not.
+
+Functions (CLI / console). &quot;dataset&quot; means: all series in the dataset.
+
+  ev_ls(spec, dataset [, cov] [, quiet])  -&gt; bundle
+      Least squares. spec in EViews syntax. cov: &quot;ordinary&quot; (default),
+      &quot;white&quot; or &quot;hac&quot;. Prints the EViews-style table unless quiet = 1.
+      Supported terms: c, x, x(-k), log(x), d(x), dlog(x), exp(), abs(),
+      sqr(), any gretl expression, @trend, @seas(k), @pch, @pc,
+      @pchy, @pcy, @movav(x,n), @movsum(x,n), @cumsum,
+      @mean, @stdev.
+      Bundle members: coeff, stderr, tstat, pval, vcv, rsq, adjrsq, sigma,
+      ssr, lnl, dw, aic, sc, hq, F, Fp, T, k, uhat, yhat, y, X, sample.
+      aic/sc/hq use EViews' per-observation scaling (gretl value / T).
+
+  ev_wald(eq, &quot;c(2)=0, c(3)=c(4)&quot;)      -&gt; bundle (F, Fp, chi2, chi2p)
+      Linear coefficient restrictions in EViews c(i) notation.
+
+  ev_diag(eq [, lags])                  -&gt; bundle
+      Jarque-Bera, Breusch-Godfrey LM (default 2 lags), White test with
+      cross terms; F and Obs*R-squared versions as in EViews.
+
+  ev_freeze(eq, &quot;file.csv&quot;)             save table (.txt .csv .tex .html)
+      Relative names are written in the gretl working directory.
+
+  ev_print(&amp;eq), ev_plot(&amp;eq)           print table / Actual-Fitted-Residual
+
+  ev_gen(&quot;expr&quot;, dataset)               EViews expression -&gt; series
+  ev_trend(), ev_seas(k), ev_pch(x), ev_pc(x), ev_pchy(x), ev_pcy(x),
+  ev_movav(x,n), ev_movsum(x,n), ev_mean(x), ev_stdev(x) (n-1),
+  ev_var(x) (population, n), ev_obs(x), ev_elem(x, &quot;1990:1&quot;)
+</help>
+<gretl-function name="ev_gen" type="series">
+ <params count="2">
+  <param name="expr" type="string">
+<description>EViews expression, e.g. dlog(y)</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series referenced in the expression</description>
+  </param>
+ </params>
+<code># Evaluate an EViews-syntax expression and return the series.
+string evx_e = ev__translate(expr)
+strings evx_nms = varnames(vars)
+strings evx_ids = strsplit(regsub(evx_e, &quot;[^A-Za-z0-9_]+&quot;, &quot; &quot;))
+# Refer to each series as vars.NAME rather than copying it: a copy made
+# inside a function holds only in-sample values, while vars.NAME(-k)
+# can reach pre-sample observations, as gretl and EViews do for lags.
+strings evx_done = array(0)
+loop evx_j = 1..nelem(evx_ids)
+  string evx_id = evx_ids[evx_j]
+  if rows(instrings(evx_nms, evx_id)) &gt; 0 &amp;&amp; rows(instrings(evx_done, evx_id)) == 0
+    evx_e = regsub(evx_e, &quot;(?&lt;![A-Za-z0-9_.])&quot; ~ evx_id ~ &quot;(?![A-Za-z0-9_])&quot;, &quot;vars.&quot; ~ evx_id)
+    evx_done += evx_id
+  endif
+endloop
+if instring(evx_e, &quot;ev_&quot;)
+  # expression calls package functions: catch is not allowed here
+  series evx_out = @evx_e
+else
+  catch series evx_out = @evx_e
+endif
+errorif($error, sprintf(&quot;Cannot evaluate '%s' (hansl: %s). Check the series names and that they are in the list you passed.&quot;, expr, evx_e))
+return evx_out
+</code>
+</gretl-function>
+<gretl-function name="ev_ls" type="bundle">
+ <params count="4">
+  <param name="spec" type="string">
+<description>Equation, e.g. y c x x(-1)</description>
+  </param>
+  <param name="vars" type="list" optional="true">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="cov" type="string" optional="true">
+<description>ordinary, white or hac</description>
+  </param>
+  <param name="quiet" type="bool" default="0">
+<description>Suppress printed output</description>
+  </param>
+ </params>
+<code>errorif(!exists(vars), &quot;Pass the series to use as second argument, e.g. ev_ls(\&quot;y c x\&quot;, dataset)&quot;)
+string evx_cov = exists(cov) ? tolower(cov) : &quot;ordinary&quot;
+errorif(!instring(&quot; ordinary white hac &quot;, &quot; &quot; ~ evx_cov ~ &quot; &quot;), &quot;cov must be ordinary, white or hac&quot;)
+strings evx_tok = strsplit(spec)
+errorif(nelem(evx_tok) &lt; 2, &quot;The specification needs a dependent variable and at least one regressor&quot;)
+
+series evx_y = ev_gen(evx_tok[1], vars)
+list evx_X = null
+strings evx_lab = array(0)
+scalar evx_hascon = 0
+loop evx_i = 2..nelem(evx_tok)
+  string evx_t = evx_tok[evx_i]
+  if tolower(evx_t) == &quot;c&quot;
+    list evx_X += const
+    evx_lab += &quot;C&quot;
+    evx_hascon = 1
+  else
+    string evx_v = sprintf(&quot;evx_r%d&quot;, evx_i)
+    series @evx_v = ev_gen(evx_t, vars)
+    list evx_X += @evx_v
+    evx_lab += toupper(evx_t)
+  endif
+endloop
+
+scalar evx_n0 = $nobs
+if evx_cov == &quot;white&quot;
+  set force_hc on
+  ols evx_y evx_X --robust --quiet
+elif evx_cov == &quot;hac&quot;
+  errorif($datatype != 2, &quot;HAC covariance needs time-series data&quot;)
+  ols evx_y evx_X --robust --quiet
+else
+  ols evx_y evx_X --quiet
+endif
+
+bundle b
+b.spec = spec
+b.depvar = toupper(evx_tok[1])
+b.labels = evx_lab
+b.covtype = evx_cov
+b.coeff = $coeff
+b.stderr = $stderr
+b.vcv = $vcv
+b.T = $T
+b.k = $ncoeff
+b.rsq = $rsq
+b.adjrsq = 1 - (1 - $rsq) * ($T - 1) / ($T - $ncoeff)
+b.sigma = $sigma
+b.ssr = $ess
+b.lnl = $lnl
+b.dw = $dw
+b.hascon = evx_hascon
+b.adjusted = $T &lt; evx_n0
+b.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
+
+series evx_u = $uhat
+series evx_f = $yhat
+smpl ok(evx_u) --restrict
+b.y = {evx_y}
+b.X = {evx_X}
+b.uhat = {evx_u}
+b.yhat = {evx_f}
+series evx_o = obs
+b.tobs = {evx_o}
+b.sample =sprintf(&quot;%s %s&quot;, obslabel($t1), obslabel($t2))
+
+scalar n = b.T
+scalar k = b.k
+matrix d = b.y - meanc(b.y)
+b.meany = meanc(b.y)
+b.sdy = sqrt(d'd / (n - 1))
+b.aic = -2 * b.lnl / n + 2 * k / n
+b.sc = -2 * b.lnl / n + k * log(n) / n
+b.hq = -2 * b.lnl / n + 2 * k * log(log(n)) / n
+if evx_hascon &amp;&amp; k &gt; 1
+  b.F = (b.rsq / (k - 1)) / ((1 - b.rsq) / (n - k))
+  b.Fp = pvalue(F, k - 1, n - k, b.F)
+else
+  b.F = NA
+  b.Fp = NA
+endif
+b.tstat = b.coeff ./ b.stderr
+matrix p = zeros(k, 1)
+loop i = 1..k
+  p[i] = 2 * pvalue(t, n - k, abs(b.tstat[i]))
+endloop
+b.pval = p
+
+if !quiet
+  ev_print(&amp;b)
+endif
+return b
+</code>
+</gretl-function>
+<gretl-function name="ev_print" type="void" pkg-role="bundle-print">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code>errorif(!inbundle(b, &quot;coeff&quot;), &quot;Not an ev_ls result&quot;)
+printf &quot;\nDependent Variable: %s\n&quot;, b.depvar
+printf &quot;Method: Least Squares\n&quot;
+printf &quot;Date: %s\n&quot;, b.estdate
+printf &quot;Sample%s: %s\n&quot;, b.adjusted ? &quot; (adjusted)&quot; : &quot;&quot;, b.sample
+printf &quot;Included observations: %d%s\n&quot;, b.T, b.adjusted ? &quot; after adjustments&quot; : &quot;&quot;
+if b.covtype == &quot;white&quot;
+  printf &quot;White heteroskedasticity-consistent standard errors &amp; covariance\n&quot;
+elif b.covtype == &quot;hac&quot;
+  printf &quot;HAC standard errors &amp; covariance (Bartlett kernel, Newey-West)\n&quot;
+endif
+printf &quot;\n&quot;
+ev__line(78)
+printf &quot;%-26s%13s%13s%14s%12s\n&quot;, &quot;Variable&quot;, &quot;Coefficient&quot;, &quot;Std. Error&quot;, &quot;t-Statistic&quot;, &quot;Prob.&quot;
+ev__line(78)
+loop i = 1..b.k
+  printf &quot;%-26s%13.6f%13.6f%14.6f%12.4f\n&quot;, b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+endloop
+ev__line(78)
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;R-squared&quot;, b.rsq, &quot;Mean dependent var&quot;, b.meany
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Adjusted R-squared&quot;, b.adjrsq, &quot;S.D. dependent var&quot;, b.sdy
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;S.E. of regression&quot;, b.sigma, &quot;Akaike info criterion&quot;, b.aic
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Sum squared resid&quot;, b.ssr, &quot;Schwarz criterion&quot;, b.sc
+printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;Log likelihood&quot;, b.lnl, &quot;Hannan-Quinn criter.&quot;, b.hq
+if ok(b.F)
+  printf &quot;%-22s%14.6f    %-24s%14.6f\n&quot;, &quot;F-statistic&quot;, b.F, &quot;Durbin-Watson stat&quot;, b.dw
+  printf &quot;%-22s%14.6f\n&quot;, &quot;Prob(F-statistic)&quot;, b.Fp
+else
+  printf &quot;%-22s%14s    %-24s%14.6f\n&quot;, &quot;&quot;, &quot;&quot;, &quot;Durbin-Watson stat&quot;, b.dw
+endif
+ev__line(78)
+</code>
+</gretl-function>
+<gretl-function name="ev_plot" type="void" pkg-role="bundle-plot">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code># EViews View &gt; Actual, Fitted, Residual
+errorif(!inbundle(b, &quot;uhat&quot;), &quot;Not an ev_ls result&quot;)
+matrix M = b.y ~ b.yhat ~ b.uhat
+cnameset(M, defarray(&quot;Actual&quot;, &quot;Fitted&quot;, &quot;Residual&quot;))
+gnuplot 1 2 3 --matrix=M --time-series --with-lines --y2axis=3 --output=display {set title &quot;Actual, Fitted, Residual&quot;; set ylabel &quot;Actual / Fitted&quot;; set y2label &quot;Residual&quot;;}
+</code>
+</gretl-function>
+<gretl-function name="ev_wald" type="bundle">
+ <params count="3">
+  <param name="b" type="bundle">
+<description>ev_ls result</description>
+  </param>
+  <param name="restr" type="string">
+<description>Restrictions, e.g. c(2)=0, c(3)=0</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>errorif(!inbundle(b, &quot;coeff&quot;), &quot;First argument must be an ev_ls result&quot;)
+strings R = strsplit(restr, &quot;,&quot;)
+scalar J = nelem(R)
+scalar k = b.k
+scalar n = b.T
+matrix Rm = zeros(J, k)
+matrix q = zeros(J, 1)
+matrix evw_c = zeros(k, 1)
+loop j = 1..J
+  strings sides = strsplit(R[j], &quot;=&quot;)
+  errorif(nelem(sides) != 2, sprintf(&quot;Restriction '%s' must contain exactly one '='&quot;, R[j]))
+  string ex = sprintf(&quot;(%s)-(%s)&quot;, sides[1], sides[2])
+  ex = regsub(ex, &quot;(?i)\bc\(([0-9]+)\)&quot;, &quot;evw_c[\1]&quot;)
+  matrix idx = {}
+  evw_c = zeros(k, 1)
+  catch scalar f0 = @ex
+  errorif($error, sprintf(&quot;Cannot parse restriction '%s' (coefficients are c(1)..c(%d))&quot;, R[j], k))
+  loop i = 1..k
+    evw_c = zeros(k, 1)
+    evw_c[i] = 1
+    Rm[j, i] = (@ex) - f0
+  endloop
+  # linearity check at a random point
+  evw_c = mnormal(k, 1)
+  errorif(abs((@ex) - (Rm[j,] * evw_c + f0)) &gt; 1e-8 * (1 + abs(f0)), sprintf(&quot;Restriction '%s' is not linear&quot;, R[j]))
+  q[j] = -f0
+endloop
+matrix dev = Rm * b.coeff - q
+scalar W = qform(dev', inv(qform(Rm, b.vcv)))
+bundle w
+w.restr = restr
+w.chi2 = W
+w.chi2p = pvalue(X, J, W)
+w.F = W / J
+w.Fp = pvalue(F, J, n - k, w.F)
+w.df1 = J
+w.df2 = n - k
+w.R = Rm
+w.q = q
+if !quiet
+  printf &quot;\nWald Test:\nEquation: %s\n\n&quot;, b.spec
+  printf &quot;%-20s%14s%14s%14s\n&quot;, &quot;Test Statistic&quot;, &quot;Value&quot;, &quot;df&quot;, &quot;Probability&quot;
+  printf &quot;%-20s%14.6f%14s%14.4f\n&quot;, &quot;F-statistic&quot;, w.F, sprintf(&quot;(%d, %d)&quot;, J, n - k), w.Fp
+  printf &quot;%-20s%14.6f%14d%14.4f\n&quot;, &quot;Chi-square&quot;, w.chi2, J, w.chi2p
+  printf &quot;\nNull Hypothesis: %s\n\n&quot;, toupper(restr)
+endif
+return w
+</code>
+</gretl-function>
+<gretl-function name="ev_diag" type="bundle">
+ <params count="3">
+  <param name="b" type="bundle">
+<description>ev_ls result</description>
+  </param>
+  <param name="nlags" type="int" min="1" default="2">
+<description>Serial correlation LM nlags</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>errorif(!inbundle(b, &quot;uhat&quot;), &quot;First argument must be an ev_ls result&quot;)
+matrix u = b.uhat
+matrix Xm = b.X
+scalar n = rows(u)
+scalar k = cols(Xm)
+bundle r
+
+# Jarque-Bera
+matrix uc = u - meanc(u)
+scalar m2 = meanc(uc.^2)
+r.skew = meanc(uc.^3) / m2^1.5
+r.kurt = meanc(uc.^4) / m2^2
+r.jb = n / 6 * (r.skew^2 + (r.kurt - 3)^2 / 4)
+r.jbp = pvalue(X, 2, r.jb)
+
+# Breusch-Godfrey (presample residuals set to zero, as EViews)
+matrix UL = zeros(n, nlags)
+loop j = 1..nlags
+  UL[j+1:n, j] = u[1:n-j]
+endloop
+scalar ssr0 = 0
+scalar df0 = 0
+scalar ssr1 = 0
+scalar df1 = 0
+scalar r2 = ev__fit(u, Xm ~ UL, &amp;ssr1, &amp;df1)
+ev__fit(u, Xm, &amp;ssr0, &amp;df0)
+r.bg_lags = nlags
+r.bg_obsr2 = n * r2
+r.bg_chi2p = pvalue(X, nlags, r.bg_obsr2)
+r.bg_F = ((ssr0 - ssr1) / nlags) / (ssr1 / (n - df1))
+r.bg_Fp = pvalue(F, nlags, n - df1, r.bg_F)
+
+# White test with cross terms
+matrix nc = selifc(Xm, sdc(Xm) .&gt; 1e-12)
+matrix Z = ones(n, 1) ~ nc
+loop i = 1..cols(nc)
+  loop j = i..cols(nc)
+    Z ~= nc[,i] .* nc[,j]
+  endloop
+endloop
+scalar ssrw = 0
+scalar dfw = 0
+scalar r2w = ev__fit(u.^2, Z, &amp;ssrw, &amp;dfw)
+scalar m = dfw - 1
+r.white_obsr2 = n * r2w
+r.white_df = m
+r.white_chi2p = pvalue(X, m, r.white_obsr2)
+r.white_F = (r2w / m) / ((1 - r2w) / (n - dfw))
+r.white_Fp = pvalue(F, m, n - dfw, r.white_F)
+
+if !quiet
+  printf &quot;\nResidual Diagnostics\nEquation: %s\n&quot;, b.spec
+  ev__line(70)
+  printf &quot;Normality: Jarque-Bera\n&quot;
+  printf &quot;  %-26s%12.6f    Prob.%21.4f\n&quot;, &quot;Jarque-Bera&quot;, r.jb, r.jbp
+  printf &quot;  %-26s%12.6f    %-14s%12.6f\n&quot;, &quot;Skewness&quot;, r.skew, &quot;Kurtosis&quot;, r.kurt
+  ev__line(70)
+  printf &quot;Breusch-Godfrey Serial Correlation LM Test (%d lags)\n&quot;, nlags
+  printf &quot;  %-26s%12.6f    %-18s%8.4f\n&quot;, &quot;F-statistic&quot;, r.bg_F, sprintf(&quot;Prob. F(%d,%d)&quot;, nlags, n - df1), r.bg_Fp
+  printf &quot;  %-26s%12.6f    %-18s%8.4f\n&quot;, &quot;Obs*R-squared&quot;, r.bg_obsr2, sprintf(&quot;Prob. Chi-Square(%d)&quot;, nlags), r.bg_chi2p
+  ev__line(70)
+  printf &quot;Heteroskedasticity Test: White (with cross terms)\n&quot;
+  printf &quot;  %-26s%12.6f    %-18s%8.4f\n&quot;, &quot;F-statistic&quot;, r.white_F, sprintf(&quot;Prob. F(%d,%d)&quot;, m, n - dfw), r.white_Fp
+  printf &quot;  %-26s%12.6f    %-18s%8.4f\n&quot;, &quot;Obs*R-squared&quot;, r.white_obsr2, sprintf(&quot;Prob. Chi-Square(%d)&quot;, m), r.white_chi2p
+  ev__line(70)
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_freeze" type="void">
+ <params count="2">
+  <param name="b" type="bundle">
+<description>ev_ls result</description>
+  </param>
+  <param name="fname" type="string">
+<description>Output file: .txt, .csv, .tex or .html</description>
+  </param>
+ </params>
+<code>errorif(!inbundle(b, &quot;coeff&quot;), &quot;First argument must be an ev_ls result&quot;)
+string ext = tolower(regsub(fname, &quot;.*\.&quot;, &quot;&quot;))
+if ext == &quot;txt&quot;
+  outfile @fname --quiet
+    ev_print(&amp;b)
+  end outfile
+elif ext == &quot;csv&quot;
+  outfile @fname --quiet
+    printf &quot;Variable,Coefficient,Std. Error,t-Statistic,Prob.\n&quot;
+    loop i = 1..b.k
+      printf &quot;\&quot;%s\&quot;,%.10g,%.10g,%.10g,%.10g\n&quot;, b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+    endloop
+    printf &quot;\nR-squared,%.10g\nAdjusted R-squared,%.10g\nS.E. of regression,%.10g\n&quot;, b.rsq, b.adjrsq, b.sigma
+    printf &quot;Sum squared resid,%.10g\nLog likelihood,%.10g\nDurbin-Watson stat,%.10g\n&quot;, b.ssr, b.lnl, b.dw
+    printf &quot;Akaike info criterion,%.10g\nSchwarz criterion,%.10g\nIncluded observations,%d\n&quot;, b.aic, b.sc, b.T
+  end outfile
+elif ext == &quot;tex&quot;
+  outfile @fname --quiet
+    printf &quot;\\begin{tabular}{lrrrr}\n\\hline\n&quot;
+    printf &quot;Variable &amp; Coefficient &amp; Std. Error &amp; t-Statistic &amp; Prob. \\\\\n\\hline\n&quot;
+    loop i = 1..b.k
+      printf &quot;%s &amp; %.6f &amp; %.6f &amp; %.4f &amp; %.4f \\\\\n&quot;, b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+    endloop
+    printf &quot;\\hline\nR-squared &amp; %.6f &amp; &amp; Durbin-Watson &amp; %.4f \\\\\n&quot;, b.rsq, b.dw
+    printf &quot;Observations &amp; %d &amp; &amp; S.E. of regression &amp; %.6f \\\\\n\\hline\n\\end{tabular}\n&quot;, b.T, b.sigma
+  end outfile
+elif ext == &quot;html&quot;
+  outfile @fname --quiet
+    printf &quot;&lt;table border=\&quot;1\&quot; cellpadding=\&quot;4\&quot;&gt;\n&lt;caption&gt;Dependent Variable: %s (%s)&lt;/caption&gt;\n&quot;, b.depvar, b.sample
+    printf &quot;&lt;tr&gt;&lt;th&gt;Variable&lt;/th&gt;&lt;th&gt;Coefficient&lt;/th&gt;&lt;th&gt;Std. Error&lt;/th&gt;&lt;th&gt;t-Statistic&lt;/th&gt;&lt;th&gt;Prob.&lt;/th&gt;&lt;/tr&gt;\n&quot;
+    loop i = 1..b.k
+      printf &quot;&lt;tr&gt;&lt;td&gt;%s&lt;/td&gt;&lt;td&gt;%.6f&lt;/td&gt;&lt;td&gt;%.6f&lt;/td&gt;&lt;td&gt;%.4f&lt;/td&gt;&lt;td&gt;%.4f&lt;/td&gt;&lt;/tr&gt;\n&quot;, b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
+    endloop
+    printf &quot;&lt;tr&gt;&lt;td&gt;R-squared&lt;/td&gt;&lt;td&gt;%.6f&lt;/td&gt;&lt;td colspan=\&quot;2\&quot;&gt;Durbin-Watson stat&lt;/td&gt;&lt;td&gt;%.4f&lt;/td&gt;&lt;/tr&gt;\n&quot;, b.rsq, b.dw
+    printf &quot;&lt;tr&gt;&lt;td&gt;Observations&lt;/td&gt;&lt;td&gt;%d&lt;/td&gt;&lt;td colspan=\&quot;2\&quot;&gt;S.E. of regression&lt;/td&gt;&lt;td&gt;%.6f&lt;/td&gt;&lt;/tr&gt;\n&lt;/table&gt;\n&quot;, b.T, b.sigma
+  end outfile
+else
+  funcerr &quot;Unsupported extension: use .txt, .csv, .tex or .html&quot;
+endif
+printf &quot;Frozen table written to %s\n&quot;, fname
+</code>
+</gretl-function>
+<gretl-function name="ev_trend" type="series">
+<code>series t = obs - 1
+return t
+</code>
+</gretl-function>
+<gretl-function name="ev_seas" type="series">
+ <params count="1">
+  <param name="k" type="int" min="1"/>
+ </params>
+<code>errorif(k &gt; $pd, sprintf(&quot;Season %d exceeds data frequency %d&quot;, k, $pd))
+series s = $obsminor == k
+return s
+</code>
+</gretl-function>
+<gretl-function name="ev_pch" type="series">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code>return x / x(-1) - 1
+</code>
+</gretl-function>
+<gretl-function name="ev_pc" type="series">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code>return 100 * (x / x(-1) - 1)
+</code>
+</gretl-function>
+<gretl-function name="ev_pchy" type="series">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code>return x / x(-$pd) - 1
+</code>
+</gretl-function>
+<gretl-function name="ev_pcy" type="series">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code>return 100 * (x / x(-$pd) - 1)
+</code>
+</gretl-function>
+<gretl-function name="ev_movav" type="series">
+ <params count="2">
+  <param name="x" type="series"/>
+  <param name="n" type="int" min="1"/>
+ </params>
+<code>if n == 1
+  return x
+endif
+return movavg(x, n)
+</code>
+</gretl-function>
+<gretl-function name="ev_movsum" type="series">
+ <params count="2">
+  <param name="x" type="series"/>
+  <param name="n" type="int" min="1"/>
+ </params>
+<code>if n == 1
+  return x
+endif
+return n * movavg(x, n)
+</code>
+</gretl-function>
+<gretl-function name="ev_mean" type="scalar">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code>return mean(x)
+</code>
+</gretl-function>
+<gretl-function name="ev_stdev" type="scalar">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code># sample standard deviation (n-1), as EViews
+return sd(x)
+</code>
+</gretl-function>
+<gretl-function name="ev_var" type="scalar">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code># population variance (divisor n), as EViews
+return sd(x)^2 * (nobs(x) - 1) / nobs(x)
+</code>
+</gretl-function>
+<gretl-function name="ev_obs" type="scalar">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code>return nobs(x)
+</code>
+</gretl-function>
+<gretl-function name="ev_elem" type="scalar">
+ <params count="2">
+  <param name="x" type="series"/>
+  <param name="ob" type="string">
+<description>Observation, e.g. 1990:1</description>
+  </param>
+ </params>
+<code>return x[obsnum(ob)]
+</code>
+</gretl-function>
+<gretl-function name="ev_fit" type="series">
+ <params count="1">
+  <param name="b" type="bundle">
+<description>ev_ls result</description>
+  </param>
+ </params>
+<code>errorif(!inbundle(b, &quot;tobs&quot;), &quot;Not an ev_ls result (or estimated with an older EViewsCompat)&quot;)
+return ev__toseries(b.yhat, b.tobs)
+</code>
+</gretl-function>
+<gretl-function name="ev_resid" type="series">
+ <params count="1">
+  <param name="b" type="bundle">
+<description>ev_ls result</description>
+  </param>
+ </params>
+<code>errorif(!inbundle(b, &quot;tobs&quot;), &quot;Not an ev_ls result (or estimated with an older EViewsCompat)&quot;)
+return ev__toseries(b.uhat, b.tobs)
+</code>
+</gretl-function>
+<gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
+ <params count="5">
+  <param name="spec" type="string">
+<description>Equation (EViews syntax)</description>
+  </param>
+  <param name="spec2" type="string" optional="true">
+<description>  ...continued (optional)</description>
+  </param>
+  <param name="spec3" type="string" optional="true">
+<description>  ...continued (optional)</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used in the equation</description>
+  </param>
+  <param name="cov" type="int" min="1" max="3" default="1">
+<description>Coefficient covariance</description>
+<labels count="3">
+"Ordinary" "White" "HAC (Newey-West)" </labels>
+  </param>
+ </params>
+<code># optional parts may arrive empty or as the literal text &quot;null&quot;
+string s = spec
+if exists(spec2) &amp;&amp; strstrip(spec2) != &quot;&quot; &amp;&amp; strstrip(spec2) != &quot;null&quot;
+  s ~= &quot; &quot; ~ spec2
+endif
+if exists(spec3) &amp;&amp; strstrip(spec3) != &quot;&quot; &amp;&amp; strstrip(spec3) != &quot;null&quot;
+  s ~= &quot; &quot; ~ spec3
+endif
+strings cv = defarray(&quot;ordinary&quot;, &quot;white&quot;, &quot;hac&quot;)
+bundle b = ev_ls(s, vars, cv[cov])    # prints the table into the result window
+return b
+</code>
+</gretl-function>
+<gretl-function name="ev__translate" type="string" private="1">
+ <params count="1">
+  <param name="s" type="string"/>
+ </params>
+<code># Rewrite an EViews expression into hansl syntax.
+string AT = &quot;@&quot;
+string e = s
+# EViews function names -&gt; hansl / package equivalents
+e = regsub(e, &quot;(?i)\bdlog\(&quot;, &quot;ldiff(&quot;)
+e = regsub(e, &quot;(?i)\bd\(&quot;, &quot;diff(&quot;)
+e = regsub(e, &quot;(?i)\blog\(&quot;, &quot;log(&quot;)
+e = regsub(e, &quot;(?i)\bexp\(&quot;, &quot;exp(&quot;)
+e = regsub(e, &quot;(?i)\babs\(&quot;, &quot;abs(&quot;)
+e = regsub(e, &quot;(?i)\bsqr\(&quot;, &quot;sqrt(&quot;)
+# EViews at-functions
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;trend(\(\))?&quot;, &quot;(obs-1)&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;seas\(&quot;, &quot;ev_seas(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;pchy\(&quot;, &quot;ev_pchy(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;pcy\(&quot;, &quot;ev_pcy(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;pch\(&quot;, &quot;ev_pch(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;pc\(&quot;, &quot;ev_pc(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;movav\(&quot;, &quot;ev_movav(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;movsum\(&quot;, &quot;ev_movsum(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;cumsum\(&quot;, &quot;cum(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;mean\(&quot;, &quot;ev_mean(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;stdev\(&quot;, &quot;ev_stdev(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;abs\(&quot;, &quot;abs(&quot;)
+e = regsub(e, &quot;(?i)&quot; ~ AT ~ &quot;log\(&quot;, &quot;log(&quot;)
+errorif(instring(e, AT), sprintf(&quot;Unsupported EViews function in '%s'&quot;, s))
+return e
+</code>
+</gretl-function>
+<gretl-function name="ev__fit" type="scalar" private="1">
+ <params count="4">
+  <param name="y" type="matrix" const="true"/>
+  <param name="Z" type="matrix" const="true"/>
+  <param name="ssr" type="scalarref"/>
+  <param name="df" type="scalarref"/>
+ </params>
+<code># Least squares via generalized inverse (safe if Z is rank-deficient).
+# Returns centered R-squared; fills SSR and rank(Z).
+matrix e = y - Z * (ginv(Z'Z) * (Z'y))
+ssr = e'e
+df = rank(Z)
+matrix d = y - meanc(y)
+return 1 - ssr / (d'd)
+</code>
+</gretl-function>
+<gretl-function name="ev__line" type="void" private="1">
+ <params count="1">
+  <param name="n" type="int" min="1" default="78"/>
+ </params>
+<code>string s = &quot;&quot;
+loop n
+  s ~= &quot;=&quot;
+endloop
+printf &quot;%s\n&quot;, s
+</code>
+</gretl-function>
+<gretl-function name="ev__toseries" type="series" private="1">
+ <params count="2">
+  <param name="v" type="matrix" const="true"/>
+  <param name="tobs" type="matrix" const="true"/>
+ </params>
+<code>series s = NA
+loop i = 1..rows(v)
+  scalar t = tobs[i]
+  s[t] = v[i]
+endloop
+return s
+</code>
+</gretl-function>
+<sample-script>
+set verbose off
+include EViewsCompat.gfn
+open denmark --quiet
+
+# EViews:  ls dlog(lrm) c dlog(lry) lrm(-1) ibo ide
+bundle eq1 = ev_ls(&quot;dlog(LRM) c dlog(LRY) LRM(-1) IBO IDE&quot;, dataset)
+
+# EViews:  eq1.wald c(4)=0, c(5)=0
+bundle w = ev_wald(eq1, &quot;c(4)=0, c(5)=0&quot;)
+
+# EViews:  View &gt; Residual Diagnostics
+bundle d = ev_diag(eq1, 2)
+
+# EViews:  White / HAC coefficient covariance
+bundle eq2 = ev_ls(&quot;dlog(LRM) c dlog(LRY) LRM(-1)&quot;, dataset, &quot;hac&quot;)
+
+# EViews:  series g = @pch(lry)  /  series sm = @movav(lry, 4)
+series g = ev_gen(&quot;@pch(LRY)&quot;, dataset)
+series sm = ev_gen(&quot;@movav(LRY, 4)&quot;, dataset)
+
+# EViews:  Freeze the estimation table
+ev_freeze(eq1, &quot;eq1.csv&quot;)
+</sample-script>
+</gretl-function-package>
+</gretl-functions>

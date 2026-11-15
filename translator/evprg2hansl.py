@@ -1,0 +1,720 @@
+#!/usr/bin/env python3
+"""Translate EViews programs (.prg) into gretl hansl scripts (.inp).
+
+The output relies on the EViewsCompat gretl package for estimation
+(ev_ls, ev_wald, ev_diag, ev_freeze, ev_fit, ev_resid) and the @-functions.
+
+Usage:
+    python3 evprg2hansl.py program.prg [-o program.inp] [--case keep|upper|lower]
+
+Lines the translator cannot handle are kept as "# TODO(EViews ...)" comments,
+and lines with no gretl meaning (cd, close, graph styling) as
+"# ignored(EViews): ..."; both are listed in a summary on stderr.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import re
+import sys
+from dataclasses import dataclass, field
+
+
+class Ignored(Exception):
+    """Statement has no effect in gretl (cd, close, graph styling...)."""
+
+
+# ---------------------------------------------------------------------------
+# Context
+# ---------------------------------------------------------------------------
+
+# hansl words that cannot be used as variable names
+HANSL_RESERVED = {
+    "list", "series", "scalar", "matrix", "string", "strings", "bundle", "bundles",
+    "matrices", "lists", "array", "end", "data", "lags", "const", "loop", "if",
+    "else", "elif", "endif", "endloop", "function", "return", "print", "open",
+    "smpl", "delete", "set", "quit", "include", "run", "genr", "join", "store",
+    "var", "vecm", "ols", "tsls", "garch", "arima", "eval", "catch", "null",
+    "obs", "time", "index", "dummy", "void", "type", "range", "values",
+}
+
+
+@dataclass
+class Ctx:
+    case: str = "keep"
+    scalars: set = field(default_factory=set)
+    strings: set = field(default_factory=set)
+    index_vars: set = field(default_factory=set)     # for !i = ...
+    foreach_vars: set = field(default_factory=set)   # for %x ...
+    groups: dict = field(default_factory=dict)       # name -> members
+    equations: dict = field(default_factory=dict)    # name -> "ls" | "arch"
+    graphs: set = field(default_factory=set)
+    last_eq: str | None = None
+    todos: list = field(default_factory=list)
+    ignored: list = field(default_factory=list)
+    eq_counter: int = 0
+    need_N: bool = False
+    plot_files: bool = False
+    plot_counter: int = 0
+
+
+def safe_name(name: str, prefix: str) -> str:
+    return prefix + name if name.lower() in HANSL_RESERVED else name
+
+
+def apply_case(name: str, ctx: Ctx) -> str:
+    if ctx.case == "upper":
+        return name.upper()
+    if ctx.case == "lower":
+        return name.lower()
+    return name
+
+
+# ---------------------------------------------------------------------------
+# Expressions
+# ---------------------------------------------------------------------------
+
+# EViews function -> hansl/EViewsCompat function (case-insensitive, followed by "(")
+FUNC_MAP = [
+    ("dlog", "ldiff"), ("d", "diff"), ("log", "log"), ("exp", "exp"),
+    ("abs", "abs"), ("sqr", "sqrt"),
+    ("@pchy", "ev_pchy"), ("@pcy", "ev_pcy"), ("@pch", "ev_pch"), ("@pc", "ev_pc"),
+    ("@movav", "ev_movav"), ("@movsum", "ev_movsum"), ("@cumsum", "cum"),
+    ("@mean", "ev_mean"), ("@stdev", "ev_stdev"), ("@var", "ev_var"),
+    ("@obs", "ev_obs"), ("@elem", "ev_elem"), ("@seas", "ev_seas"),
+    ("@abs", "abs"), ("@log", "log"), ("@exp", "exp"), ("@sqrt", "sqrt"),
+    ("@round", "round"), ("@floor", "floor"), ("@ceiling", "ceil"),
+    ("@sum", "sum"), ("@min", "min"), ("@max", "max"), ("@median", "median"),
+    ("@qnorm", "invcdf(z, "), ("@cnorm", "cnorm"), ("@dnorm", "dnorm"),
+]
+
+# words without arguments
+KEYWORD_MAP = [
+    (r"@trend(\(\))?", "ev_trend()"),
+    (r"@obsnum", "obs"),
+    (r"@obssmpl", "$nobs"),
+    (r"@obsrange", "ev_N"),
+    (r"@year", "$obsmajor"),
+    (r"@quarter", "$obsminor"),
+    (r"@month", "$obsminor"),
+    (r"@first", "1"),
+    (r"@last", "ev_N"),
+    (r"nrnd(?!\s*\()", "normal()"),
+    (r"rnd(?!\s*\()", "uniform()"),
+    (r"na\b", "NA"),
+]
+
+
+def _func_re(name: str) -> re.Pattern:
+    lead = "" if name.startswith("@") else r"(?<![A-Za-z0-9_.@$])"
+    return re.compile(lead + re.escape(name) + r"\s*\(", re.IGNORECASE)
+
+
+_FUNC_RES = [(_func_re(src), dst if dst.endswith(" ") else dst + "(") for src, dst in FUNC_MAP]
+_KEY_RES = [(re.compile(r"(?<![A-Za-z0-9_$])" + src + r"(?![A-Za-z0-9_])", re.IGNORECASE), dst)
+            for src, dst in KEYWORD_MAP]
+
+
+def _split_strings(s: str):
+    """Yield (is_string_literal, chunk) pieces so literals stay untouched."""
+    for i, part in enumerate(re.split(r'("[^"]*")', s)):
+        yield i % 2 == 1, part
+
+
+def program_vars(p: str, ctx: Ctx) -> str:
+    """EViews program variables -> hansl.
+
+    {!i} and !i glued to a name (x_!i) are textual: -> $i (index loops).
+    {%x} is textual: -> $x for a foreach variable, @x for a string variable.
+    A free-standing !i / %x is a value: -> i / x.
+    """
+    def braced_str(m):
+        v = m.group(1)
+        return f"${v}" if v in ctx.foreach_vars else f"@{safe_name(v, 's_')}"
+    p = re.sub(r"\{!(\w+)\}", lambda m: f"${safe_name(m.group(1), 'v_')}", p)
+    p = re.sub(r"\{%(\w+)\}", braced_str, p)
+    p = re.sub(r"(?<=[A-Za-z0-9_])!(\w+)", lambda m: f"${safe_name(m.group(1), 'v_')}", p)
+    p = re.sub(r"!(\w+)", lambda m: safe_name(m.group(1), "v_"), p)
+    p = re.sub(r"%(\w+)", lambda m: m.group(1) if m.group(1) in ctx.foreach_vars
+               else safe_name(m.group(1), "s_"), p)
+    return p
+
+
+def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
+    expr = expr.strip()
+    out = []
+    for is_lit, part in _split_strings(expr):
+        if is_lit:
+            out.append(part)
+            continue
+        p = program_vars(part, ctx)
+        if re.search(r"@first|@last|@obsrange", p, re.IGNORECASE):
+            ctx.need_N = True
+        for rx, dst in _FUNC_RES:
+            p = rx.sub(dst, p)
+        for rx, dst in _KEY_RES:
+            p = rx.sub(dst, p)
+        # @coefs(k) and resid refer to the last estimated equation
+        if re.search(r"@coefs\s*\(", p, re.IGNORECASE) or re.search(r"(?<![A-Za-z0-9_])resid(?![A-Za-z0-9_])", p, re.IGNORECASE):
+            if not ctx.last_eq:
+                raise ValueError("@coefs/resid used before any equation")
+            eq = ctx.last_eq
+            p = re.sub(r"@coefs\s*\(\s*([^()]+?)\s*\)", rf"{eq}.coeff[\1]", p, flags=re.IGNORECASE)
+            res = f"ev_resid({eq})" if ctx.equations.get(eq) == "ls" else f"{eq}_resid"
+            p = re.sub(r"(?<![A-Za-z0-9_])resid(?![A-Za-z0-9_])", res, p, flags=re.IGNORECASE)
+        # group element g(i) -> g[i]
+        for g in ctx.groups:
+            p = re.sub(rf"(?<![A-Za-z0-9_.$]){re.escape(g)}\s*\(\s*([^()-][^()]*)\)", rf"{g}[\1]", p)
+        p = p.replace("<>", "!=")
+        p = re.sub(r"\band\b", "&&", p, flags=re.IGNORECASE)
+        p = re.sub(r"\bor\b", "||", p, flags=re.IGNORECASE)
+        p = re.sub(r"\bnot\b", "!", p, flags=re.IGNORECASE)
+        if condition:
+            p = re.sub(r"(?<![<>!=])=(?!=)", "==", p)
+        if ctx.case != "keep":
+            p = re.sub(r"(?<![A-Za-z0-9_$@.])([A-Za-z][A-Za-z0-9_]*)(?![A-Za-z0-9_])(?!\s*[(\[])",
+                       lambda m: _case_ident(m.group(1), ctx), p)
+        out.append(p)
+    return "".join(out)
+
+
+_KEEP_CASE = {"NA", "obs", "const", "ev_N", "z"}
+
+
+def _case_ident(name: str, ctx: Ctx) -> str:
+    if name in _KEEP_CASE or name in ctx.index_vars or name in ctx.foreach_vars \
+            or name in ctx.scalars or name in ctx.strings or name.startswith("ev_") \
+            or name in ctx.groups or name in ctx.equations:
+        return name
+    return apply_case(name, ctx)
+
+
+def translate_name(name: str, ctx: Ctx) -> str:
+    """Left-hand-side object name (may hold program variables)."""
+    return apply_case(program_vars(name.strip(), ctx), ctx)
+
+
+# ---------------------------------------------------------------------------
+# Dates and samples
+# ---------------------------------------------------------------------------
+
+def translate_date(tok: str) -> str | None:
+    """Return a gretl observation label for a plain EViews date, else None."""
+    t = tok.strip()
+    m = re.fullmatch(r"(\d{4})[qQ:](\d)", t)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}"
+    m = re.fullmatch(r"(\d{4})[mM](\d{1,2})", t)
+    if m:
+        return f"{m.group(1)}:{int(m.group(2)):02d}"
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", t)
+    if m:
+        mo, d, y = map(int, m.groups())
+        return f"{y:04d}-{mo:02d}-{d:02d}"
+    if re.fullmatch(r"\d{4}", t):
+        return t
+    return None
+
+
+def _smpl_point(tok: str, var: str, out: list, ctx: Ctx) -> str:
+    plain = translate_date(tok)
+    if plain:
+        return plain
+    # {!y}q1 or !y with a period
+    m = re.fullmatch(r"\{?!(\w+)\}?(?:([qQmM])(\d{1,2}))?", tok)
+    if m and m.group(2):
+        v, f, p = m.groups()
+        fmt = f"%d:{int(p)}" if f.lower() == "q" else f"%d:{int(p):02d}"
+        out.append(f'scalar {var} = obsnum(sprintf("{fmt}", {safe_name(v, "v_")}))')
+        return var
+    # observation arithmetic: @first+!i, @last-4, !n ...
+    expr = translate_expr(tok, ctx)
+    if re.fullmatch(r"\d+|[A-Za-z_]\w*", expr):
+        return expr
+    out.append(f"scalar {var} = {expr}")
+    return var
+
+
+def translate_smpl(args: str, ctx: Ctx) -> list[str]:
+    cond = None
+    m = re.search(r"\bif\b", args, flags=re.IGNORECASE)
+    if m:
+        cond = args[m.end():].strip()
+        args = args[:m.start()]
+    toks = args.split()
+    # EViews smpl always starts from the whole workfile
+    out = ["smpl full"]
+    if toks and [t.lower() for t in toks] != ["@all"]:
+        if len(toks) != 2:
+            raise ValueError("smpl needs a start and an end (or a sample object)")
+        a, b = toks
+        start = _smpl_point(a, "ev_t1", out, ctx)
+        end = _smpl_point(b, "ev_t2", out, ctx)
+        out.append(f"smpl {start} {end}")
+    if cond:
+        out.append(f"smpl {translate_expr(cond, ctx, condition=True)} --restrict")
+    return out
+
+
+def _parse_dmy(s: str) -> dt.date:
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
+    if not m:
+        raise ValueError(f"bad daily date {s}")
+    mo, d, y = map(int, m.groups())
+    return dt.date(y, mo, d)
+
+
+def workfile(freq: str, start: str, end: str) -> list[str]:
+    f = freq.lower()
+    if f in ("a", "y"):
+        return [f"nulldata {int(end) - int(start) + 1}", f"setobs 1 {start} --time-series"]
+    if f in ("q", "m"):
+        per = 4 if f == "q" else 12
+        def parse(s, default):
+            m = re.fullmatch(r"(\d{4})(?:[qQmM:](\d{1,2}))?", s)
+            if not m:
+                raise ValueError(f"bad date {s}")
+            return int(m.group(1)), int(m.group(2) or default)
+        y0, p0 = parse(start, 1)
+        y1, p1 = parse(end, per)
+        n = (y1 - y0) * per + (p1 - p0) + 1
+        label = f"{y0}:{p0}" if f == "q" else f"{y0}:{p0:02d}"
+        return [f"nulldata {n}", f"setobs {per} {label} --time-series"]
+    if f in ("d5", "d", "d7"):
+        d0, d1 = _parse_dmy(start), _parse_dmy(end)
+        days = [d0 + dt.timedelta(k) for k in range((d1 - d0).days + 1)]
+        per = 7 if f == "d7" else 5
+        if per == 5:
+            days = [d for d in days if d.weekday() < 5]
+        return [f"nulldata {len(days)}", f"setobs {per} {days[0].isoformat()} --time-series"]
+    raise ValueError(f"unsupported workfile frequency {freq}")
+
+
+# ---------------------------------------------------------------------------
+# Statements
+# ---------------------------------------------------------------------------
+
+LS_OPT_COV = {"white": "white", "h": "white", "hac": "hac", "n": "hac"}
+
+
+def _ls_cov(opts: str | None) -> str | None:
+    if not opts:
+        return None
+    for o in (x.strip().lower() for x in opts.split(",")):
+        if o.startswith("cov="):
+            o = o[4:]
+        if o in LS_OPT_COV:
+            return LS_OPT_COV[o]
+    return None
+
+
+def _spec(spec: str, ctx: Ctx) -> str:
+    spec = program_vars(spec.strip(), ctx)
+    if ctx.case != "keep":
+        spec = " ".join(apply_case(t, ctx) if re.fullmatch(r"[A-Za-z]\w*", t) and t.lower() != "c" else t
+                        for t in spec.split())
+    return spec
+
+
+def _ls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    name = translate_name(name, ctx)
+    ctx.equations[name] = "ls"
+    ctx.last_eq = name
+    cov = _ls_cov(opts)
+    args = f'"{_spec(spec, ctx)}", dataset' + (f', "{cov}"' if cov else "")
+    return [f"bundle {name} = ev_ls({args})"]
+
+
+def _arch_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    o = [x.strip().lower() for x in (opts or "1,1").split(",")]
+    if any(x in ("t", "e", "tarch", "egarch") or x.startswith(("thrsh", "egarch", "archm")) for x in o):
+        raise ValueError("TGARCH/EGARCH/ARCH-M need the gig package")
+    nums = [x for x in o if re.fullmatch(r"\d+", x)]
+    p, q = (nums + ["1", "1"])[:2]
+    name = translate_name(name, ctx)
+    ctx.equations[name] = "arch"
+    ctx.last_eq = name
+    toks = _spec(spec, ctx).split()
+    dep, regs = toks[0], ["const" if t.lower() == "c" else translate_expr(t, ctx) for t in toks[1:]]
+    # EViews arch(p,q): p = GARCH order, q = ARCH order; gretl garch p q likewise
+    # EViews warns and continues when GARCH does not converge; so do we
+    return [f"catch garch {p} {q} ; {translate_expr(dep, ctx)} {' '.join(regs)} --quiet",
+            "if $error",
+            f'printf "Warning: {name} (GARCH) did not converge; previous estimates kept\\n"',
+            "else",
+            f"bundle {name} = _(coeff = $coeff, vcv = $vcv, lnl = $lnl)",
+            f"series {name}_h = $h",
+            f"series {name}_resid = $uhat",
+            "endif"]
+
+
+def _plot_out(ctx: Ctx) -> str:
+    if not ctx.plot_files:
+        return "--output=display"
+    ctx.plot_counter += 1
+    return f'--output="plot{ctx.plot_counter:02d}.png"'
+
+
+def _graph_cmd(kind: str, members: list[str], ctx: Ctx) -> list[str]:
+    if kind == "scat":
+        if len(members) == 1 and members[0] in ctx.groups:
+            members = ctx.groups[members[0]]
+        if len(members) < 2:
+            raise ValueError("scatter needs two series")
+        members = members[1:] + members[:1]   # gretl: x variable last
+        return [f"gnuplot {' '.join(members)} {_plot_out(ctx)}"]
+    style = "--with-boxes" if kind == "bar" else "--with-lines"
+    return [f"gnuplot {' '.join(members)} --time-series {style} {_plot_out(ctx)}"]
+
+
+GRAPH_KINDS = {"line", "bar", "scat", "scatter", "area", "spike"}
+GRAPH_STYLING = {"addtext", "setelem", "axis", "legend", "options", "save", "draw",
+                 "name", "datelabel", "scale", "align", "template", "setfont",
+                 "addarrow", "setobslabel", "displayname", "label"}
+
+
+def _uroot(series: str, opts: str | None, ctx: Ctx) -> list[str]:
+    o = {}
+    for x in (opts or "adf").split(","):
+        k, _, v = x.strip().lower().partition("=")
+        o[k] = v
+    test = "adf" if "adf" in o or not ({"kpss", "pp", "llc", "ips", "df", "ers", "np"} & o.keys()) else None
+    det = "--ct" if "trend" in o else ("--nc" if "none" in o else "--c")
+    diff = " --difference" if o.get("dif", "0") not in ("", "0") else ""
+    lag = o.get("maxlag") or o.get("lag") or "4"
+    x = translate_name(series, ctx)
+    if test == "adf":
+        info = o.get("info", "")
+        down = {"aic": " --test-down=AIC", "sic": " --test-down=BIC", "bic": " --test-down=BIC",
+                "hqc": " --test-down=tstat", "tstat": " --test-down=tstat"}.get(info, "")
+        return [f"adf {lag} {x} {det}{diff}{down}"]
+    if "kpss" in o:
+        return [f"kpss {o.get('lag', '-1')} {x}" + (" --trend" if "trend" in o else "")]
+    if "llc" in o:
+        return [f"levinlin {lag} {x}" + (" --ct" if "trend" in o else "")]
+    raise ValueError(f"unit root test {'/'.join(o)} has no gretl equivalent here")
+
+
+def _strip_comment(line: str) -> str:
+    out, in_str = [], False
+    for ch in line:
+        if ch == '"':
+            in_str = not in_str
+        if ch == "'" and not in_str:
+            break
+        out.append(ch)
+    return "".join(out).rstrip()
+
+
+def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -> list[str]:
+    ml = meth.lower()
+    o = translate_name(obj, ctx)
+    if ml == "ls":
+        return _ls_call(obj, opts, args, ctx)
+    if ml == "arch":
+        return _arch_call(obj, opts, args, ctx)
+    if ml == "wald":
+        return [f'bundle {o}_wald = ev_wald({o}, "{args.strip()}")']
+    if ml == "auto":
+        return [f"bundle {o}_diag = ev_diag({o}, {(opts or '2').strip()})"]
+    if ml in ("white", "hettest", "jbera"):
+        return [f"bundle {o}_diag = ev_diag({o})"]
+    if ml in ("output", "results", "display", "spec"):
+        return [f"ev_print(&{o})"]
+    if ml == "resids":
+        return [f"ev_plot(&{o})"]
+    if ml == "fit" and ctx.equations.get(o) == "ls":
+        return [f"series {translate_name(args.split()[0], ctx)} = ev_fit({o})"]
+    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) == "ls":
+        return [f"series {translate_name(args.split()[0], ctx)} = ev_resid({o})"]
+    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) == "arch":
+        return [f"series {translate_name(args.split()[0], ctx)} = {o}_resid"]
+    if ml == "makegarch" and ctx.equations.get(o) == "arch":
+        return [f"series {translate_name(args.split()[0], ctx)} = {o}_h"]
+    if ml == "hpf":
+        lam = re.search(r"lambda\s*=\s*([\d.]+)", opts or "")
+        lam_arg = f", {lam.group(1)}" if lam else ""
+        names = args.replace("@", " ").split()
+        if not names:
+            raise ValueError("hpf needs an output series")
+        x = translate_name(obj, ctx)
+        res = [f"series {translate_name(names[0], ctx)} = {x} - hpfilt({x}{lam_arg})"]
+        if len(names) > 1:
+            res.append(f"series {translate_name(names[1], ctx)} = hpfilt({x}{lam_arg})")
+        return res
+    if ml == "uroot":
+        return _uroot(obj, opts, ctx)
+    if ml == "stats":
+        return [f"summary {o}"]
+    if ml == "cor":
+        return [f"corr {o}"]
+    if ml in GRAPH_KINDS:
+        if o in ctx.groups or not args:
+            return _graph_cmd("scat" if ml.startswith("scat") else ml, [o], ctx)
+    if ml in GRAPH_STYLING or o in ctx.graphs:
+        raise Ignored("graph styling")
+    raise ValueError(f"method .{meth} not supported")
+
+
+def translate_line(line: str, ctx: Ctx) -> list[str]:
+    s = line.strip()
+    if not s:
+        return [""]
+    first = s.split()[0]
+    word = re.sub(r"\(.*", "", first.lower())          # command without (options)
+    rest = s[len(first):].strip()
+
+    # --- session / files
+    if word in ("cd", "close", "output", "logmode", "mode", "wfclose", "pageselect"):
+        raise Ignored(word)
+    if word in ("stop", "exit"):
+        return ["quit"]
+    if word in ("wfopen", "load", "import"):
+        f = re.sub(r"\s.*$", "", rest.strip()) if not rest.startswith('"') else rest.split('"')[1]
+        return [f'open "{f}"', "scalar ev_N = $nobs"]
+    if word == "read":
+        f = rest.split('"')[1] if rest.startswith('"') else rest.split()[0]
+        # EViews read adds series to the current workfile, like gretl append
+        return [f'append "{f}"  # EViews read: check that the series names match']
+    if word == "wfcreate":
+        toks = rest.split()
+        if toks and toks[0].lower() == "u":
+            return [f"nulldata {toks[1]}", "scalar ev_N = $nobs"]
+        if len(toks) < 3:
+            raise ValueError("wfcreate needs frequency, start and end")
+        return workfile(toks[0], toks[1], toks[2]) + ["scalar ev_N = $nobs"]
+    if word in ("wfsave", "save"):
+        f = rest.split('"')[1] if rest.startswith('"') else rest.split()[0]
+        f = re.split(r"[\\/]", f)[-1]
+        f = re.sub(r"\.wf1$", "", f, flags=re.IGNORECASE)
+        return [f'store "{f}.gdt"' if not f.endswith(".gdt") else f'store "{f}"']
+    if word == "smpl":
+        return translate_smpl(rest, ctx)
+    if word == "sort":
+        desc = "(d)" in first.lower()
+        # gretl sorts only undated data: drop the time structure first
+        return ["setobs 1 1 --cross-section  # sorting removes the date structure",
+                f"dataset {'dsortby' if desc else 'sortby'} {translate_name(rest, ctx)}"]
+
+    # --- control flow
+    if word == "for":
+        m = re.fullmatch(r"for\s+!(\w+)\s*=\s*(.+?)\s+to\s+(.+?)(?:\s+step\s+(.+))?",
+                         s, flags=re.IGNORECASE)
+        if m:
+            v, a, b, step = m.groups()
+            v = safe_name(v, "v_")
+            ctx.index_vars.add(v)
+            a, b = translate_expr(a, ctx), translate_expr(b, ctx)
+            if step:
+                st = translate_expr(step, ctx)
+                cmp = ">=" if st.strip().startswith("-") else "<="
+                return [f"loop for ({v}={a}; {v}{cmp}{b}; {v}+={st})"]
+            return [f"loop {v} = {a}..{b}"]
+        m = re.fullmatch(r"for\s+%(\w+)\s+(.+)", s, flags=re.IGNORECASE)
+        if m:
+            v, items = m.groups()
+            ctx.foreach_vars.add(v)
+            return [f"loop foreach {v} {program_vars(items, ctx)}"]
+        raise ValueError("unsupported for loop")
+    if word == "next":
+        return ["endloop"]
+    if word == "if":
+        cond = re.sub(r"\s+then\s*$", "", rest, flags=re.IGNORECASE)
+        return [f"if {translate_expr(cond, ctx, condition=True)}"]
+    if word == "else":
+        return ["else"]
+    if word == "endif":
+        return ["endif"]
+    if word == "while":
+        return [f"loop while {translate_expr(rest, ctx, condition=True)}"]
+    if word == "wend":
+        return ["endloop"]
+
+    # --- declarations
+    if word in ("series", "genr", "frml"):
+        name, _, expr = rest.partition("=")
+        name = translate_name(name, ctx)
+        if not expr:
+            return [f"series {name} = NA"]
+        return [f"series {name} = {translate_expr(expr, ctx)}"]
+    if word == "scalar":
+        name, _, expr = rest.partition("=")
+        name = safe_name(name.strip(), "v_")
+        ctx.scalars.add(name)
+        return [f"scalar {name} = {translate_expr(expr, ctx) if expr else 'NA'}"]
+    if word == "group":
+        toks = rest.split()
+        name = translate_name(toks[0], ctx)
+        members = [translate_name(t, ctx) for t in toks[1:]]
+        ctx.groups[name] = members
+        return [f"list {name} = {' '.join(members)}"]
+    if word == "delete":
+        return [f"catch delete {translate_name(n, ctx)}" for n in rest.split()]
+    if word in ("show", "print"):
+        res = []
+        for n in rest.split():
+            n = translate_name(n, ctx)
+            if n in ctx.equations or n in ctx.graphs:
+                continue        # already printed / drawn when created
+            else:
+                res.append(f"print {n}")
+        if not res:
+            raise Ignored("already printed or drawn when created")
+        return res
+    if word == "graph":
+        m = re.fullmatch(r"graph\s+(\w+)\.(\w+)(?:\([^)]*\))?\s*(.*)", s, flags=re.IGNORECASE)
+        if not m:
+            raise ValueError("unsupported graph statement")
+        gname, kind, args = m.groups()
+        ctx.graphs.add(gname)
+        kind = kind.lower()
+        if kind not in GRAPH_KINDS:
+            raise ValueError(f"graph type {kind} not supported")
+        return _graph_cmd("scat" if kind.startswith("scat") else kind,
+                          [translate_name(a, ctx) for a in args.split()], ctx)
+
+    m = re.fullmatch(r"equation\s+([\w{}!%$]+)(?:\.(\w+)(?:\(([^)]*)\))?\s+(.+))?", s, flags=re.IGNORECASE)
+    if m:
+        name, meth, opts, spec = m.groups()
+        if meth is None:
+            return [f"# equation {name} declared (estimated later)"]
+        if meth.lower() == "ls":
+            return _ls_call(name, opts, spec, ctx)
+        if meth.lower() == "arch":
+            return _arch_call(name, opts, spec, ctx)
+        raise ValueError(f"estimation method {meth} not supported")
+    m = re.fullmatch(r"ls(?:\(([^)]*)\))?\s+(.+)", s, flags=re.IGNORECASE)
+    if m:
+        ctx.eq_counter += 1
+        return _ls_call(f"eq_untitled{ctx.eq_counter}", m.group(1), m.group(2), ctx)
+
+    # freeze(name) obj[.view(opts)]
+    m = re.fullmatch(r"freeze\(([^)]*)\)\s+([\w{}!%$]+)(?:\.(\w+)(?:\(([^)]*)\))?)?\s*(.*)", s, flags=re.IGNORECASE)
+    if m:
+        tab, obj, view, opts, args = m.groups()
+        tabn = translate_name(tab, ctx)
+        o = translate_name(obj, ctx)
+        if ctx.equations.get(o, "ls") == "ls" and (view is None or view.lower() == "output"):
+            return [f'ev_freeze({o}, "{tabn}.txt")']
+        if view is None:
+            raise ValueError("freeze of this object not supported")
+        if view.lower() in GRAPH_KINDS or view.lower() == "scat":
+            ctx.graphs.add(tabn)
+            return _object_method(obj, view, opts, args, ctx)
+        inner = _object_method(obj, view, opts, args, ctx)
+        ctx.graphs.add(tabn)        # frozen table: later .save etc. are ignored
+        return [f'outfile "{tabn}.txt" --quiet'] + ["    " + x for x in inner] + ["end outfile"]
+
+    # object methods: name.method(opts) args
+    m = re.fullmatch(r"([\w{}!%$]+)\.(\w+)(?:\(([^)]*)\))?\s*(.*)", s)
+    if m:
+        return _object_method(*m.groups(), ctx)
+
+    # assignments: !x = ..., %s = "...", g(!i) = ..., y = ...
+    m = re.fullmatch(r"([!%]?)([\w{}!%$]+)\s*(?:\(([^()]+)\))?\s*=\s*(.+)", s)
+    if m:
+        sigil, name, elem, expr = m.groups()
+        if elem is not None:
+            g = translate_name(name, ctx)
+            if g not in ctx.groups:
+                raise ValueError("element assignment to unknown object")
+            idx = translate_expr(elem, ctx)
+            return [f"strings ev_nms = varnames({g})",
+                    f"string ev_nm = ev_nms[{idx}]",
+                    f"series @ev_nm = {translate_expr(expr, ctx)}"]
+        if sigil == "!":
+            v = safe_name(name, "v_")
+            ctx.scalars.add(v)
+            return [f"scalar {v} = {translate_expr(expr, ctx)}"]
+        if sigil == "%":
+            v = safe_name(name, "s_")
+            ctx.strings.add(v)
+            return [f"string {v} = {translate_expr(expr, ctx)}"]
+        if name in ctx.scalars:
+            return [f"{name} = {translate_expr(expr, ctx)}"]
+        return [f"series {translate_name(name, ctx)} = {translate_expr(expr, ctx)}"]
+
+    raise ValueError("unsupported statement")
+
+
+def translate(text: str, case: str = "keep") -> tuple[str, list[tuple[int, str]]]:
+    hansl, todos, _ = translate_full(text, case)
+    return hansl, todos
+
+
+def translate_full(text: str, case: str = "keep", plot_files: bool = False):
+    ctx = Ctx(case=case, plot_files=plot_files)
+    raw = text.replace("\r\n", "\n").split("\n")
+    lines, buf, start = [], "", 0
+    for i, ln in enumerate(raw, 1):         # join continuation lines ending in " _"
+        if not buf:
+            start = i
+        if re.search(r"\s_\s*$", _strip_comment(ln)):
+            buf += re.sub(r"\s_\s*$", " ", _strip_comment(ln))
+            continue
+        lines.append((start, buf + ln))
+        buf = ""
+
+    body, indent, has_wf = [], 0, False
+    for lineno, ln in lines:
+        stripped = ln.strip()
+        if stripped.startswith("'"):
+            body.append("    " * indent + "#" + stripped.lstrip("'"))
+            continue
+        code = _strip_comment(ln)
+        try:
+            res = translate_line(code, ctx)
+        except Ignored as e:
+            ctx.ignored.append((lineno, stripped))
+            body.append("    " * indent + f"# ignored(EViews line {lineno}, {e}): {code.strip()}")
+            continue
+        except ValueError as e:
+            ctx.todos.append((lineno, stripped))
+            body.append("    " * indent + f"# TODO(EViews line {lineno}, {e}): {code.strip()}")
+            continue
+        for r in res:
+            if r.startswith("scalar ev_N"):
+                has_wf = True
+            head = r.split()[0] if r.strip() else ""
+            if head in ("endloop", "endif", "else", "end"):
+                indent = max(indent - 1, 0)
+            body.append(("    " * indent + r) if r else "")
+            if head in ("loop", "if", "else", "outfile"):
+                indent += 1
+
+    head = ["# Translated from EViews by evprg2hansl.py",
+            "# Requires the EViewsCompat gretl package",
+            "set verbose off",
+            "include EViewsCompat.gfn"]
+    if ctx.need_N and not has_wf:
+        head.append("scalar ev_N = $nobs    # size of the workfile (EViews @last)")
+    return "\n".join(head + [""] + body) + "\n", ctx.todos, ctx.ignored
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("prg", help="EViews program file (.prg)")
+    ap.add_argument("-o", "--output", help="output .inp (default: same name)")
+    ap.add_argument("--case", choices=["keep", "upper", "lower"], default="keep",
+                    help="change series-name case (hansl is case-sensitive)")
+    ap.add_argument("--plot-files", action="store_true",
+                    help="write graphs to plotNN.png instead of showing them (for gretlcli)")
+    a = ap.parse_args(argv)
+    with open(a.prg, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    hansl, todos, ignored = translate_full(text, a.case, a.plot_files)
+    outp = a.output or re.sub(r"\.prg$", "", a.prg, flags=re.IGNORECASE) + ".inp"
+    with open(outp, "w", encoding="utf-8") as f:
+        f.write(hansl)
+    print(f"Wrote {outp}", file=sys.stderr)
+    if ignored:
+        print(f"{len(ignored)} line(s) ignored (no gretl meaning, e.g. cd, graph styling)", file=sys.stderr)
+    if todos:
+        print(f"{len(todos)} line(s) need manual translation:", file=sys.stderr)
+        for n, t in todos:
+            print(f"  line {n}: {t}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
