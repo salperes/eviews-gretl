@@ -30,7 +30,7 @@ karşılaştırıldı. EViews'in kendisiyle sayısal karşılaştırma yapılmad
 
 | Alan | ✅ | 🟡 | ❌ | ⛔ | Kalem |
 |---|---|---|---|---|---|
-| W · Workfile, sayfalar, veri | 10 | 3 | 1 | 2 | 16 |
+| W · Workfile, sayfalar, veri | 12 | 2 | 0 | 2 | 16 |
 | F · İfadeler ve @-fonksiyonlar | 9 | 0 | 0 | 0 | 9 |
 | E · Denklem tahmincileri | 22 | 0 | 0 | 0 | 22 |
 | T · Denklem testleri ve görünümleri | 16 | 1 | 0 | 0 | 17 |
@@ -39,11 +39,11 @@ karşılaştırıldı. EViews'in kendisiyle sayısal karşılaştırma yapılmad
 | V · VAR / VEC | 12 | 0 | 0 | 0 | 12 |
 | Y · Sistem ve Model | 7 | 1 | 0 | 0 | 8 |
 | O · Diğer nesneler | 8 | 3 | 0 | 0 | 11 |
-| P · Programlama dili | 10 | 2 | 2 | 0 | 14 |
-| U · Arayüz (evqt) | 11 | 2 | 3 | 1 | 17 |
-| **Toplam** | **128** | **14** | **6** | **3** | **151** |
+| P · Programlama dili | 12 | 2 | 0 | 0 | 14 |
+| U · Arayüz (evqt) | 13 | 2 | 1 | 1 | 17 |
+| **Toplam** | **134** | **13** | **1** | **3** | **151** |
 
-Kabaca kapsama: kalemlerin **%66'sı tam, %13'ü kısmi**; açık P1 kalemi 0, açık P2 kalemi 14. Kapsanan kalemler EViews
+Kabaca kapsama: kalemlerin **%89'u tam, %9'u kısmi**; açık P1 kalemi yok, kısmi kalan P2 kalemi 4 (W14, S6, O4, O5). Kapsanan kalemler EViews
 programlarında en sık kullanılanlar olduğu için (ls, ARCH, VAR, sistemler, modeller,
 döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 gerçek programın
 6'sı da çevrilip çalışıyor.
@@ -63,12 +63,12 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | W7 | **Frekans dönüştürme** sayfalar arası (`copy(c=a)`, `pagelink`, link nesneleri) | ✅ | copy(c=a s f l x n r d i q t c) sayfalar arası; evqt'de de | dataset compact/expand | M | **P1** |
 | W8 | `copy` (seri/nesne kopyalama, sayfalar arası) | ✅ | seri, denklem, matris, tablo, grup kopyalama | | S | P1 |
 | W9 | `import`/`export` seçenekleri (Excel aralığı, sheet, names) | ✅ | import/wfopen: sheet=, range= (sol üst hücre) | open --sheet/--rowoffset | S | P2 |
-| W10 | `read`/`write` | 🟡 | read → append; write yok | append, store | S | P3 |
+| W10 | `read`/`write` | ✅ | read → append; write → store (csv, txt, dta; Excel CSV olarak yazılır) | append, store | S | P3 |
 | W11 | Veritabanı .bin fetch/store, `dbopen` | ✅ | | store --database | – | – |
 | W12 | EViews `.edb` veritabanı | ⛔ | kapalı format | – | – | – |
-| W13 | Çevrimiçi veritabanları (`dbopen(type=fred)`, DBnomics) | 🟡 | DBnomics (canlı denendi); FRED yok | dbnomics paketi | M | P2 |
+| W13 | Çevrimiçi veritabanları (`dbopen(type=fred)`, DBnomics) | ✅ | DBnomics ve FRED (halka açık CSV, API anahtarı gerekmez; tarih eşleştirme, yüksek frekans ortalama/toplam/ilk/son); ikisi de canlı denendi | dbnomics paketi | M | P2 |
 | W14 | Alfa (metin) seriler | 🟡 | metin sabitli alfa seriler; ifadelerden alfa seri yok | string-valued series | M | P2 |
-| W15 | Değer eşlemeleri (`valmap`) | ❌ | | string-valued series | M | P3 |
+| W15 | Değer eşlemeleri (`valmap`) | 🟡 | valmap + x.map: pozitif tamsayı kodlar gretl değer etiketlerine (stringify) çevrilir; metin değerli ve sıfır/negatif kodlu eşlemeler yok | string-valued series | M | P3 |
 | W16 | Örnek nesneleri (`sample s1 ...`, `smpl s1`) | ✅ | sample s1 …, smpl s1, s1.set | smpl + kaydedilmiş koşul | S | P2 |
 
 ## F · İfadeler ve @-fonksiyonlar
@@ -223,15 +223,15 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | P2 | !skaler, %string, {%x} / x_!i ikamesi | ✅ | | | – | – |
 | P3 | `subroutine`/`call`/`endsub`, `local` | ✅ | | satır içi açma | – | – |
 | P4 | `include` | ✅ | | | – | – |
-| P5 | `return` | ✅ | alt programın kendi döngüsü içinde ❌ | | – | – |
+| P5 | `return` | ✅ | alt program içinde, döngü içindeki return dahil (P13) | | – | – |
 | P6 | `stop`, yorum, `_` satır devamı | ✅ | | | – | – |
 | P7 | Grafik/çıktı biçimlendirme satırları yok sayılır | ✅ | | | – | – |
 | P8 | `exitloop` | ✅ | → break | break | S | **P1** |
 | P9 | **Program argümanları** `%0 %1`, `exec`/`run` başka program | ✅ | `--args` ile %0 %1 …; `run`/`exec prog arg…` satır içi açılır | | S | **P1** |
-| P10 | `@uiprompt`, `@uiedit` vb. diyaloglar | ❌ | | | M | P3 |
-| P11 | Hata yönetimi `seterr`, `@errorcount`, `setmaxerrs` | 🟡 | seterr var, setmaxerrs yok sayılır; @errorcount yok | catch | S | P2 |
+| P10 | `@uiprompt`, `@uiedit` vb. diyaloglar | 🟡 | programda diyalog açılmaz: @uiprompt OK/Evet yanıtlar, @uiedit/@uilist/@uiradio/@uidialog değerleri korur ve mesaj basar | | M | P3 |
+| P11 | Hata yönetimi `seterr`, `@errorcount`, `setmaxerrs` | ✅ | seterr, setmaxerrs (komutlar catch altında, hata sayılır, sınırda program durur), @errorcount, clearerrs; sayaç veri açılınca sıfırlanır | catch | S | P2 |
 | P12 | `logmsg`, `statusline`, `tic/toc` | ✅ | logmsg, statusline, tic/toc, @toc | printf, $stopwatch | S | P2 |
-| P13 | Döngü içinde `return` (P5'in eksiği) | ❌ | | | M | P3 |
+| P13 | Döngü içinde `return` (P5'in eksiği) | ✅ | bayrak + break zinciri ile; iç içe döngüler ve alt programlar | | M | P3 |
 | P14 | Nesne komutlarının seçenek ayrıştırması genel | 🟡 | tanınmayan seçenek TODO olur | | – | – |
 
 ## U · Arayüz (evqt)
@@ -244,13 +244,13 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | U4 | Forecast, Fetch/Store, sayfa sekmeleri, stack/unstack/panel yapısı | ✅ | | – | – |
 | U5 | Spreadsheet düzenleme (Edit+/-), Freeze, Save, kaydedilmemiş değişiklik uyarısı | ✅ | | – | – |
 | U6 | .prg çalıştırma | ✅ | | – | – |
-| U7 | Denklem diyaloğunda yöntem seçimi: TSLS, GMM, BINARY, … | 🟡 | LS, ARCH, TSLS, BINARY, ARDL, panel; diğer yöntemler E kalemleriyle gelecek | S/kalem | E ile |
+| U7 | Denklem diyaloğunda yöntem seçimi: TSLS, GMM, BINARY, … | ✅ | LS, ARCH (GARCH, TARCH, EGARCH, PARCH, component), TSLS, BINARY, ARDL, ORDERED, CENSORED, COUNT, QREG, LIML, GMM, COINTREG, ROBUSTLS, STEPLS, BREAKLS, THRESHOLD, SWITCHREG, GLM, ENET, HECKIT; MIDAS komut penceresinden | S/kalem | E ile |
 | U8 | Seri görünümleri: birim kök diyaloğu (yalnız ADF), filtreler | ✅ | Unit Root Test diyaloğu: ADF, PP, KPSS; seviye/fark; sabit/trend/yok. Mevsimsel düzeltme menüsü | S | P1 |
 | U9 | Grafik biçimlendirme diyaloğu (eksen, renk, metin) | ✅ | grafik penceresinde Options: başlık, eksen etiketleri, aralık, log ölçek, lejant | M | P2 |
 | U10 | Table nesnesi penceresi (hücre düzenleme) | ✅ | TableWindow: Edit+/- ile hücre düzenleme, Save (csv/txt/html) | M | P1 |
 | U11 | Komut geçmişi kaydetme / komut penceresinden program kaydetme | ✅ | File > Save Command History as Program | S | P2 |
-| U12 | Nesne kopyala/yapıştır, sürükle-bırak | ❌ | | M | P3 |
-| U13 | Yazdırma | ❌ | | S | P3 |
+| U12 | Nesne kopyala/yapıştır, sürükle-bırak | 🟡 | workfile penceresinde Kopyala/Yapıştır (Ctrl+C/V): aynı sayfada NAME_copy, sayfalar arası seri (frekans dönüştürmeli); hücreleri sekmeyle ayrılmış metin olarak kopyalama; sürükle-bırak yok | M | P3 |
+| U13 | Yazdırma | ✅ | File > Print: çıktı metni, tablo ve grafik (sistem yazdırma diyaloğu, PDF dahil) | S | P3 |
 | U14 | Örneklem nesnesi, değer eşlemesi pencereleri | ❌ | W15, W16 ile | M | P3 |
 | U15 | Durum çubuğu: Path / DB / WF / Sample | ✅ | | – | – |
 | U16 | EViews eklentileri (add-ins) | ⛔ | EViews'e özgü | – | – |
@@ -286,6 +286,35 @@ kısmi kalan P2'ler: W13, W14, E3, E10, E16, E21, S6, S7, S11, V6, O4, O5, O6, P
 Testler: paket 346 kontrol (17 dosya), çevirici 67 birim testi, evqt ekran dışı testi,
 9 örnek program; `translator/examples/ml_objects_check.inp` LogL'yi OLS'ye, durum-uzay modelini
 ARIMA(0,1,1) olabilirliğine karşı denetler.
+
+## Faz 3 sonucu (2026-11-15)
+
+Faz 3'te kalan P2 kısmileri ve P3 kalemleri dört partide ele alındı (A: tahminciler, B: görünümler
+ve testler, C: nesneler, D: veri, programlama dili ve arayüz). Durum: 134 kalem tam, 13 kısmi,
+1 yok (U14), 3 mümkün değil. Kısmi kalanlar ve nedenleri tabloda; özetle: ifadelerden alfa seri
+(W14), metin değerli valmap (W15), UDmax/WDmax kırılma testleri (T11), diğer kırılmalı birim kök
+testleri (S6), gruplarda canlı ifade üyeleri (G4), sistem ARCH (Y5), kalan grafik biçimlendirmeleri
+ve pasta grafiği (O4, O5), pool rastgele etkileri (O8), programda gerçek diyaloglar (P10), genel
+seçenek ayrıştırma (P14), sürükle-bırak (U12), Qt yükseltmesi (U17, indirme gerektirir).
+
+Bu fazda bulunup düzeltilen hatalar:
+- Durum-uzay (`sspace`) modelleri gretl'in beş argümanlı `ksetup` biçimini kullanıyordu; bu biçim
+  sinyal ve durum hatalarını aynı şoktan (tam korelasyonlu) türetir. EViews'teki gibi bağımsız
+  hatalar için ölçüm varyansı artık `obsvar` ile veriliyor. Eski denetim (yerel düzey = ARIMA(0,1,1))
+  yanıltıcı biçimde geçiyordu: log GDP'nin farkındaki MA katsayısı pozitif, gerçek yerel düzey
+  modeli bunu üretemez ve sınırda rassal yürüyüşe iner; denetim buna göre düzeltildi.
+- Grup üzerinden çizilen grafiklerde `name(n)` lejant metni grubun adına yazılıyordu.
+- evqt: sayfa değişince başka sayfadaki seri/grup pencereleri yenilenmeye çalışılıp
+  "GDP / macro tanımsız" hataları veriyordu; artık kendi içeriklerini koruyorlar.
+- FRED indirmesi gretl'in varsayılan kullanıcı ajanıyla HTTP/2 hatası veriyordu; `curl()` sade
+  bir kullanıcı ajanıyla çalışıyor.
+- Model control sonucunun seriye yazılmasında bundle üyesinin satır içi dizinlenmesi
+  (gretl desteklemiyor) ve havuz kimliklerinde büyük/küçük harf.
+
+Testler: paket 404 kontrol (21 dosya), çevirici 74 birim testi, evqt 124 ekran dışı kontrol,
+11 örnek program (hepsi gretlcli ile çalışıyor); `translator/examples/phase3c_check.inp`
+sürüklenmeli durum-uzay modelini ARIMA(0,1,0)'a, model control'ü hedef patikaya ve kısıtlı VEC'i
+denetler. FRED ve DBnomics canlı denendi (otomatik testte değil, internet gerekir).
 
 ## Önerilen yol haritası
 

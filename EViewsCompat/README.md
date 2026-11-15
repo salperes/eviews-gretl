@@ -58,3 +58,7 @@ equation fields that are joined with spaces.
 - After `panel ... --random-effects`, `$rsq` is not defined (catch it).
 - After `smpl ... --restrict` leaves one cross-section unit, the data are no longer a
   panel (`$datatype` 2), so `levinlin` fails.
+
+The package help (`EViewsCompat_help.txt`, shown by gretl's function package browser) ends with
+a generated reference of every public function: arguments, optional ones in [ ], and a one-line
+description.

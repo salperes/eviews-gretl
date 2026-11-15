@@ -13,12 +13,13 @@ from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E
 from evqt.app import STYLE, light_palette, SystemWindow, ModelWindow, EquationWindow, GroupWindow, MainWindow, SeriesWindow  # noqa: E402
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "..", "data", "usmacro.gdt")
-out = sys.argv[1] if len(sys.argv) > 1 else "."
+out = OUTDIR = sys.argv[1] if len(sys.argv) > 1 else "."
 os.makedirs(out, exist_ok=True)
 
 errors = []
 failures = []
-QMessageBox.warning = lambda *a, **k: errors.append(a[2] if len(a) > 2 else a)
+_step = ["start"]
+QMessageBox.warning = lambda *a, **k: errors.append((_step[0], a[2] if len(a) > 2 else a))
 QMessageBox.question = lambda *a, **k: QMessageBox.Discard     # no modal prompts in the test
 QMessageBox.information = lambda *a, **k: None
 
@@ -32,6 +33,7 @@ w.show()
 
 
 def check(cond, what):
+    _step[0] = what
     print(("ok    " if cond else "FAIL  ") + what)
     if not cond:
         failures.append(what)
@@ -497,8 +499,38 @@ check("Factor Analysis" in gw.text.toPlainText(), "group view: factor analysis")
 sw.run_plot_cmd('ev_seasplot(GDP, "@PNG")')
 check(sw.stack.currentWidget() is sw._scroll, "series view: seasonal graph")
 
+
+# --- copy/paste objects and cells, printing
+wl = w.wf_window.list
+wl.clearSelection()
+for i in range(wl.count()):
+    if wl.item(i).data(Qt.UserRole) == ("GDP", "series"):
+        wl.item(i).setSelected(True)
+w.wf_window.copy_selected()
+w.wf_window.paste()
+check("GDP_copy" in w.engine.wf.series, "copy/paste a series in the workfile window")
+check("".join(w.engine.run('printf "%g\\n", max(abs(GDP_copy - GDP))')).strip() == "0", "pasted series equals the original")
+sw.spreadsheet()
+sw.table.setRangeSelected(__import__("PySide6.QtWidgets", fromlist=["QTableWidgetSelectionRange"]).QTableWidgetSelectionRange(0, 0, 2, 0), True)
+sw.copy_cells()
+clip = QApplication.clipboard().text().splitlines()
+check(len(clip) == 4 and clip[0].startswith("obs"), "copy spreadsheet cells as tab-separated text")
+w.open_object(("eq_cons", "equation"))
+w.mdi.setActiveSubWindow(w.windows["eq_cons"].parentWidget())
+pdf = os.path.join(OUTDIR, "print_eq.pdf")
+w.print_active(pdf)
+check(os.path.exists(pdf) and os.path.getsize(pdf) > 1000, "File > Print: equation output to PDF")
+gwin.parentWidget().show()
+w.mdi.setActiveSubWindow(gwin.parentWidget())
+pdf2 = os.path.join(OUTDIR, "print_graph.pdf")
+w.print_active(pdf2)
+check(os.path.exists(pdf2) and os.path.getsize(pdf2) > 1000, "File > Print: graph to PDF")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
+if os.environ.get("SMOKE_ERRORS"):
+    for st, e in errors:
+        print("ERROR after", repr(st), "->", str(e)[:200].replace("\n", " | "))
 if failures:
     print("ERRORS:", [str(e)[:300] for e in errors[-6:]])
 sys.exit(1 if failures else 0)

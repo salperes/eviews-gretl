@@ -7,7 +7,7 @@ import sys
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import (QAction, QColor, QPalette, QFont, QFontDatabase, QIcon, QKeySequence,
-                           QPainter, QPen, QPixmap, QTextCursor)
+                           QPainter, QPen, QPixmap, QTextCursor, QShortcut)
 from PySide6.QtWidgets import (QApplication, QComboBox, QSizePolicy, QTabBar, QSplitter, QAbstractItemView,
                                QCheckBox, QPushButton, QSpinBox, QDialog, QDialogButtonBox,
                                QDockWidget, QFileDialog, QFormLayout, QHBoxLayout,
@@ -153,11 +153,29 @@ class ObjectWindow(QWidget):
         self.text.setFont(MONO)
         self.text.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.table = QTableWidget()
+        sc = QShortcut(QKeySequence.Copy, self.table)
+        sc.setContext(Qt.WidgetShortcut)
+        sc.activated.connect(self.copy_cells)
         self.image = ScaledImage()
         self.image.setStyleSheet("background: white;")
         for w in (self.text, self.table, self.image):
             self.stack.addWidget(w)
         self._scroll = self.image
+
+    def copy_cells(self):
+        """Copy the selected spreadsheet cells as tab-separated text (with headers)."""
+        t = self.table
+        rng = t.selectedRanges()
+        if not rng:
+            return
+        r = rng[0]
+        rows = [["obs"] + [t.horizontalHeaderItem(j).text() if t.horizontalHeaderItem(j) else ""
+                           for j in range(r.leftColumn(), r.rightColumn() + 1)]]
+        for i in range(r.topRow(), r.bottomRow() + 1):
+            vh = t.verticalHeaderItem(i)
+            rows.append([vh.text() if vh else str(i + 1)] +
+                        [t.item(i, j).text() if t.item(i, j) else "" for j in range(r.leftColumn(), r.rightColumn() + 1)])
+        QApplication.clipboard().setText("\n".join("\t".join(x) for x in rows))
 
     def set_toolbar(self, bar: QWidget):
         self.lay.addWidget(bar)
@@ -1210,6 +1228,8 @@ class WorkfileWindow(QWidget):
                       ("Reshape Current Page: Unstack in New Page...", main.unstack_dialog),
                       ("Reshape Current Page: Stack in New Page...", main.stack_dialog)]),
             ("Object", [("Open Selected", self.open_selected),
+                        ("Copy Selected", self.copy_selected),
+                        ("Paste", self.paste),
                         ("Rename Selected...", self.rename_selected),
                         ("Delete Selected", self.delete_selected)]),
             ("|", None),
@@ -1244,6 +1264,10 @@ class WorkfileWindow(QWidget):
         self.list.itemDoubleClicked.connect(lambda it: main.open_object(it.data(Qt.UserRole)))
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self.context_menu)
+        for key, fn in ((QKeySequence.Copy, self.copy_selected), (QKeySequence.Paste, self.paste)):
+            sc = QShortcut(key, self.list)
+            sc.setContext(Qt.WidgetShortcut)
+            sc.activated.connect(fn)
         lay.addWidget(self.list, 1)
         self.details = False
         # page tabs, as at the bottom of an EViews workfile window
@@ -1350,9 +1374,46 @@ class WorkfileWindow(QWidget):
             for n in names:
                 self.main.delete_object(n, ask=False)
 
+    def copy_selected(self):
+        """EViews Copy: remember the selected objects (and their page) for Paste."""
+        sel = self.selected()
+        if sel:
+            self.main.obj_clipboard = (self.main.engine.wf.page, sel)
+            QApplication.clipboard().setText(" ".join(n for n, _ in sel))
+
+    def paste(self):
+        """EViews Paste: same page -> copies named NAME_copy; another page -> series copied (frequency conversion)."""
+        clip = getattr(self.main, "obj_clipboard", None)
+        if not clip:
+            return
+        src_page, objs = clip
+        m, wf = self.main, self.main.engine.wf
+        taken = set(wf.series) | set(wf.lists) | set(wf.bundles) | set(wf.scalars) | set(wf.strings)
+        try:
+            for name, kind in objs:
+                if src_page != wf.page:
+                    if kind != "series":
+                        m.error(f"{name}: only series are pasted into another page here.")
+                        continue
+                    m.engine.copy_between(src_page, name, wf.page, name)
+                    continue
+                new, k = f"{name}_copy", 2
+                while new in taken:
+                    new, k = f"{name}_copy{k}", k + 1
+                taken.add(new)
+                decl = {"series": "series", "group": "list", "scalar": "scalar", "string": "string"}.get(kind, "bundle")
+                m.engine.run(f"{decl} {new} = {name}", check=True)
+                if decl == "bundle":
+                    m.engine.wf.obj_page[new] = wf.page
+        except GretlError as e:
+            m.error(str(e))
+        m.refresh()
+
     def context_menu(self, pos):
         m = QMenu(self)
         m.addAction("Open", self.open_selected)
+        m.addAction("Copy", self.copy_selected)
+        m.addAction("Paste", self.paste)
         m.addAction("Rename...", self.rename_selected)
         m.addAction("Delete", self.delete_selected)
         m.exec(self.list.mapToGlobal(pos))
@@ -1455,6 +1516,50 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Path = " + os.path.expanduser("~") + "    WF = none")
 
     # -- menus ------------------------------------------------------------
+    def print_active(self, pdf_path: str | None = None):
+        """EViews File > Print: the active object window (output text, spreadsheet or graph)."""
+        from PySide6.QtPrintSupport import QPrinter, QPrintDialog
+        sub = self.mdi.activeSubWindow()
+        w = sub.widget() if sub else None
+        if not isinstance(w, ObjectWindow):
+            self.error("Select an object window (output, spreadsheet or graph) to print.")
+            return
+        printer = QPrinter(QPrinter.HighResolution)
+        if pdf_path:
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setOutputFileName(pdf_path)
+        elif QPrintDialog(printer, self).exec() != QDialog.Accepted:
+            return
+        cur = w.stack.currentWidget()
+        if cur is w.text:
+            w.text.document().print_(printer)
+            return
+        if cur is w.table:
+            t = w.table
+            rows = ["\t".join(["obs"] + [t.horizontalHeaderItem(j).text() if t.horizontalHeaderItem(j) else ""
+                                          for j in range(t.columnCount())])]
+            for i in range(t.rowCount()):
+                vh = t.verticalHeaderItem(i)
+                rows.append("\t".join([vh.text() if vh else str(i + 1)] +
+                                       [t.item(i, j).text() if t.item(i, j) else "" for j in range(t.columnCount())]))
+            doc = QPlainTextEdit()
+            doc.setFont(MONO)
+            doc.setPlainText("\n".join(rows))
+            doc.document().print_(printer)
+            return
+        pm = w.image.original() if hasattr(w.image, "original") else None
+        if pm is None or pm.isNull():
+            self.error("Nothing to print in this window.")
+            return
+        painter = QPainter(printer)
+        r = painter.viewport()
+        size = pm.size()
+        size.scale(r.size(), Qt.KeepAspectRatio)
+        painter.setViewport(r.x(), r.y(), size.width(), size.height())
+        painter.setWindow(pm.rect())
+        painter.drawPixmap(0, 0, pm)
+        painter.end()
+
     def _menus(self):
         mb = self.menuBar()
         f = mb.addMenu("&File")
@@ -1470,6 +1575,9 @@ class MainWindow(QMainWindow):
         f.addSeparator()
         f.addAction("Run Program (.prg)...", self.run_program_dialog)
         f.addAction("Save Command History as Program...", self.save_history)
+        f.addSeparator()
+        a = f.addAction("Print...", self.print_active)
+        a.setShortcut(QKeySequence.Print)
         f.addSeparator()
         f.addAction("Exit", self.close)
         q = mb.addMenu("&Quick")
@@ -1712,6 +1820,10 @@ class MainWindow(QMainWindow):
         """Re-read open spreadsheets after data changed."""
         for w in list(self.windows.values()):
             if w is exclude or not isinstance(w, (SeriesWindow, GroupWindow)):
+                continue
+            # a window of an object on another page keeps what it shows (as in EViews)
+            wf = self.engine.wf
+            if getattr(w, "name", None) not in (wf.series if isinstance(w, SeriesWindow) else wf.lists):
                 continue
             try:
                 if w.stack.currentWidget() is w.table:
@@ -2225,7 +2337,8 @@ class MainWindow(QMainWindow):
         icr.addItems(["Akaike info criterion (AIC)", "Schwarz criterion (SIC)", "Hannan-Quinn criterion (HQ)"])
         # ARCH options (EViews: model, ARCH order, GARCH order)
         amodel = QComboBox()
-        amodel.addItems(["GARCH/TARCH (symmetric)", "TARCH (threshold, asymmetric)", "EGARCH"])
+        amodel.addItems(["GARCH/TARCH (symmetric)", "TARCH (threshold, asymmetric)", "EGARCH",
+                         "PARCH (power ARCH)", "Component ARCH (1,1)"])
         aord, gord = QSpinBox(), QSpinBox()
         aord.setRange(1, 9)
         gord.setRange(0, 9)
@@ -2239,7 +2352,7 @@ class MainWindow(QMainWindow):
         thr.setValue(-1)
         if arch:
             method.setCurrentIndex(1)
-            amodel.setCurrentIndex({"garch": 0, "tarch": 1, "egarch": 2}.get(arch[0], 0))
+            amodel.setCurrentIndex({"garch": 0, "tarch": 1, "egarch": 2, "parch": 3, "component": 4}.get(arch[0], 0))
             aord.setValue(arch[1])
             gord.setValue(arch[2])
             if len(arch) > 4:
@@ -2304,6 +2417,16 @@ class MainWindow(QMainWindow):
         smp_txt = smp.text().strip()
         if smp_txt and smp_txt != f"{wf.sample_first} {wf.sample_last}":
             self.execute("smpl " + smp_txt.replace(":", "q" if wf.pd == 4 else ("m" if wf.pd == 12 else ":")))
+        if method.currentIndex() == 1 and amodel.currentIndex() >= 3:
+            # PARCH and component ARCH: EViews command through the translator (ev_garchx)
+            kind = "parch" if amodel.currentIndex() == 3 else "cgarch"
+            self.execute(f"equation {name}.arch({aord.value()},{gord.value()},{kind}) {s}")
+            if name in self.engine.wf.bundles:
+                if window is not None:
+                    window.output()
+                else:
+                    self.open_object((name, "equation"))
+            return
         if method.currentIndex() == 1:
             model = ["garch", "tarch", "egarch"][amodel.currentIndex()]
             a, g = aord.value(), gord.value()

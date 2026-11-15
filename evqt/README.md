@@ -72,6 +72,13 @@ Also: nonlinear system equations (estimated with Levenberg-Marquardt), GMM with 
 add factors (and initialising them so the equations fit), stochastic simulation
 (mean and standard deviation series).
 
+Phase 3: the equation dialog has all estimation methods of the package (PARCH and component
+ARCH among the ARCH models); VAR dialog: Bayesian VAR; VAR window > Proc > Cointegration
+Restrictions (VEC); group view: Factor Analysis; series view: seasonal graph. Workfile window:
+Copy / Paste objects (Cmd+C / Cmd+V; another page receives series with frequency conversion),
+spreadsheet cells copy as tab-separated text, File > Print prints the active output, table or
+graph.
+
 Panel pages: workfile Proc > Structure/Resize Current Page (cross-section id and date
 series) or `pagestruct id @date(t)`; Proc > Reshape Current Page: Unstack in New Page or
 `pageunstack(namepat="*_?", page=wide) id t @ x` makes one series per unit. On a panel

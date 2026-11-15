@@ -155,3 +155,191 @@ Panel least squares (EViews ls on a panel page)
 pagestack helpers
   ev_stackids("x_?", dataset)   -> strings: the identifiers ? of matching series
   ev_stack("x_?", dataset [, ids]) -> T x N matrix, one column per identifier
+
+Function reference (other public functions)
+
+Optional arguments are in [ ]; the first comment line of each function is shown.
+
+  ev_fprint(f)
+  ev_depbase(b, vars)  -> string
+      the series Y when the dependent variable is log(Y), d(Y) or dlog(Y); "" otherwise
+  ev_nls(spec, vars, [cov], or, [quiet])  -> bundle
+  ev_arma(spec, vars, [quiet])  -> bundle
+  ev_sysprint(b)
+  ev_sysresid(b, [i])  -> series
+  ev_vecprint(b)
+  ev_svarprint(v)
+  ev_tsls(spec, vars, [cov], [quiet], [liml])  -> bundle
+  ev_binary(spec, vars, [dist], [quiet])  -> bundle
+  ev_binaryprint(b)
+  ev_ardl(spec, vars, [deplags], [reglags], [ic], or, [trend], linear, [quiet])  -> bundle
+  ev_ardlprint(b)
+  ev_boundsprint(b)
+  ev_hettest(b, [htype], or, [nlag], [quiet])  -> bundle
+  ev_reset(b, [nfit], [quiet])  -> bundle
+  ev_chow(b, dates, [forecast], [quiet])  -> bundle
+  ev_testadd(b, vars, adds, [quiet])  -> bundle
+  ev_testdrop(b, drops, [quiet])  -> bundle
+  ev_rls(b, [quiet])  -> bundle
+      recursive residuals, CUSUM and CUSUM of squares with 5% bands, recursive coefficients
+  ev_rlsplot(r, [what], [out])
+  ev_pp(expr, vars, [det], [bw], [dif], [quiet])  -> bundle
+  ev_cointeg(names, vars, [method], [det], [lag], [maxlag], [quiet])  -> bundle
+  ev_seasadj(x, [kind], [factors])  -> series
+  ev_varroots(v, [quiet])  -> matrix
+      roots of the characteristic polynomial = eigenvalues of the companion matrix
+  ev_varlm(v, [h], [quiet])  -> matrix
+      Breusch-Godfrey LM tests for residual serial correlation (Lutkepohl):
+  ev_varnorm(v, [quiet])  -> bundle
+      Jarque-Bera normality tests on Cholesky-orthogonalised residuals (Lutkepohl)
+  ev_varfcast(v, vars, [dynamic], [quiet])  -> bundle
+      forecasts of every endogenous variable over the current sample, with S.E.
+  ev_varfseries(r, [i], [se])  -> series
+  ev_pagecol(x)  -> matrix
+      [day number, value] of every observation, for ev_freqconv
+  ev_freqconv(S, [method])  -> series
+      convert to the frequency of the current page, as EViews copy(c=...)
+  ev_left(s, n)  -> string
+  ev_right(s, n)  -> string
+  ev_mid(s, n1, [n2])  -> string
+  ev_instr(s, t, [nth])  -> scalar
+      position of the nth occurrence of t in s (0 if not found), as EViews @instr
+  ev_word(s, n)  -> string
+  ev_dateval(s, [fmt])  -> scalar
+      EViews date number (days since 1 Jan 1 AD, starting at 0)
+  ev_datestr(d, [fmt], YYYY)  -> string
+  ev_date()  -> series
+      EViews @date: date number of each observation
+  ev_table([r], [c])  -> bundle
+  ev_tset(t, [i], [j], v)
+  ev_tsetnum(t, [i], [j], v)
+  ev_tget(t, i, j)  -> string
+  ev_twidth(t, [j], [w])
+  ev_ttext(t, [fmt], or)  -> string
+  ev_tprint(t)
+  ev_tsave(t, fname, [fmt], or)
+  ev_mlreg(spec, vars, method, or, [p1], [p2], [quiet])  -> bundle
+  ev_mlprint(b)
+  ev_wls(spec, vars, wexpr, [wtype], or, [quiet])  -> bundle
+  ev_cointreg(spec, vars, [method], or, [nlead], [nlag], [trend], or, [quiet])  -> bundle
+  ev_dpanel(y, [xs], vars, [p], [twostep], [timedum], [quiet])  -> bundle
+  ev_coefprint(b)
+      generic coefficient table (cointegrating regressions, dynamic panels)
+  ev_rescorr(b, [k], [squared], [quiet])  -> matrix
+      AC, PAC, Ljung-Box Q and its p-value for lags 1..k (EViews eq.correlogram / correlsq)
+  ev_ubreak(b, [trim], [quiet])  -> bundle
+      Quandt-Andrews unknown breakpoint test: Chow F at every date in the trimmed sample
+  ev_vif(b, [quiet])  -> matrix
+      coefficient variance (uncentered) and centered variance inflation factors
+  ev_paneltests(spec, vars, [quiet])  -> bundle
+  ev_cause(names, vars, [p], [quiet])  -> matrix
+  ev_varwhite(v, [quiet])  -> bundle
+      joint White test without cross terms (Lutkepohl/Kelejian system LM)
+  ev_varimpulse(v, [h], [kind], [accum], [reps], [level], [quiet])  -> bundle
+  ev_var2eqs(v, vars)  -> bundles
+      each VAR equation as a least-squares equation bundle, for ev_modelsolve (var.makemodel)
+  ev_vecrestrict(v, restr, vars, [quiet])  -> bundle
+      linear restrictions on vec(beta); EViews B(i,j) = gretl beta[j, i]
+  ev_ngperron(expr, vars, [trend], [maxlag], [quiet])  -> bundle
+      ERS point-optimal P_T and Ng-Perron MZa, MZt, MSB, MPT (AR spectral, GLS-detrended, SIC lags)
+  ev_zivot(expr, vars, [model], [lag], [trim], [quiet])  -> bundle
+      Zivot-Andrews (1992) unit root test with one endogenous break: minimum t over break dates
+  ev_panelur(x, [test], or, [trend], [lag], [quiet])  -> bundle
+      Maddala-Wu / Choi Fisher-type tests and Hadri's stationarity test
+  ev_cf(x, [low], [high])  -> series
+      Christiano-Fitzgerald asymmetric full-sample filter (random-walk assumption, drift removed)
+  ev_smooth(x, [method], [pa], [pb], [pg], [res])  -> series
+      exponential smoothing; parameters not given are estimated by minimising the sum of squared one-step errors
+  ev_ipolate(x, [kind])  -> series
+      fills interior missing values by linear (or log-linear) interpolation, as EViews ipolate
+  ev_pcomp(names, vars, [cov], [quiet])  -> bundle
+  ev_pcscore(r, [j])  -> series
+  ev_kdplot(x, [out])
+      kernel density estimate (Epanechnikov in EViews; gretl's default Gaussian kernel here)
+  ev_dateadd(d, n, [unit], or)  -> scalar
+  ev_datediff(d1, d2, [unit], or)  -> scalar
+      d1 - d2 in whole units
+  ev_makedate(v, fmt)  -> scalar
+  ev_wfind(s, w)  -> scalar
+      position of a word in a space-separated list (0 if absent), case-insensitive
+  ev_wdrop(s, drop)  -> string
+  ev_wkeep(s, keep)  -> string
+  ev_wunique(s)  -> string
+  ev_wreplace(s, src, dst)  -> string
+  ev_wsort(s, [desc])  -> string
+  ev_covp(x, y)  -> scalar
+      EViews @cov: population covariance (divides by n)
+  ev_cumprod(x)  -> series
+  ev_cummax(x, [mn])  -> series
+  ev_ifirst(x)  -> scalar
+      observation number of the first non-missing value (EViews @ifirst)
+  ev_ilast(x)  -> scalar
+  ev_garchx(spec, vars, model, [quiet])  -> bundle
+      EViews arch(1,1,parch) and arch(1,1,cgarch): own likelihood, started from GARCH(1,1)
+  ev_truncreg(spec, vars, [lo], [hi], [quiet])  -> bundle
+  ev_heckit(spec, vars, [twostep], [quiet])  -> bundle
+  ev_robustls(spec, vars, [psi], [tune], [quiet])  -> bundle
+  ev_stepls(spec, vars, [method], [pin], [pout], [quiet])  -> bundle
+  ev_switchreg(spec, vars, [quiet])  -> bundle
+      all coefficients and the error variance switch between two Markov regimes
+  ev_threshold(spec, thvar, vars, [trim], [quiet])  -> bundle
+      one threshold: all coefficients differ below and above the threshold value (grid search)
+  ev_breakls(spec, vars, [maxbreaks], [trim], [crit], [quiet])  -> bundle
+      Bai-Perron global minimisation of the SSR (dynamic programming) for 0..maxbreaks breaks;
+  ev_midaslags(S, [K])  -> matrix
+      for each observation of the current (low-frequency) page: the last K high-frequency values
+  ev_midas(spec, vars, L, [poly], or, [deg], [quiet])  -> bundle
+  ev_glm(spec, vars, [family], or, [link], or, [quiet])  -> bundle
+  ev_enet(spec, vars, [alpha], between, [lfrac], [quiet])  -> bundle
+  ev_paneliv(spec, vars, [cx], [quiet])  -> bundle
+  ev_panelre2(spec, vars, [period], [quiet])  -> bundle
+      Swamy-Arora random effects for a balanced panel: cross-section (and period) components
+  ev_influence(b, [quiet])  -> matrix
+      RStudent, DFFITS, COVRATIO, hat values and DFBETAS (EViews Influence Statistics)
+  ev_ellipse(b, [i], [j], [level], [out])  -> matrix
+      boundary of the joint confidence region of coefficients i and j (F-based, as EViews)
+  ev_covprint(b)
+      EViews View > Covariance Matrix
+  ev_gradients(b, [quiet])  -> matrix
+      gradients of the sum of squares at the estimates (-2 X'e): zero at an interior optimum
+  ev_breitung(x, [lag], [quiet])  -> bundle
+  ev_ets(x, [model], or, [quiet])  -> bundle
+  ev_testequal(names, vars, [quiet])  -> bundle
+      equality of means (ANOVA F), medians (Kruskal-Wallis) and variances (Bartlett, Levene) across series
+  ev_vratio(x, [periods], [quiet])  -> matrix
+      Lo-MacKinlay variance ratio test of a random walk: homoskedastic and heteroskedasticity-robust z
+  ev_xcorr(x, y, [k], [quiet])  -> matrix
+      correlations of x(t) with y(t-j), j = -k..k (EViews cross correlogram: lag and lead columns)
+  ev_spectrum(x, [window], [out])  -> matrix
+  ev_varhist(v, [quiet])  -> bundle
+      contribution of each Cholesky shock to each variable; the rest is the base projection
+  ev_sysrestests(s, [quiet])  -> bundle
+      residual correlation matrix and Cholesky-orthogonalised normality test (as VAR)
+  ev_modelfit(ms, [quiet])  -> matrix
+      RMSE, MAE, MAPE and Theil U of the solution against the actual values
+  ev_bvar(v, terms, [mu1], [L1], [L2], [L3], [quiet])  -> bundle
+      Litterman / Minnesota prior, equation by equation (EViews BVAR, Litterman prior):
+  ev_bvarprint(b)
+      Bayesian VAR coefficient table (posterior means, s.d. in parentheses)
+  ev_stop(msg)
+      stop the program with an error message (translated setmaxerrs)
+  ev_fred(id, [agg])  -> series
+      FRED (St. Louis Fed) public CSV download; observations are matched to the workfile by date and
+  ev_uiprompt(msg, [kind], or)  -> scalar
+      EViews @uiprompt in a script: print the prompt and answer OK / Yes (1)
+  ev_uiskip([what])  -> scalar
+      EViews @uiedit, @uilist, @uiradio, @uidialog in a script: keep the current values, return 0 (OK)
+  ev_factorprint(r)
+      factor loadings, communalities and uniquenesses
+  ev_modelcontrol(eqs, idents, vars, instrument, target, trajectory, [quiet])  -> bundle
+      EViews model.control: find the instrument path for which the solution of the target
+  ev_poolls(ids, spec, vars, [cx], [quiet])  -> bundle
+      pool object estimation with common coefficients: stacks y_id, x_id for each identifier
+  ev_factor(names, vars, [nf], [method], [quiet])  -> bundle
+      factor analysis of the correlation matrix: maximum likelihood or iterated principal factors
+  ev_seasplot(x, [out])
+      seasonal subseries graph: one line per quarter / month across the years
+  ev_ls_gui(spec, [spec2], [spec3], vars, [cov])  -> bundle
+      optional parts may arrive empty or as the literal text "null"
+  ev_ls_gui(spec, [spec2], [spec3], vars, [cov])  -> bundle
+      optional parts may arrive empty or as the literal text "null"

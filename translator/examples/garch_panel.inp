@@ -79,6 +79,7 @@ scalar nr = rows(XM)
 bundle EQC = ev_ls("CONS c GDP", dataset)
 scalar gap = abs(BM[2,1] - EQC.coeff[2])
 # --- call report
+scalar ev_ret2 = 0
 loop 1    # subroutine body (return = break)
     # nothing to report for a missing value
     if missing(gap)
@@ -101,6 +102,7 @@ series C2S = C2
 smpl full
 smpl 1960:1 2019:4
 # --- call report
+scalar ev_ret3 = 0
 loop 1    # subroutine body (return = break)
     # nothing to report for a missing value
     if missing(check)

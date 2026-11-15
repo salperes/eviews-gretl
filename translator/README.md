@@ -66,17 +66,26 @@ fixed effects, plain `ls` on a panel page is pooled (`ev_panel`, gretl's `panel`
 `period`, and `x_`, `y` named as the pattern without `?`).
 Program structure: `subroutine name(series x, scalar !n, string %s)` ... `endsub` and
 `call name(...)` (expanded inline, nested calls too), `include file[.prg]` (read from the
-program's folder). `return` in a subroutine works (the body runs in a one-pass loop and
-`return` becomes `break`), except inside a loop of the subroutine. `if x = na` becomes
-`missing(x)`.
+program's folder). `return` in a subroutine works, also inside its loops (the body runs in
+a one-pass loop; a flag and a chain of `break`s leave the inner loops). `if x = na` becomes
+`missing(x)`. `setmaxerrs n` runs the following commands under `catch` and stops at n errors
+(`@errorcount`, `clearerrs`); `@uiprompt` answers OK/Yes and the other `@ui...` dialogs keep
+the current values, since a script has no dialogs.
 Matrices: `vector(n)`, `rowvector(n)`, `sym(n)`, `coef(n)`, `matrix m = expr`, `m = expr`,
 `m(i,j)` in expressions, `@inverse @transpose @det @identity @kronecker @cholesky
 @eigenvalues @trace @rank @vec @rows @columns @getmaindiagonal @emult @ediv @convert
 @columnextract @rowextract @subextract`, `stom(series|group, m)`, `mtos(m, series|group)`.
 `examples/garch_panel.prg` (with `examples/lib_matrix.prg`) uses all of these.
 
-Not yet: period random effects, panel GMM/2SLS, pool objects (identifiers are read
-from the series names instead), Student-t / GED errors for ARCH models.
+Phase 3 added: PARCH and component ARCH, robust/stepwise/breakpoint/threshold/switching LS,
+MIDAS, GLM, elastic net, Heckman, truncated regression, panel 2SLS and two-way random effects;
+restricted VECs (`append(coint)` with B(i,j) and, for rank 1, A(i,1)), Bayesian VARs
+(`var v.bvar`), `m.control`, `pool p1 _us _uk` + `p1.ls(cx=f) y? c x?`, `spool`, `factor`,
+`sspace` state constants and `makestates`, `valmap`, `write`, `fetch(d=fred)` (FRED's public
+CSV, no API key). `examples/phase3.prg` and `examples/phase3c.prg` use them;
+`examples/phase3c_check.inp` checks results against gretl's own estimators.
+
+What is still partial or missing, item by item: [`docs/GAP_ANALIZI.md`](../docs/GAP_ANALIZI.md).
 
 ## Real programs (`real_prg/`, local testing only: the source repos have no licence)
 | Program | Lines | Untranslated | Ran in gretl |
