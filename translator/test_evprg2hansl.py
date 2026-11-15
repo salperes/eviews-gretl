@@ -257,6 +257,48 @@ class Estimators(unittest.TestCase):
         self.assertEqual(translate_line("g.coint(b, 2)", c), ['ev_coint("lc lg", dataset, "b", 2)'])
 
 
+class Advanced(unittest.TestCase):
+    def test_fiml_and_gmm(self):
+        c = Ctx()
+        translate_line("system s", c)
+        translate_line("s.append y1 = c(1) + c(2)*y2 + c(3)*x1", c)
+        translate_line("s.append y2 = c(4) + c(2)*y1 + c(5)*x2", c)
+        out = translate_line("s.fiml", c)
+        self.assertIn("s_fs_s <- system".replace("s_fs_s", "ev_fs_s"), out)
+        self.assertIn("  equation y1 const y2 x1", out)
+        self.assertIn("  endog y1 y2", out)
+        self.assertIn("  b[1,2] - b[2,2] = 0", out)
+        self.assertTrue(any(x.startswith('bundle s = ev_sysfrom("fiml"') and "{1, 2, 3, 4, 6}" in x for x in out))
+        c2 = Ctx()
+        translate_line("system g", c2)
+        translate_line("g.append y = c(1) + c(2)*x", c2)
+        translate_line("g.append inst z", c2)
+        self.assertIn('"gmm"', translate_line("g.gmm", c2)[4])
+
+    def test_matrix_and_svar(self):
+        c = Ctx()
+        translate_line("var v.ls 1 2 a b", c)
+        self.assertEqual(translate_line("matrix(2,2) pa", c), ["matrix pa = zeros(2, 2)"])
+        self.assertEqual(translate_line("pa.fill(b=r) 1, 0, na, 1", c), ["matrix pa = mshape({1, 0, NA, 1}, 2, 2)'"])
+        self.assertEqual(translate_line("pa(2,1) = na", c), ["pa[2,1] = NA"])
+        translate_line("matrix(2,2) pb", c)
+        self.assertEqual(translate_line("v.svar(rtype=patsr, namea=pa, nameb=pb)", c), ["ev_svar(&v, pa, pb)"])
+        self.assertEqual(translate_line("v.svar(lr)", c), ["ev_svar_lr(&v)"])
+
+    def test_model(self):
+        c = Ctx()
+        translate_line("equation ec.ls dlog(cons) c dlog(gdp)", c)
+        translate_line("equation ei.ls inv c gdp(-1)", c)
+        translate_line("model m", c)
+        translate_line("m.merge ec ei", c)
+        translate_line("m.append @identity gdp = cons + inv + g", c)
+        out = translate_line("m.solve(d=s)", c)
+        self.assertEqual(out[0], "bundles ev_mb = defarray(ec, ei)")
+        self.assertEqual(out[2], "bundle m = ev_modelsolve(ev_mb, ev_mi, dataset, 0)")
+        self.assertEqual(out[3:], ["series cons_0 = ev_modelseries(m, 1)", "series inv_0 = ev_modelseries(m, 2)",
+                                   "series gdp_0 = ev_modelseries(m, 3)"])
+
+
 class Program(unittest.TestCase):
     def test_loop_and_if_blocks(self):
         prg = "for !i = 1 to 3\n series x{!i} = !i\nnext\nif !i = 3 then\n !a = 1\nendif\n"

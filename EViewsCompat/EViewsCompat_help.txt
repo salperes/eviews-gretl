@@ -93,3 +93,21 @@ VEC models (var v.ec(c, 1) 1 2 y1 y2)
   ev_vecm("1 2 y1 y2 [@ x]", dataset, "c", 1)   trend case a-e, rank
   ev_coint("y1 y2", dataset, "c", 4)            Johansen test
       The VAR views (ev_varirf, ev_varirfplot, ev_vardecomp) work on VEC results.
+
+More system estimators
+  ev_system(..., "wls" | "wtsls" | "gmm", "z1 z2")   weighted LS, weighted TSLS,
+      two-step GMM with White weighting (J-statistic reported)
+  FIML: estimate with gretl's system command (method=fiml), then
+      ev_sysfrom("fiml", $coeff, $vcv, $uhat, $yhat, pos, cnums, kk, deps, eqtext, $t1, $lnl)
+      gives the EViews-style result (the translator and evqt do this for you)
+
+Structural VAR (v.svar)
+  ev_svar(&v, A, B)   short-run A e = B u: in A and B, numbers are fixed and NA
+                      entries are estimated (ML); LR test of over-identification
+  ev_svar_lr(&v)      long-run (Blanchard-Quah) restrictions
+      Afterwards ev_varirf, ev_varirfplot and ev_vardecomp use the structural shocks.
+
+Model objects (model m / m.merge eq / m.append identity / m.solve)
+  ev_modelsolve(bundles eqs, strings identities, dataset [, dynamic=1])
+      Solves least-squares and explicit equations plus identities period by period
+      (Newton). ev_modelseries(m, k) is the solution of endogenous variable k.

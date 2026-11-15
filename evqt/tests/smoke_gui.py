@@ -7,9 +7,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E402
 
-from evqt.app import STYLE, light_palette, SystemWindow, EquationWindow, GroupWindow, MainWindow, SeriesWindow  # noqa: E402
+from evqt.app import STYLE, light_palette, SystemWindow, ModelWindow, EquationWindow, GroupWindow, MainWindow, SeriesWindow  # noqa: E402
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "..", "data", "usmacro.gdt")
 out = sys.argv[1] if len(sys.argv) > 1 else "."
@@ -194,6 +195,46 @@ sysw.estimate()
 check(w.engine.wf.kinds.get("sys1") == "system", "System window estimates a SUR system")
 check("Seemingly Unrelated Regression" in sysw.text.toPlainText() and "C(4)" in sysw.text.toPlainText(),
       "system output with shared coefficient (4 coefficients)")
+
+# --- FIML and GMM through the system window
+sysf = SystemWindow(w, "sysf")
+w.add_window("sysf", sysf, (700, 500), "system")
+sysf.spec.setPlainText("dlog(cons) = c(1) + c(2)*dlog(gdp) + c(3)*ffr(-1)\ndlog(gdp) = c(4) + c(5)*dlog(cons) + c(6)*ffr")
+QInputDialog.getItem = staticmethod(lambda *a, **k: ("Full Information Maximum Likelihood", True))
+sysf.estimate()
+check("Full Information Maximum Likelihood" in sysf.text.toPlainText(), "FIML system from the system window")
+sysg = SystemWindow(w, "sysg")
+w.add_window("sysg", sysg, (700, 500), "system")
+sysg.spec.setPlainText("dlog(cons) = c(1) + c(2)*dlog(gdp)\ninst ffr(-1) dlog(gdp(-1)) dlog(cons(-1))")
+QInputDialog.getItem = staticmethod(lambda *a, **k: ("Generalized Method of Moments (White weighting)", True))
+sysg.estimate()
+check("J-statistic" in sysg.text.toPlainText(), "GMM system with J-statistic")
+
+# --- structural VAR on the VAR object
+w.engine.run("matrix ev_A = {1, 0, 0; NA, 1, 0; NA, NA, 1}\nmatrix ev_B = {NA, 0, 0; 0, NA, 0; 0, 0, NA}")
+sv_out = w.engine.run("ev_svar(&v1, ev_A, ev_B)")
+check(any("Structural VAR Estimates" in x for x in sv_out), "structural VAR (A-B) on a VAR object")
+irf_txt = "\n".join(w.engine.run("ev_varirf(v1, 4)"))
+check("Structural decomposition" in irf_txt, "impulse responses use the structural shocks")
+
+# --- model window: equations plus an identity, dynamic solution
+w.execute("smpl full")
+w.execute("series oth = gdp - cons - inv")
+w.execute("smpl 1985q1 2015q4")
+w.execute("equation eqmc.ls dlog(cons) c dlog(cons(-1)) dlog(gdp)")
+w.execute("equation eqmi.ls dlog(inv) c dlog(inv(-1)) ffr")
+w.execute("smpl 2010q1 2019q4")
+mw = ModelWindow(w, "mod1")
+w.add_window("mod1", mw, (680, 560), "model")
+for i in range(mw.eqlist.count()):
+    if mw.eqlist.item(i).text() in ("eqmc", "eqmi"):
+        mw.eqlist.item(i).setCheckState(Qt.Checked)
+mw.ids.setPlainText("gdp = cons + inv + oth")
+QInputDialog.getItem = staticmethod(lambda *a, **k: ("Dynamic solution", True))
+mw.solve()
+check("GDP_0" in w.engine.wf.series and "CONS_0" in w.engine.wf.series, "model solution series *_0 created")
+check("Converged" in mw.text.toPlainText(), "model converged")
+check(w.engine.wf.kinds.get("mod1") == "model", "model object in the workfile")
 
 # --- VEC through the VAR dialog path (command) and its views
 w.execute("smpl 1960q1 2019q4")

@@ -1,0 +1,112 @@
+# GMM / WLS / FIML systems, structural VARs and model solution
+set verbose off
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+series di = ldiff(INV)
+series ffr1 = FFR(-1)
+series dg1 = dg(-1)
+series dc1 = dc(-1)
+smpl 1985:1 2019:4
+
+# --- 1. GMM (one equation) against gretl's two-step gmm
+bundle g1 = ev_system(defarray("dlog(CONS)"), defarray("c dlog(GDP)"), defarray("1 2"), dataset, "gmm", \
+  "FFR(-1) dlog(GDP(-1)) dlog(CONS(-1))", 1)
+list Z = const ffr1 dg1 dc1
+matrix W0 = inv({Z}'{Z})
+scalar b0 = 0
+scalar b1 = 0
+set force_hc on    # White weighting, as EViews (gretl uses HAC by default on time series)
+series e = 0
+gmm e = dc - b0 - b1 * dg
+  orthog e ; Z
+  weights W0
+  params b0 b1
+end gmm --two-step --quiet
+set force_hc off
+check("GMM c(2) vs gretl gmm", g1.coeff[2], $coeff[2], 1e-4)
+check("GMM se c(2) vs gretl gmm", g1.stderr[2], $stderr[2], 1e-2)
+check("GMM J-statistic reported", ok(g1.J), 1)
+
+# --- 2. WLS: without shared coefficients the coefficients equal OLS
+bundle w1 = ev_system(defarray("dlog(CONS)", "dlog(INV)"), defarray("c dlog(GDP)", "c dlog(GDP) FFR"), \
+  defarray("1 2", "3 4 5"), dataset, "wls", null, 1)
+ols di const dg FFR --quiet
+check("WLS c(5) = OLS", w1.coeff[5], $coeff[3])
+bundle wt = ev_system(defarray("dlog(CONS)"), defarray("c dlog(GDP)"), defarray("1 2"), dataset, "wtsls", \
+  "FFR(-1) dlog(GDP(-1)) dlog(CONS(-1))", 1)
+tsls dc const dg ; const ffr1 dg1 dc1 --quiet
+check("weighted TSLS (one equation) = TSLS", wt.coeff[2], $coeff[2])
+
+# --- 3. FIML through gretl's system command
+fsys <- system
+  equation dc const dg ffr1
+  equation dg const dc FFR
+  endog dc dg
+end system
+estimate fsys method=fiml --quiet
+bundle f1 = ev_sysfrom("fiml", $coeff, $vcv, $uhat, $yhat, {1, 2, 3, 4, 5, 6}, {1, 2, 3, 4, 5, 6}, {3, 3}, \
+  defarray("DLOG(CONS)", "DLOG(GDP)"), defarray("DLOG(CONS)=C(1)+C(2)*DLOG(GDP)+C(3)*FFR(-1)", "DLOG(GDP)=C(4)+C(5)*DLOG(CONS)+C(6)*FFR"), \
+  $t1, $lnl)
+check("FIML c(5) carried over", f1.coeff[5], $coeff[5])
+check("FIML log likelihood carried over", f1.lnl, $lnl)
+
+# --- 4. structural VARs
+bundle v = ev_varest("1 2 dc dg FFR", dataset, 1, "dlog(cons) dlog(gdp) ffr")
+matrix Rc = ev_varirf(v, 8, 1)              # Cholesky responses (gretl irf)
+matrix Ap = {1, 0, 0; NA, 1, 0; NA, NA, 1}
+matrix Bp = {NA, 0, 0; 0, NA, 0; 0, 0, NA}
+ev_svar(&v, Ap, Bp, 1)
+matrix Rs = ev_varirf(v, 8, 1)
+check("just-identified A-B = Cholesky, impact", Rs[1, 4], Rc[1, 4], 1e-4)
+check("just-identified A-B = Cholesky, period 5", Rs[5, 8], Rc[5, 8], 1e-4)
+check("just-identified: no over-identification df", v.svar_df, 0)
+matrix Ap2 = {1, 0, 0; NA, 1, 0; 0, NA, 1}  # one zero restriction more
+bundle v2 = ev_varest("1 2 dc dg FFR", dataset, 1)
+ev_svar(&v2, Ap2, Bp, 1)
+check("over-identified: LR test with 1 df", v2.svar_df, 1)
+check("over-identified: LR statistic >= 0", v2.svar_lr > -1e-6, 1)
+bundle v3 = ev_varest("1 2 dc dg", dataset, 1)
+ev_svar_lr(&v3, 1)
+matrix R3 = ev_varirf(v3, 400, 1)
+check("long-run: accumulated response of var 1 to shock 2 is zero", sumc(R3[, 3]), 0, 1e-4)
+matrix D3 = ev_vardecomp(v3, 10, 1)
+check("structural variance decomposition sums to 100", sumr(D3[10,]), 100)
+ev_svarprint(&v2)
+
+# --- 5. model solution
+smpl 1985:1 2015:4
+bundle e1 = ev_ls("FFR c FFR(-1) dlog(GDP)", dataset, null, 1)
+smpl 2016:1 2019:4
+bundle f = ev_forecast(e1, dataset, 1, 1)
+bundles mb = defarray(e1)
+strings noid = array(0)
+bundle m1 = ev_modelsolve(mb, noid, dataset, 1, 1)
+series ffr_0 = ev_modelseries(m1, 1)
+check("one-equation model = dynamic forecast, 2019:4", ffr_0[2019:4], f.yf[16], 1e-8)
+smpl full
+series oth = GDP - CONS - INV    # exogenous part of GDP, all periods
+smpl 1985:1 2015:4
+bundle ec = ev_ls("dlog(CONS) c dlog(CONS(-1)) dlog(GDP)", dataset, null, 1)
+bundle ei = ev_ls("dlog(INV) c dlog(INV(-1)) FFR", dataset, null, 1)    # a stable model: no accelerator loop
+smpl 2010:1 2019:4
+bundles mb2 = defarray(ec, ei)
+bundle m2 = ev_modelsolve(mb2, defarray("GDP = CONS + INV + oth"), dataset, 1)
+series c0 = ev_modelseries(m2, 1)
+series i0 = ev_modelseries(m2, 2)
+series g0 = ev_modelseries(m2, 3)
+check("model identity holds in the solution, 2019:4", g0[2019:4], c0[2019:4] + i0[2019:4] + oth[2019:4], 1e-8)
+check("simultaneous model converged", m2.unconverged, 0)
+bundle m3 = ev_modelsolve(mb2, defarray("GDP = CONS + INV + oth"), dataset, 0, 1)
+check("static solution is closer to the data than dynamic", \
+  sumc((m3.sol[,3] - m3.actual[,3]).^2) < sumc((m2.sol[,3] - m2.actual[,3]).^2), 1)

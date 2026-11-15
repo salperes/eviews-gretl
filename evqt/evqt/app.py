@@ -35,7 +35,7 @@ def _icon(kind: str) -> QIcon:
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
     colors = {"series": "#2e7d32", "equation": "#1565c0", "group": "#6a1b9a", "var": "#ad1457",
-              "vecm": "#c62828", "system": "#283593",
+              "vecm": "#c62828", "system": "#283593", "model": "#4e342e",
               "scalar": "#ef6c00", "string": "#5d4037", "bundle": "#455a64", "workfile": "#00838f"}
     c = QColor(colors.get(kind, "#455a64"))
     p.setPen(QPen(c.darker(130), 1))
@@ -46,7 +46,7 @@ def _icon(kind: str) -> QIcon:
         p.drawPolyline([(QPixmapPoint(x, y)) for x, y in ((4, 12), (7, 7), (10, 10), (14, 4))])
     else:
         glyph = {"equation": "=", "group": "G", "scalar": "#", "string": "a", "bundle": "b",
-                 "workfile": "W", "var": "V", "vecm": "V", "forecast": "F", "system": "S"}.get(kind, "?")
+                 "workfile": "W", "var": "V", "vecm": "V", "forecast": "F", "system": "S", "model": "M"}.get(kind, "?")
         f = QFont()
         f.setBold(True)
         f.setPixelSize(12)
@@ -454,7 +454,8 @@ class VarWindow(ObjectWindow):
                       ("Impulse Response...", self.impulse),
                       ("Variance Decomposition...", self.decomp),
                       ("Residuals: Graphs", self.resid_graph)]),
-            ("Proc", [("Make Residuals", self.make_resids)]),
+            ("Proc", [("Make Residuals", self.make_resids),
+                      ("Estimate Structural Factorization...", self.svar)]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
             ("Name", lambda: main.rename_object(name)),
@@ -474,6 +475,40 @@ class VarWindow(ObjectWindow):
             self.main.error("Granger causality tests are available for unrestricted VARs.")
             return
         self.run_text(f"ev_vargranger({self.name})")
+
+    def svar(self):
+        """Structural factorization: A-B pattern matrices or long-run restrictions."""
+        n = int(float("".join(self.main.engine.run(f'printf "%d\\n", {self.name}.n')).strip() or 0))
+        kind = QComboBox()
+        kind.addItems(["Short-run pattern: A e = B u", "Long-run (Blanchard-Quah)"])
+        lower = "; ".join(" ".join("1" if i == j else ("NA" if j < i else "0") for j in range(n)) for i in range(n))
+        diag = "; ".join(" ".join("NA" if i == j else "0" for j in range(n)) for i in range(n))
+        ea, eb = QLineEdit(lower), QLineEdit(diag)
+        for e in (ea, eb):
+            e.setFont(MONO)
+            e.setMinimumWidth(380)
+        d = _form_dialog(self, "Structural Factorization", [
+            ("Restriction type:", kind),
+            ("A (rows separated by ';', NA = estimated):", ea),
+            ("B:", eb)])
+        if not d:
+            return
+        try:
+            if kind.currentIndex() == 1:
+                self.show_lines(self.main.engine.run(f"ev_svar_lr(&{self.name})", check=True))
+            else:
+                def mat(txt):
+                    rows = [r.replace(",", " ").split() for r in txt.split(";") if r.strip()]
+                    if len(rows) != n or any(len(r) != n for r in rows):
+                        raise ValueError(f"A and B must be {n} x {n}")
+                    return "{" + "; ".join(", ".join("NA" if v.upper() == "NA" else str(float(v)) for v in r)
+                                           for r in rows) + "}"
+                self.main.engine.run(f"matrix ev_A = {mat(ea.text())}\nmatrix ev_B = {mat(eb.text())}", check=True)
+                self.show_lines(self.main.engine.run(f"ev_svar(&{self.name}, ev_A, ev_B)", check=True))
+        except (GretlError, ValueError) as e:
+            self.main.error(str(e))
+            return
+        self.main.log_append(f"{self.name}: structural factorization estimated; Impulse now uses structural shocks")
 
     def coint(self):
         names = " ".join(self.main.engine.strings(f"{self.name}.ytok"))
@@ -578,12 +613,15 @@ class SystemWindow(ObjectWindow):
             self.main.error("Write the system's equations in the specification first.")
             self.show_spec()
             return
-        meth, ok = QInputDialog.getItem(self, "System Estimation", "Estimation method:",
-                                        ["Ordinary Least Squares", "Seemingly Unrelated Regression",
-                                         "Two-Stage Least Squares", "Three-Stage Least Squares"], 1, False)
+        methods = {"Ordinary Least Squares": "ls", "Weighted Least Squares": "wls",
+                   "Seemingly Unrelated Regression": "sur", "Two-Stage Least Squares": "tsls",
+                   "Weighted Two-Stage Least Squares": "wtsls", "Three-Stage Least Squares": "3sls",
+                   "Full Information Maximum Likelihood": "fiml",
+                   "Generalized Method of Moments (White weighting)": "gmm"}
+        meth, ok = QInputDialog.getItem(self, "System Estimation", "Estimation method:", list(methods), 2, False)
         if not ok:
             return
-        code = {"Ordinary": "ls", "Seemingly": "sur", "Two-Stage": "tsls", "Three-Stage": "3sls"}[meth.split()[0]]
+        code = methods[meth]
         self.main.system_specs[self.name] = self.spec.toPlainText()
         self.main.execute(f"system {self.name}")
         for ln in lines:
@@ -603,6 +641,100 @@ class SystemWindow(ObjectWindow):
         n = int(float("".join(self.main.engine.run(f'printf "%d\\n", {self.name}.n')).strip() or 0))
         self.main.execute("\n".join(f"series resid{k:02d} = ev_sysresid({self.name}, {k})"
                                      for k in range(1, n + 1)), hansl=True)
+
+
+class ModelWindow(ObjectWindow):
+    """Model object: equations from the workfile plus identities, solved together."""
+
+    def __init__(self, main, name):
+        super().__init__(main, f"Model: {name.upper()}   Workfile: {main.wf_title()}")
+        self.name = name
+        self.set_toolbar(_toolbar([
+            ("View", [("Equations", self.show_spec), ("Solution Summary", self.summary),
+                      ("Graph: Actual and Solution...", self.graph)]),
+            ("Object", [("Delete", lambda: main.delete_object(name))]),
+            ("|", None),
+            ("Name", lambda: main.rename_object(name)),
+            ("Freeze", self.freeze),
+            ("Equations", self.show_spec),
+            ("Solve", self.solve),
+        ]))
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.addWidget(QLabel("Equations to include (estimated least-squares or explicit equations):"))
+        self.eqlist = QListWidget()
+        wf = main.engine.wf
+        saved = main.model_specs.get(name, {})
+        for b in wf.bundles:
+            if wf.kinds.get(b) == "equation":
+                it = QListWidgetItem(b)
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(Qt.Checked if b in saved.get("eqs", []) else Qt.Unchecked)
+                self.eqlist.addItem(it)
+        lay.addWidget(self.eqlist)
+        lay.addWidget(QLabel("Identities, one per line (e.g. gdp = cons + inv + oth):"))
+        self.ids = QPlainTextEdit(saved.get("ids", ""))
+        self.ids.setFont(MONO)
+        self.ids.setFixedHeight(90)
+        lay.addWidget(self.ids)
+        self.specw = box
+        self.stack.addWidget(box)
+        self.names: list[str] = []
+        self.show_spec()
+
+    def show_spec(self):
+        self.stack.setCurrentWidget(self.specw)
+
+    def summary(self):
+        if self.last_summary:
+            self.show_text(self.last_summary)
+
+    last_summary = ""
+
+    def solve(self):
+        eqs = [self.eqlist.item(i).text() for i in range(self.eqlist.count())
+               if self.eqlist.item(i).checkState() == Qt.Checked]
+        ids = [ln.strip() for ln in self.ids.toPlainText().splitlines() if ln.strip()]
+        if not eqs and not ids:
+            self.main.error("Choose equations or write identities first.")
+            return
+        mode, ok = QInputDialog.getItem(self, "Model Solution", "Solution type:",
+                                        ["Dynamic solution", "Static solution"], 0, False)
+        if not ok:
+            return
+        m = self.main
+        m.model_specs[self.name] = {"eqs": eqs, "ids": self.ids.toPlainText()}
+        try:
+            cmds = [f"model {self.name}"]
+            if eqs:
+                cmds.append(f"{self.name}.merge {' '.join(eqs)}")
+            cmds += [f"{self.name}.append @identity {ln}" for ln in ids]
+            cmds.append(f"{self.name}.solve" + ("(d=s)" if mode.startswith("Static") else ""))
+            lines = []
+            for c in cmds:
+                lines += tr.translate_line(m.fix_case(c), m.ctx)
+        except ValueError as e:
+            m.error(str(e))
+            return
+        out = m.engine.run("\n".join(x for x in lines if x.strip()))
+        m.log_append("\n".join(out))
+        if m.engine.is_error(out):
+            m.error("\n".join(out).strip())
+            return
+        self.names = [re.sub(r"\s*=.*", "", ln.split("ev_modelseries")[0]).replace("series ", "").strip()
+                      for ln in lines if "ev_modelseries" in ln]
+        self.last_summary = "\n".join(out).strip()
+        m.engine.wf.dirty = True
+        m.refresh()
+        self.show_text(self.last_summary)
+
+    def graph(self):
+        if not self.names:
+            self.main.error("Solve the model first.")
+            return
+        sol, ok = QInputDialog.getItem(self, "Graph", "Variable:", self.names, 0, False)
+        if ok:
+            self.run_plot(f"gnuplot {sol[:-2]} {sol} --time-series --with-lines")
 
 
 class ForecastWindow(ObjectWindow):
@@ -693,7 +825,7 @@ class WorkfileWindow(QWidget):
         self.sample_lbl.setText(f"Sample: {wf.sample_first} {wf.sample_last}  --  {wf.sample_nobs} obs")
         self.list.clear()
         objs = [(b, wf.kinds.get(b, "bundle")) for b in wf.bundles
-                if wf.kinds.get(b) in ("equation", "var", "vecm", "system")
+                if wf.kinds.get(b) in ("equation", "var", "vecm", "system", "model")
                 and wf.obj_page.get(b, wf.page) == wf.page]
         items = [(n, "series") for n in wf.series] + [(n, "group") for n in wf.lists] \
             + objs + [(n, "scalar") for n in wf.scalars] + [(n, "string") for n in wf.strings]
@@ -857,6 +989,7 @@ class MainWindow(QMainWindow):
         self.eq_count = 0
         self.windows: dict[str, QWidget] = {}
         self.system_specs: dict[str, str] = {}
+        self.model_specs: dict[str, dict] = {}
 
         central = QWidget()
         cl = QVBoxLayout(central)
@@ -910,6 +1043,7 @@ class MainWindow(QMainWindow):
         q.addAction("Estimate Equation...", lambda: self.equation_dialog())
         q.addAction("Estimate VAR...", lambda: self.var_dialog())
         q.addAction("Estimate System...", self.new_system)
+        q.addAction("Make Model...", self.new_model)
         w = mb.addMenu("&Window")
         w.addAction("Cascade", self.mdi.cascadeSubWindows)
         w.addAction("Tile", self.mdi.tileSubWindows)
@@ -1248,6 +1382,8 @@ class MainWindow(QMainWindow):
             self.add_window(name, VarWindow(self, name), (760, 560), kind)
         elif kind == "system":
             self.add_window(name, SystemWindow(self, name), (720, 560), "system")
+        elif kind == "model":
+            self.add_window(name, ModelWindow(self, name), (680, 560), "model")
         elif kind == "scalar":
             self.statusBar().showMessage(f"{name} = {self.engine.wf.scalars.get(name)}")
         elif kind == "string":
@@ -1572,6 +1708,11 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, "New Object", "Name for the system:", text=self._next_name("sys"))
         if ok and name.strip():
             self.add_window(name.strip(), SystemWindow(self, name.strip()), (720, 560), "system")
+
+    def new_model(self):
+        name, ok = QInputDialog.getText(self, "New Object", "Name for the model:", text=self._next_name("model"))
+        if ok and name.strip():
+            self.add_window(name.strip(), ModelWindow(self, name.strip()), (680, 560), "model")
 
     def _next_name(self, prefix):
         k = 1

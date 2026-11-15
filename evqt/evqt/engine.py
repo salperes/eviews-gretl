@@ -184,7 +184,7 @@ class GretlEngine:
                 parts = ln.strip().split("|")
                 if len(parts) == 4:
                     b, sys_, uh, kind = parts
-                    if kind in ("vecm", "system"):
+                    if kind in ("vecm", "system", "model"):
                         self.wf.kinds[b] = kind
                     else:
                         self.wf.kinds[b] = "var" if sys_ != "0" else ("equation" if uh != "0" else "bundle")

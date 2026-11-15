@@ -1,0 +1,92 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: FIML and GMM systems, structural VARs and a model
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+series OTH = GDP - CONS - INV
+smpl full
+smpl 1985:1 2019:4
+
+# --- systems
+# system SF declared
+# system SF: dlog(cons) = c(1) + c(2)*dlog(gdp) + c(3)*ffr(-1)
+# system SF: dlog(gdp) = c(4) + c(5)*dlog(cons) + c(6)*ffr
+scalar ev_s1 = $t1
+scalar ev_s2 = $t2
+smpl full
+series ev_f1 = ldiff(CONS)
+series ev_f2 = ldiff(GDP)
+series ev_f3 = FFR(-1)
+smpl ev_s1 ev_s2
+ev_fs_SF <- system
+  equation ev_f1 const ev_f2 ev_f3
+  equation ev_f2 const ev_f1 FFR
+  endog ev_f1 ev_f2
+end system
+estimate ev_fs_SF method=fiml --quiet
+strings ev_sd = defarray("DLOG(CONS)", "DLOG(GDP)")
+strings ev_st = defarray("DLOG(CONS)=C(1)+C(2)*DLOG(GDP)+C(3)*FFR(-1)", "DLOG(GDP)=C(4)+C(5)*DLOG(CONS)+C(6)*FFR")
+bundle SF = ev_sysfrom("fiml", $coeff, $vcv, $uhat, $yhat, {1, 2, 3, 4, 5, 6}, {1, 2, 3, 4, 5, 6}, {3, 3}, ev_sd, ev_st, $t1, $lnl, 1)
+SF.name = "SF"
+ev_sysprint(&SF)
+# system SG declared
+# system SG: dlog(cons) = c(1) + c(2)*dlog(gdp)
+# system SG: inst ffr(-1) dlog(gdp(-1)) dlog(cons(-1))
+strings ev_sd = defarray("dlog(CONS)")
+strings ev_sx = defarray("c dlog(GDP)")
+strings ev_sc = defarray("1 2")
+strings ev_st = defarray("DLOG(CONS)=C(1)+C(2)*DLOG(GDP)")
+bundle SG = ev_system(ev_sd, ev_sx, ev_sc, dataset, "gmm", "FFR(-1) dlog(GDP(-1)) dlog(CONS(-1))", 1, ev_st)
+SG.name = "SG"
+ev_sysprint(&SG)
+
+# --- structural VAR: A-B pattern and long-run restrictions
+scalar ev_s1 = $t1
+scalar ev_s2 = $t2
+smpl full
+series ev_v4 = ldiff(CONS)
+series ev_v5 = ldiff(GDP)
+smpl ev_s1 ev_s2
+bundle V1 = ev_varest("1 2 ev_v4 ev_v5 FFR", dataset, 0, "dlog(cons) dlog(gdp) ffr")
+matrix PA = zeros(3, 3)
+matrix PA = mshape({1, 0, 0, NA, 1, 0, NA, NA, 1}, 3, 3)'
+matrix PB = zeros(3, 3)
+matrix PB = mshape({NA, 0, 0, 0, NA, 0, 0, 0, NA}, 3, 3)'
+ev_svar(&V1, PA, PB)
+ev_varirfplot(V1, 8, "plot01.png")
+scalar ev_s1 = $t1
+scalar ev_s2 = $t2
+smpl full
+series ev_v6 = ldiff(CONS)
+series ev_v7 = ldiff(GDP)
+smpl ev_s1 ev_s2
+bundle V2 = ev_varest("1 2 ev_v6 ev_v7", dataset, 0, "dlog(cons) dlog(gdp)")
+ev_svar_lr(&V2)
+matrix V2_decomp = ev_vardecomp(V2, 8)
+
+# --- model: consumption and investment equations plus the GDP identity
+smpl full
+smpl 1985:1 2015:4
+bundle EQC = ev_ls("dlog(CONS) c dlog(CONS(-1)) dlog(GDP)", dataset)
+bundle EQI = ev_ls("dlog(INV) c dlog(INV(-1)) FFR", dataset)
+# model M1 declared
+# model M1: merge eqc eqi
+# model M1: identity gdp = cons + inv + oth
+smpl full
+smpl 2010:1 2019:4
+bundles ev_mb = defarray(EQC, EQI)
+strings ev_mi = defarray("GDP = CONS + INV + OTH")
+bundle M1 = ev_modelsolve(ev_mb, ev_mi, dataset, 1)
+series CONS_0 = ev_modelseries(M1, 1)
+series INV_0 = ev_modelseries(M1, 2)
+series GDP_0 = ev_modelseries(M1, 3)
+bundles ev_mb = defarray(EQC, EQI)
+strings ev_mi = defarray("GDP = CONS + INV + OTH")
+bundle M1 = ev_modelsolve(ev_mb, ev_mi, dataset, 0)
+series CONS_0 = ev_modelseries(M1, 1)
+series INV_0 = ev_modelseries(M1, 2)
+series GDP_0 = ev_modelseries(M1, 3)
+

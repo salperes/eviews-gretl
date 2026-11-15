@@ -45,7 +45,15 @@ of iCloud-synced folders on purpose.
   tests; lag length criteria; Johansen cointegration test; impulse responses; variance
   decomposition; residual graphs and series.
 - Systems: Quick > Estimate System, or `system s1` + `s1.append ...` + `s1.sur`; equations
-  linear in c(i), shared coefficients across equations, `inst` lines; LS, SUR, 2SLS, 3SLS.
+  linear in c(i), shared coefficients across equations, `inst` lines; LS, WLS, SUR, 2SLS,
+  weighted 2SLS, 3SLS, FIML (gretl's system estimator) and two-step GMM (White weighting,
+  J-statistic).
+- Structural VAR: VAR window > Proc > Estimate Structural Factorization: A-B pattern
+  matrices (NA = estimated, ML with LR over-identification test) or long-run
+  (Blanchard-Quah) restrictions; impulse responses and variance decomposition then use
+  the structural shocks.
+- Models: Quick > Make Model: tick estimated equations, write identities, Solve (dynamic or
+  static, Newton). Solutions are saved as `<name>_0` series, with actual-vs-solution graphs.
 - Fetch / Store: gretl databases (`.bin`); Fetch also reads any data file gretl opens
   (`.wf1`, `.gdt`, `.csv`, `.xlsx`, `.dta` ...). EViews `.edb` databases use a closed format
   and cannot be read: save the series to a `.wf1` workfile in EViews and fetch from that.
@@ -55,8 +63,8 @@ of iCloud-synced folders on purpose.
 - Unsaved changes: `*` in the titles; Save (Cmd+S) writes the current page to its .gdt
   and other pages next to it as `<name>_<page>.gdt`; closing or opening another file asks first.
 
-Not yet: FIML/GMM systems, structural VAR restrictions, models (simultaneous solution of
-several objects), `@`-functions beyond those listed in the package help.
+Not yet: stochastic simulation and scenarios in models, add factors, nonlinear system
+equations, GMM with HAC weighting, structural VAR restrictions written as text (@e1 = ...).
 
 ## Tests
 ```bash

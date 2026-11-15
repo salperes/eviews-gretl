@@ -63,6 +63,9 @@ class Ctx:
     need_pages: bool = False
     var_counter: int = 0
     systems: dict = field(default_factory=dict)     # name -> {"eqs": [...], "inst": "..."}
+    eq_dep: dict = field(default_factory=dict)      # equation -> dependent expression
+    matrices: dict = field(default_factory=dict)    # matrix -> (rows, cols)
+    models: dict = field(default_factory=dict)      # model -> {"eqs": [...], "ids": [...]}
     var_endo: dict = field(default_factory=dict)    # VAR name -> series names of its variables
 
 
@@ -341,6 +344,8 @@ def _ls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     name = translate_name(name, ctx)
     ctx.equations[name] = "ls"
     ctx.last_eq = name
+    sp = _spec(spec, ctx)
+    ctx.eq_dep[name] = sp.split("=", 1)[0].strip() if "=" in sp else sp.split()[0]
     cov = _ls_cov(opts)
     args = f'"{_spec(spec, ctx)}", dataset' + (f', "{cov}"' if cov else "")
     return [f"bundle {name} = ev_ls({args})"]
@@ -591,6 +596,97 @@ def _system_estimate(o: str, method: str, ctx: Ctx) -> list[str]:
             f"ev_sysprint(&{o})"]
 
 
+def _fiml_estimate(o: str, ctx: Ctx) -> list[str]:
+    """FIML: gretl's system command at the top level, then ev_sysfrom."""
+    sysd = ctx.systems[o]
+    pre, eqlines, deps, txt, kk = [], [], [], [], []
+    pos_of, cu, pos = {}, [], 0
+    restr = []
+    helper = {}
+
+    def series_for(expr):
+        e = case_names(expr, ctx) if ctx.case != "keep" else expr
+        if re.fullmatch(r"[A-Za-z_]\w*", e):
+            return e
+        if e not in helper:
+            ctx.var_counter += 1
+            helper[e] = f"ev_f{ctx.var_counter}"
+            pre.append(f"series {helper[e]} = {translate_expr(e, ctx)}")
+        return helper[e]
+    for i, ln in enumerate(sysd["eqs"], 1):
+        d, x, c = _linear_equation(program_vars(ln, ctx))
+        dep = series_for(d)
+        regs, nums = [], c.split()
+        for j, (t, num) in enumerate(zip(x.split(), nums), 1):
+            regs.append("const" if t == "c" else series_for(t))
+            pos += 1
+            if num in pos_of:
+                pi, pj = pos_of[num][1:]
+                restr.append(f"  b[{pi},{pj}] - b[{i},{j}] = 0")
+            else:
+                pos_of[num] = (pos, i, j)
+                cu.append(num)
+        eqlines.append(f"  equation {dep} {' '.join(regs)}")
+        deps.append(d.upper())
+        txt.append(re.sub(r"\s+", "", ln).upper())
+        kk.append(str(len(regs)))
+    endog = " ".join(series_for(_linear_equation(program_vars(ln, ctx))[0]) for ln in sysd["eqs"])
+    sname = f"ev_fs_{o}"
+    q = lambda arr: ", ".join(f'"{a}"' for a in arr)
+    out = ["scalar ev_s1 = $t1", "scalar ev_s2 = $t2", "smpl full"] + pre + ["smpl ev_s1 ev_s2"] if pre else []
+    out += [f"{sname} <- system"] + eqlines + [f"  endog {endog}", "end system"]
+    if restr:
+        out += [f"restrict {sname}"] + restr + ["end restrict"]
+    out += [f"estimate {sname} method=fiml --quiet",
+            f"strings ev_sd = defarray({q(deps)})",
+            f"strings ev_st = defarray({q(txt)})",
+            f'bundle {o} = ev_sysfrom("fiml", $coeff, $vcv, $uhat, $yhat, '
+            f'{{{", ".join(str(pos_of[n][0]) for n in cu)}}}, {{{", ".join(cu)}}}, {{{", ".join(kk)}}}, '
+            f"ev_sd, ev_st, $t1, $lnl, 1)",
+            f'{o}.name = "{o.upper()}"',
+            f"ev_sysprint(&{o})"]
+    ctx.equations[o] = "system"
+    return out
+
+
+_DEP_RE = [(r"^\s*([A-Za-z_]\w*)\s*$", 0), (r"(?i)^\s*log\(\s*([A-Za-z_]\w*)\s*\)\s*$", 1),
+           (r"(?i)^\s*d\(\s*([A-Za-z_]\w*)\s*\)\s*$", 2), (r"(?i)^\s*dlog\(\s*([A-Za-z_]\w*)\s*\)\s*$", 3),
+           (r"(?i)^\s*d\(\s*log\(\s*([A-Za-z_]\w*)\s*\)\s*\)\s*$", 3)]
+
+
+def _dep_base(dep: str) -> str:
+    for rx, _ in _DEP_RE:
+        m = re.match(rx, dep)
+        if m:
+            return m.group(1)
+    raise ValueError(f"model: '{dep}' must be Y, log(Y), d(Y) or dlog(Y) of a series")
+
+
+def _model_solve(o: str, opts: str | None, ctx: Ctx) -> list[str]:
+    md = ctx.models[o]
+    if not md["eqs"] and not md["ids"]:
+        raise ValueError(f"model {o} is empty")
+    dynamic = 0 if re.search(r"(?i)d\s*=\s*s", opts or "") else 1
+    names = []
+    for e in md["eqs"]:
+        if e not in ctx.eq_dep:
+            raise ValueError(f"model {o}: equation {e} is not known here")
+        names.append(_dep_base(ctx.eq_dep[e]))
+    ids = []
+    for ln in md["ids"]:
+        lhs, rhs = ln.split("=", 1)
+        lhs = case_names(lhs.strip(), ctx) if ctx.case != "keep" else lhs.strip()
+        rhs = case_names(rhs.strip(), ctx) if ctx.case != "keep" else rhs.strip()
+        names.append(_dep_base(lhs))
+        ids.append(f"{lhs} = {rhs}")
+    q = lambda arr: ", ".join(f'"{a}"' for a in arr)
+    out = [f"bundles ev_mb = defarray({', '.join(md['eqs'])})" if md["eqs"] else "bundles ev_mb = array(0)",
+           f"strings ev_mi = defarray({q(ids)})" if ids else "strings ev_mi = array(0)",
+           f"bundle {o} = ev_modelsolve(ev_mb, ev_mi, dataset, {dynamic})"]
+    out += [f"series {n}_0 = ev_modelseries({o}, {k})" for k, n in enumerate(names, 1)]
+    return out
+
+
 def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -> list[str]:
     ml = meth.lower()
     o = translate_name(obj, ctx)
@@ -603,9 +699,12 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             else:
                 sysd["eqs"].append(a)
             return [f"# system {o}: {a}"]
-        meth_map = {"ls": "ls", "sur": "sur", "tsls": "tsls", "3sls": "3sls"}
+        meth_map = {"ls": "ls", "wls": "wls", "sur": "sur", "tsls": "tsls", "wtsls": "wtsls",
+                    "3sls": "3sls", "gmm": "gmm"}
         if ml in meth_map:
             return _system_estimate(o, meth_map[ml], ctx)
+        if ml == "fiml":
+            return _fiml_estimate(o, ctx)
         if ml in ("output", "results", "display", "spec"):
             return [f"ev_sysprint(&{o})"]
         if ml in ("makeresids", "makeresid"):
@@ -613,7 +712,40 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
                     for k, n in enumerate(args.split(), 1)]
         if ml == "wald":
             return [f'bundle {o}_wald = ev_wald({o}, "{args.strip()}")']
-        raise ValueError(f"system method .{meth} not supported (use ls, sur, tsls or 3sls)")
+        raise ValueError(f"system method .{meth} not supported (use ls, wls, sur, tsls, wtsls, 3sls, gmm or fiml)")
+    if ml == "svar":
+        if ctx.equations.get(o) not in ("var", "vecm"):
+            raise ValueError("svar needs a VAR")
+        op = _opts(opts)
+        if "lr" in op or "bq" in op or op.get("rtype", "").startswith("lr"):
+            return [f"ev_svar_lr(&{o})"]
+        a, b = op.get("namea"), op.get("nameb")
+        if not a or not b:
+            raise ValueError("svar: give rtype=patsr, namea=A, nameb=B (pattern matrices) or lr")
+        return [f"ev_svar(&{o}, {translate_name(a, ctx)}, {translate_name(b, ctx)})"]
+    if o in ctx.matrices and ml == "fill":
+        r, c = ctx.matrices[o]
+        vals = [v.strip() for v in args.split(",") if v.strip()]
+        vals = ["NA" if v.lower() in ("na", "nan") else translate_expr(v, ctx) for v in vals]
+        if len(vals) != r * c:
+            raise ValueError(f"fill: {o} needs {r * c} values")
+        byrow = _opts(opts).get("b", "c").lower().startswith("r")
+        lit = "{" + ", ".join(vals) + "}"
+        return [f"matrix {o} = mshape({lit}, {c}, {r})'" if byrow else f"matrix {o} = mshape({lit}, {r}, {c})"]
+    if o in ctx.models:
+        md = ctx.models[o]
+        if ml == "merge":
+            md["eqs"] += [translate_name(e, ctx) for e in args.split()]
+            return [f"# model {o}: merge {args.strip()}"]
+        if ml == "append":
+            a = re.sub(r"(?i)^@identity\s+", "", args.strip())
+            if "=" not in a:
+                raise ValueError("model append: give an identity y = ...")
+            md["ids"].append(program_vars(a, ctx))
+            return [f"# model {o}: identity {a}"]
+        if ml == "solve":
+            return _model_solve(o, opts, ctx)
+        raise ValueError(f"model method .{meth} not supported (merge, append, solve)")
     if ml == "coint":
         case, lag = "c", "4"
         for x in (opts or "").replace(",", " ").split():
@@ -775,6 +907,18 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         return ["string ev_pagedir = $dotdir", f'catch remove("@ev_pagedir/{new}.gdtb")',
                 f'# page {old} renamed to {new}: next pageselect uses the new name']
 
+    if word == "matrix":
+        m = re.fullmatch(r"(?i)matrix\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*(\w+)", s)
+        if m:
+            r, c, name = int(m.group(1)), int(m.group(2)), translate_name(m.group(3), ctx)
+            ctx.matrices[name] = (r, c)
+            return [f"matrix {name} = zeros({r}, {c})"]
+        raise ValueError("matrix: use matrix(rows, cols) name")
+    if word == "model":
+        name = translate_name(rest.split()[0], ctx) if rest else "model01"
+        ctx.models[name] = {"eqs": [], "ids": []}
+        ctx.equations[name] = "model"
+        return [f"# model {name} declared"]
     if word == "system":
         name = translate_name(rest.split()[0], ctx) if rest else "sys01"
         ctx.systems[name] = {"eqs": [], "inst": ""}
@@ -946,6 +1090,9 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
     m = re.fullmatch(r"([!%]?)([\w{}!%$]+)\s*(?:\(([^()]+)\))?\s*=\s*(.+)", s)
     if m:
         sigil, name, elem, expr = m.groups()
+        if elem is not None and translate_name(name, ctx) in ctx.matrices:
+            v = "NA" if expr.strip().lower() == "na" else translate_expr(expr, ctx)
+            return [f"{translate_name(name, ctx)}[{translate_expr(elem, ctx)}] = {v}"]
         if elem is not None:
             g = translate_name(name, ctx)
             if g not in ctx.groups:
