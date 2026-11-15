@@ -8,7 +8,8 @@ import sys
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import (QAction, QColor, QPalette, QFont, QFontDatabase, QIcon, QKeySequence,
                            QPainter, QPen, QPixmap, QTextCursor)
-from PySide6.QtWidgets import (QApplication, QComboBox, QSizePolicy, QTabBar, QSplitter, QAbstractItemView, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QApplication, QComboBox, QSizePolicy, QTabBar, QSplitter, QAbstractItemView,
+                               QCheckBox, QPushButton, QSpinBox, QDialog, QDialogButtonBox,
                                QDockWidget, QFileDialog, QFormLayout, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QMainWindow, QMdiArea, QMenu, QMessageBox,
@@ -480,7 +481,12 @@ class VarWindow(ObjectWindow):
         """Structural factorization: A-B pattern matrices or long-run restrictions."""
         n = int(float("".join(self.main.engine.run(f'printf "%d\\n", {self.name}.n')).strip() or 0))
         kind = QComboBox()
-        kind.addItems(["Short-run pattern: A e = B u", "Long-run (Blanchard-Quah)"])
+        kind.addItems(["Short-run pattern: A e = B u", "Long-run (Blanchard-Quah)", "Text restrictions"])
+        text = QPlainTextEdit()
+        text.setFont(MONO)
+        text.setFixedHeight(90)
+        text.setPlaceholderText("EViews text form, one per line, e.g.\n@e1 = c(1)*@u1\n@e2 = c(2)*@e1 + c(3)*@u2\n"
+                                "or long-run zeros: @lr1(@u2) = 0")
         lower = "; ".join(" ".join("1" if i == j else ("NA" if j < i else "0") for j in range(n)) for i in range(n))
         diag = "; ".join(" ".join("NA" if i == j else "0" for j in range(n)) for i in range(n))
         ea, eb = QLineEdit(lower), QLineEdit(diag)
@@ -490,11 +496,15 @@ class VarWindow(ObjectWindow):
         d = _form_dialog(self, "Structural Factorization", [
             ("Restriction type:", kind),
             ("A (rows separated by ';', NA = estimated):", ea),
-            ("B:", eb)])
+            ("B:", eb),
+            ("Text restrictions:", text)])
         if not d:
             return
         try:
-            if kind.currentIndex() == 1:
+            if kind.currentIndex() == 2:
+                cmds = tr.svar_text_commands(self.name, text.toPlainText().splitlines(), n)
+                self.show_lines(self.main.engine.run("\n".join(cmds), check=True))
+            elif kind.currentIndex() == 1:
                 self.show_lines(self.main.engine.run(f"ev_svar_lr(&{self.name})", check=True))
             else:
                 def mat(txt):
@@ -617,7 +627,8 @@ class SystemWindow(ObjectWindow):
                    "Seemingly Unrelated Regression": "sur", "Two-Stage Least Squares": "tsls",
                    "Weighted Two-Stage Least Squares": "wtsls", "Three-Stage Least Squares": "3sls",
                    "Full Information Maximum Likelihood": "fiml",
-                   "Generalized Method of Moments (White weighting)": "gmm"}
+                   "Generalized Method of Moments (White weighting)": "gmm",
+                   "Generalized Method of Moments (HAC weighting)": "gmm(w=hac)"}
         meth, ok = QInputDialog.getItem(self, "System Estimation", "Estimation method:", list(methods), 2, False)
         if not ok:
             return
@@ -677,6 +688,24 @@ class ModelWindow(ObjectWindow):
         self.ids.setFont(MONO)
         self.ids.setFixedHeight(90)
         lay.addWidget(self.ids)
+        opts = QFormLayout()
+        self.ovr = QLineEdit(saved.get("ovr", ""))
+        self.ovr.setPlaceholderText("exogenous series to override, e.g. oth  (uses oth_1)")
+        self.suffix = QLineEdit(saved.get("suffix", "_0"))
+        self.addf = QCheckBox("Use add factors (series <variable>_a)")
+        self.addf.setChecked(saved.get("addf", False))
+        init = QPushButton("Initialize add factors so the equations fit the data")
+        init.clicked.connect(self.init_addfactors)
+        self.reps = QSpinBox()
+        self.reps.setRange(0, 10000)
+        self.reps.setValue(saved.get("reps", 0))
+        self.reps.setSpecialValueText("deterministic")
+        opts.addRow("Scenario overrides:", self.ovr)
+        opts.addRow("Solution suffix:", self.suffix)
+        opts.addRow("", self.addf)
+        opts.addRow("", init)
+        opts.addRow("Stochastic repetitions:", self.reps)
+        lay.addLayout(opts)
         self.specw = box
         self.stack.addWidget(box)
         self.names: list[str] = []
@@ -691,9 +720,34 @@ class ModelWindow(ObjectWindow):
 
     last_summary = ""
 
+    def _checked(self):
+        return [self.eqlist.item(i).text() for i in range(self.eqlist.count())
+                if self.eqlist.item(i).checkState() == Qt.Checked]
+
+    def init_addfactors(self):
+        m = self.main
+        eqs = self._checked()
+        if not eqs:
+            m.error("Choose the equations first.")
+            return
+        try:
+            lines = []
+            for c in [f"model {self.name}", f"{self.name}.merge {' '.join(eqs)}", f"{self.name}.addinit(v=n) @all"]:
+                lines += tr.translate_line(m.fix_case(c), m.ctx)
+        except ValueError as e:
+            m.error(str(e))
+            return
+        out = m.engine.run("\n".join(x for x in lines if not x.startswith("#")))
+        if m.engine.is_error(out):
+            m.error("\n".join(out))
+            return
+        self.addf.setChecked(True)
+        m.refresh()
+        m.log_append(f"{self.name}: add factors initialised (" + ", ".join(
+            x.split()[1] for x in lines if x.startswith("series")) + ")")
+
     def solve(self):
-        eqs = [self.eqlist.item(i).text() for i in range(self.eqlist.count())
-               if self.eqlist.item(i).checkState() == Qt.Checked]
+        eqs = self._checked()
         ids = [ln.strip() for ln in self.ids.toPlainText().splitlines() if ln.strip()]
         if not eqs and not ids:
             self.main.error("Choose equations or write identities first.")
@@ -703,16 +757,33 @@ class ModelWindow(ObjectWindow):
         if not ok:
             return
         m = self.main
-        m.model_specs[self.name] = {"eqs": eqs, "ids": self.ids.toPlainText()}
+        suf = self.suffix.text().strip() or "_0"
+        if not suf.startswith("_"):
+            suf = "_" + suf
+        m.model_specs[self.name] = {"eqs": eqs, "ids": self.ids.toPlainText(), "ovr": self.ovr.text(),
+                                    "suffix": suf, "addf": self.addf.isChecked(), "reps": self.reps.value()}
         try:
             cmds = [f"model {self.name}"]
             if eqs:
                 cmds.append(f"{self.name}.merge {' '.join(eqs)}")
             cmds += [f"{self.name}.append @identity {ln}" for ln in ids]
-            cmds.append(f"{self.name}.solve" + ("(d=s)" if mode.startswith("Static") else ""))
+            if self.addf.isChecked():
+                m.ctx.models.setdefault(self.name, {})
+            if suf != "_0":
+                cmds.append(f'{self.name}.scenario "Scenario {suf[1:]}"')
+                if self.ovr.text().split():
+                    cmds.append(f"{self.name}.override {self.ovr.text().strip()}")
+            sopts = []
+            if mode.startswith("Static"):
+                sopts.append("d=s")
+            if self.reps.value() > 0:
+                sopts += ["s=s", f"r={self.reps.value()}"]
+            cmds.append(f"{self.name}.solve" + (f"({', '.join(sopts)})" if sopts else ""))
             lines = []
             for c in cmds:
                 lines += tr.translate_line(m.fix_case(c), m.ctx)
+                if c.startswith(f"{self.name}.merge") or c == f"model {self.name}":
+                    m.ctx.models[self.name]["addf"] = self.addf.isChecked()
         except ValueError as e:
             m.error(str(e))
             return
@@ -722,7 +793,8 @@ class ModelWindow(ObjectWindow):
             m.error("\n".join(out).strip())
             return
         self.names = [re.sub(r"\s*=.*", "", ln.split("ev_modelseries")[0]).replace("series ", "").strip()
-                      for ln in lines if "ev_modelseries" in ln]
+                      for ln in lines if "ev_modelseries" in ln and '"' not in ln]
+        self.suf = suf
         self.last_summary = "\n".join(out).strip()
         m.engine.wf.dirty = True
         m.refresh()
@@ -734,7 +806,9 @@ class ModelWindow(ObjectWindow):
             return
         sol, ok = QInputDialog.getItem(self, "Graph", "Variable:", self.names, 0, False)
         if ok:
-            self.run_plot(f"gnuplot {sol[:-2]} {sol} --time-series --with-lines")
+            base = sol[:-len(getattr(self, "suf", "_0"))]
+            extra = f" {sol}m" if f"{sol}m" in self.main.engine.wf.series else ""
+            self.run_plot(f"gnuplot {base} {sol}{extra} --time-series --with-lines")
 
 
 class ForecastWindow(ObjectWindow):

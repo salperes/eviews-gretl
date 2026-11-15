@@ -1,0 +1,95 @@
+# HAC GMM, nonlinear systems, long-run SVAR ordering, model add factors,
+# scenarios and stochastic simulation
+set verbose off
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-56s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+series ffr1 = FFR(-1)
+series dg1 = dg(-1)
+series dc1 = dc(-1)
+series oth = GDP - CONS - INV
+smpl 1985:1 2019:4
+string inst = "FFR(-1) dlog(GDP(-1)) dlog(CONS(-1))"
+
+# --- 1. GMM with HAC weighting against gretl's gmm (same Bartlett lag)
+bundle g1 = ev_system(defarray("dlog(CONS)"), defarray("c dlog(GDP)"), defarray("1 2"), dataset, "gmm", inst, 1, null, 4)
+list Z = const ffr1 dg1 dc1
+matrix W0 = inv({Z}'{Z})
+scalar b0 = 0
+scalar b1 = 0
+series e = 0
+set hac_kernel bartlett
+set hac_lag 4
+gmm e = dc - b0 - b1 * dg
+  orthog e ; Z
+  weights W0
+  params b0 b1
+end gmm --two-step --quiet
+check("HAC GMM c(2) vs gretl gmm", g1.coeff[2], $coeff[2], 1e-4)
+check("HAC GMM se c(2) vs gretl gmm", g1.stderr[2], $stderr[2], 1e-2)
+
+# --- 2. nonlinear system estimator on linear equations = linear estimator
+strings eqs = defarray("dlog(CONS) = c(1) + c(2)*dlog(GDP)", "dlog(INV) = c(3) + c(2)*dlog(GDP) + c(4)*FFR")
+strings deps = defarray("dlog(CONS)", "dlog(INV)")
+strings xs = defarray("c dlog(GDP)", "c dlog(GDP) FFR")
+strings cn = defarray("1 2", "3 2 4")
+loop foreach m ls sur 3sls
+    bundle nl = ev_nlsystem(eqs, dataset, "$m", inst ~ " FFR", 1)
+    bundle li = ev_system(deps, xs, cn, dataset, "$m", inst ~ " FFR", 1)
+    check("nonlinear path = linear, $m c(2)", nl.coeff[2], li.coeff[2], 1e-5)
+    check("nonlinear path = linear, $m se c(4)", nl.stderr[4], li.stderr[4], 1e-3)
+endloop
+smpl 1985:1 2015:4
+bundle n1 = ev_nlsystem(defarray("CONS = c(1)*GDP^c(2)"), dataset, "ls", null, 1)
+bundle n2 = ev_ls("CONS = c(1)*GDP^c(2)", dataset, null, 1)
+check("one nonlinear equation = ev_nls, c(2)", n1.coeff[2], n2.coeff[2], 1e-4)
+bundle n3 = ev_nlsystem(defarray("CONS = c(1)*GDP^c(2)", "INV = c(3)*GDP^c(2)"), dataset, "sur", null)
+check("nonlinear SUR with a shared exponent runs", n3.k, 3)
+
+# --- 3. long-run restrictions in another ordering
+smpl 1985:1 2019:4
+bundle v = ev_varest("1 2 dc dg", dataset, 1)
+ev_svar_lr(&v, 1, {2, 1})
+matrix R = ev_varirf(v, 400, 1)
+check("long-run, ordering (2,1): accumulated response of var 2 to shock 1 is 0", sumc(R[, 2]), 0, 1e-4)
+
+# --- 4. model: add factors that make the equations fit, then a static solution
+smpl 1985:1 2015:4
+bundle ec = ev_ls("dlog(CONS) c dlog(CONS(-1)) dlog(GDP)", dataset, null, 1)
+bundle ei = ev_ls("dlog(INV) c dlog(INV(-1)) FFR", dataset, null, 1)
+smpl 2010:1 2019:4
+series CONS_a = ev_eqres(ec, dataset)
+series INV_a = ev_eqres(ei, dataset)
+bundles mb = defarray(ec, ei)
+strings ids = defarray("GDP = CONS + INV + oth")
+bundle o = _(addfactors = 1)
+bundle ma = ev_modelsolve(mb, ids, dataset, 0, 1, o)
+check("static solution with add factors reproduces CONS", maxc(abs(ma.sol[,1] - ma.actual[,1])), 0, 1e-6)
+check("static solution with add factors reproduces GDP", maxc(abs(ma.sol[,3] - ma.actual[,3])), 0, 1e-6)
+
+# --- 5. scenario: an override of an exogenous series
+series oth_1 = oth + 100
+bundle o2 = _(overrides = defarray("oth"))
+bundle m0 = ev_modelsolve(mb, ids, dataset, 1, 1)
+bundle m1 = ev_modelsolve(mb, ids, dataset, 1, 1, o2)
+check("scenario uses the suffix _1", m1.suffix == "_1", 1)
+check("scenario identity holds with the override", m1.sol[40,3], m1.sol[40,1] + m1.sol[40,2] + oth_1[2019:4], 1e-8)
+check("scenario raises GDP", m1.sol[40,3] > m0.sol[40,3], 1)
+
+# --- 6. stochastic simulation
+bundle o3 = _(reps = 40, seed = 123)
+bundle ms = ev_modelsolve(mb, ids, dataset, 1, 1, o3)
+check("stochastic mean within 3 standard errors of the deterministic solution", abs(ms.mean[40,3] - m0.sol[40,3]) < 3 * ms.sd[40,3] / sqrt(40), 1)
+check("stochastic std. dev. grows with the horizon", ms.sd[40,3] > ms.sd[2,3], 1)
+series GDP_0s = ev_modelseries(ms, 3, "sd")
+check("std. dev. series created", nobs(GDP_0s), 40)

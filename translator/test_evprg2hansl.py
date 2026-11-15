@@ -238,13 +238,12 @@ class Estimators(unittest.TestCase):
         self.assertEqual(out[0], 'strings ev_sd = defarray("dlog(cons)", "dlog(inv)")')
         self.assertEqual(out[1], 'strings ev_sx = defarray("c dlog(gdp)", "c dlog(gdp) (-(ffr))")')
         self.assertEqual(out[2], 'strings ev_sc = defarray("1 2", "3 2 4")')
-        self.assertEqual(out[4], 'bundle s1 = ev_system(ev_sd, ev_sx, ev_sc, dataset, "3sls", "ffr(-1) dlog(gdp(-1))", 1, ev_st)')
+        self.assertEqual(out[4], 'bundle s1 = ev_system(ev_sd, ev_sx, ev_sc, dataset, "3sls", "ffr(-1) dlog(gdp(-1))", 1, ev_st, -1)')
         self.assertEqual(translate_line("s1.makeresids r1 r2", c)[1], "series r2 = ev_sysresid(s1, 2)")
-        with self.assertRaises(ValueError):
-            c2 = Ctx()
-            translate_line("system s2", c2)
-            translate_line("s2.append y = c(1)*exp(c(2)*x)", c2)
-            translate_line("s2.sur", c2)
+        c2 = Ctx()
+        translate_line("system s2", c2)
+        translate_line("s2.append y = c(1)*exp(c(2)*x)", c2)
+        self.assertIn("ev_nlsystem", translate_line("s2.sur", c2)[1])   # nonlinear: own estimator
 
     def test_vec_and_coint(self):
         c = Ctx()
@@ -294,9 +293,57 @@ class Advanced(unittest.TestCase):
         translate_line("m.append @identity gdp = cons + inv + g", c)
         out = translate_line("m.solve(d=s)", c)
         self.assertEqual(out[0], "bundles ev_mb = defarray(ec, ei)")
-        self.assertEqual(out[2], "bundle m = ev_modelsolve(ev_mb, ev_mi, dataset, 0)")
-        self.assertEqual(out[3:], ["series cons_0 = ev_modelseries(m, 1)", "series inv_0 = ev_modelseries(m, 2)",
+        self.assertEqual(out[3], "bundle m = ev_modelsolve(ev_mb, ev_mi, dataset, 0, 0, ev_mo)")
+        self.assertEqual(out[4:], ["series cons_0 = ev_modelseries(m, 1)", "series inv_0 = ev_modelseries(m, 2)",
                                    "series gdp_0 = ev_modelseries(m, 3)"])
+
+
+class Remaining(unittest.TestCase):
+    def test_nonlinear_system_and_hac(self):
+        c = Ctx()
+        translate_line("system s", c)
+        translate_line("s.append y = c(1)*x^c(2)", c)
+        translate_line("s.append z = c(3)*x^c(2)", c)
+        out = translate_line("s.sur", c)
+        self.assertEqual(out[1], 'bundle s = ev_nlsystem(ev_se, dataset, "sur", "", 1, -1)')
+        c2 = Ctx()
+        translate_line("system g", c2)
+        translate_line("g.append y = c(1) + c(2)*x", c2)
+        translate_line("g.append inst z", c2)
+        self.assertTrue(translate_line("g.gmm(w=hac)", c2)[4].endswith("ev_st, 0)"))
+        with self.assertRaises(ValueError):
+            translate_line("s.fiml", c)
+
+    def test_svar_text(self):
+        from evprg2hansl import svar_text
+        kind, A, B = svar_text(["@e1 = c(1)*@u1", "@e2 = -c(2)*@e1 + c(3)*@u2", "@e3 = 0.5*@e1 + c(4)*@e2 + c(5)*@u3"], 3)
+        self.assertEqual(kind, "ab")
+        self.assertEqual(A, [[1.0, 0.0, 0.0], [None, 1.0, 0.0], [-0.5, None, 1.0]])
+        self.assertEqual(B, [[None, 0.0, 0.0], [0.0, None, 0.0], [0.0, 0.0, None]])
+        self.assertEqual(svar_text(["@lr1(@u2) = 0"], 2), ("lr", [1, 2]))
+        self.assertEqual(svar_text(["@lr2(@u1) = 0"], 2), ("lr", [2, 1]))
+        c = Ctx()
+        translate_line("var v.ls 1 2 a b", c)
+        translate_line("text t", c)
+        translate_line("t.append @lr2(@u1) = 0", c)
+        self.assertEqual(translate_line("v.svar(rtype=lrtext) t", c), ["ev_svar_lr(&v, 0, {2, 1})"])
+        translate_line("matrix(2,2) lr", c)
+        translate_line("lr.fill(b=r) na, 0, na, na", c)
+        self.assertEqual(translate_line("v.svar(rtype=patlr, namelr=lr)", c), ["ev_svar_lr(&v, 0, {1, 2})"])
+
+    def test_model_options(self):
+        c = Ctx()
+        translate_line("equation ec.ls dlog(cons) c dlog(gdp)", c)
+        translate_line("model m", c)
+        translate_line("m.merge ec", c)
+        translate_line("m.append gdp = cons + g", c)
+        self.assertEqual(translate_line("m.addinit(v=n) @all", c), ["series cons_a = ev_eqres(ec, dataset)"])
+        translate_line('m.scenario "Scenario 1"', c)
+        translate_line("m.override g", c)
+        out = translate_line("m.solve(s=s, r=50)", c)
+        self.assertEqual(out[2], 'bundle ev_mo = _(overrides = defarray("g"), suffix = "_1", addfactors = 1, reps = 50)')
+        self.assertIn("series cons_1 = ev_modelseries(m, 1)", out)
+        self.assertIn('series gdp_1s = ev_modelseries(m, 2, "sd")', out)
 
 
 class Program(unittest.TestCase):

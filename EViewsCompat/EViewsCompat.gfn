@@ -2,7 +2,7 @@
 <gretl-functions>
 <gretl-function-package name="EViewsCompat" minver="2026a">
 <author>EViewsCompat contributors</author>
-<version>0.4</version>
+<version>0.5</version>
 <date>2026-11-15</date>
 <description>EViews-style LS, NLS, ARMA, systems, VAR/VEC, forecasts, Wald, diagnostics and at-functions</description>
 <tags>C10 C20 C51</tags>
@@ -122,6 +122,23 @@ Model objects (model m / m.merge eq / m.append identity / m.solve)
   ev_modelsolve(bundles eqs, strings identities, dataset [, dynamic=1])
       Solves least-squares and explicit equations plus identities period by period
       (Newton). ev_modelseries(m, k) is the solution of endogenous variable k.
+
+Nonlinear systems and HAC GMM
+  ev_nlsystem(eqs, dataset, &quot;ls|wls|sur|tsls|3sls|gmm&quot; [, &quot;z1 z2&quot;] [, quiet] [, haclag])
+      equations written as y = f(x, c(i)); shared c(i) across equations;
+      Levenberg-Marquardt with numerical derivatives
+  ev_system(..., &quot;gmm&quot;, &quot;z1 z2&quot;, quiet, eqtext, haclag)   haclag 0 = Newey-West
+      automatic lag, k = Bartlett lag k, -1 (default) = White
+
+Text-form structural restrictions (EViews @e / @u / @lr) are turned into A/B
+patterns or a long-run ordering by the translator and evqt; in hansl call
+ev_svar(&amp;v, A, B) or ev_svar_lr(&amp;v, 0, {order}).
+
+Model options: ev_modelsolve(eqs, identities, dataset, dynamic, quiet, opts)
+  opts = _(overrides = defarray(&quot;x&quot;), suffix = &quot;_1&quot;, addfactors = 1, reps = 100, seed = 1)
+  overrides use series x_1 in place of x; add factors are series &lt;variable&gt;_a
+  (ev_eqres(eq, dataset) makes an equation fit exactly); reps &gt; 0 runs a
+  stochastic simulation: ev_modelseries(m, k, &quot;mean&quot;) and (m, k, &quot;sd&quot;).
 </help>
 <gretl-function name="ev_gen" type="series">
  <params count="2">
@@ -1623,7 +1640,7 @@ return b
 </code>
 </gretl-function>
 <gretl-function name="ev_system" type="bundle">
- <params count="8">
+ <params count="9">
   <param name="deps" type="strings">
 <description>Dependent variable of each equation</description>
   </param>
@@ -1645,6 +1662,9 @@ return b
   <param name="quiet" type="bool" default="0"/>
   <param name="eqtext" type="strings" optional="true">
 <description>Equations as written, for the output</description>
+  </param>
+  <param name="haclag" type="int" min="-1" default="-1">
+<description>GMM weighting: -1 White, 0 Newey-West automatic lag, k lag k</description>
   </param>
  </params>
 <code>string meth = exists(method) ? tolower(method) : &quot;ls&quot;
@@ -1752,11 +1772,11 @@ elif meth == &quot;gmm&quot;
   matrix G = Zb' * Xs
   matrix gy = Zb' * ys
   scalar m = cols(Z)
-  matrix Sg = zeros(n * m, n * m)
+  matrix Um = {}
   loop t = 1..T
-    matrix ut = E[t,] ** Z[t,]
-    Sg += ut'ut
+    Um |= E[t,] ** Z[t,]
   endloop
+  matrix Sg = ev__gmmS(Um, haclag)
   matrix Wg = inv(Sg)
   V = inv(G' * Wg * G)
   b = V * (G' * Wg * gy)
@@ -1775,6 +1795,7 @@ bundle bs
 bs.kind = &quot;system&quot;
 bs.method = meth
 if meth == &quot;gmm&quot;
+  bs.weighting = haclag &lt; 0 ? &quot;White&quot; : sprintf(&quot;HAC (Bartlett kernel, Newey-West lag %d)&quot;, ev__nwlag(T, haclag))
   bs.J = Jst
   bs.Jdf = n * cols(Z) - cols(b')
   bs.Jp = bs.Jdf &gt; 0 ? pvalue(X, bs.Jdf, Jst) : NA
@@ -1838,9 +1859,15 @@ return bs
   <param name="b" type="bundleref"/>
  </params>
 <code>strings mkey = defarray(&quot;ls&quot;, &quot;wls&quot;, &quot;sur&quot;, &quot;tsls&quot;, &quot;wtsls&quot;, &quot;3sls&quot;, &quot;gmm&quot;, &quot;fiml&quot;)
-strings mname = defarray(&quot;Least Squares&quot;, &quot;Weighted Least Squares&quot;, &quot;Seemingly Unrelated Regression&quot;, &quot;Two-Stage Least Squares&quot;, &quot;Weighted Two-Stage Least Squares&quot;, &quot;Three-Stage Least Squares&quot;, &quot;Generalized Method of Moments (White weighting, two-step)&quot;, &quot;Full Information Maximum Likelihood&quot;)
+strings mname = defarray(&quot;Least Squares&quot;, &quot;Weighted Least Squares&quot;, &quot;Seemingly Unrelated Regression&quot;, &quot;Two-Stage Least Squares&quot;, &quot;Weighted Two-Stage Least Squares&quot;, &quot;Three-Stage Least Squares&quot;, &quot;Generalized Method of Moments (two-step)&quot;, &quot;Full Information Maximum Likelihood&quot;)
 scalar mi = instrings(mkey, b.method)[1]
 printf &quot;\nSystem: %s\nEstimation Method: %s\nDate: %s\n&quot;, inbundle(b, &quot;name&quot;) ? b.name : &quot;UNTITLED&quot;, mname[mi], b.estdate
+if inbundle(b, &quot;weighting&quot;)
+  printf &quot;Weighting matrix: %s\n&quot;, b.weighting
+endif
+if inbundle(b, &quot;nonlinear&quot;)
+  printf &quot;Convergence achieved after %d iterations\n&quot;, b.iters
+endif
 printf &quot;Sample: %s\nIncluded observations: %d\n&quot;, b.sample, b.Tobs
 printf &quot;Total system (balanced) observations %d\n\n&quot;, b.T
 ev__line(78)
@@ -2290,11 +2317,14 @@ endif
 </code>
 </gretl-function>
 <gretl-function name="ev_svar_lr" type="void">
- <params count="2">
+ <params count="3">
   <param name="v" type="bundleref">
 <description>VAR result (ev_varest)</description>
   </param>
   <param name="quiet" type="bool" default="0"/>
+  <param name="order" type="matrix" optional="true">
+<description>Recursive ordering of the variables for the long-run zeros</description>
+  </param>
  </params>
 <code># long-run (Blanchard-Quah) identification: the accumulated response of
 # variable i to shock j is zero for j &gt; i
@@ -2310,8 +2340,26 @@ loop l = 1..p
   sumA += A[1:n, (l - 1) * n + 1:l * n]
 endloop
 matrix C1 = inv(I(n) - sumA)
-matrix L = cholesky(C1 * S * C1')
-v.svarS = inv(C1) * L
+matrix perm = seq(1, n)
+if exists(order)
+  perm = vec(order)'
+endif
+errorif(cols(perm) != n, &quot;order must list every variable once&quot;)
+# Cholesky of the long-run covariance in the given ordering, mapped back
+matrix C1p = C1[perm, perm]
+matrix Lp = cholesky(C1p * S[perm, perm] * C1p')
+matrix Sp = inv(C1p) * Lp
+matrix Sim = zeros(n, n)
+matrix L = zeros(n, n)
+loop i = 1..n
+  scalar pi = perm[i]
+  loop j = 1..n
+    scalar pj = perm[j]
+    Sim[pi, pj] = Sp[i, j]
+    L[pi, pj] = Lp[i, j]
+  endloop
+endloop
+v.svarS = Sim
 v.svarA = I(n)
 v.svarB = v.svarS
 v.svar_lrmat = L
@@ -2356,7 +2404,7 @@ endif
 </code>
 </gretl-function>
 <gretl-function name="ev_modelsolve" type="bundle">
- <params count="5">
+ <params count="6">
   <param name="eqs" type="bundles">
 <description>Estimated equations (ev_ls results)</description>
   </param>
@@ -2370,6 +2418,9 @@ endif
 <description>Dynamic (1) or static (0) solution</description>
   </param>
   <param name="quiet" type="bool" default="0"/>
+  <param name="opts" type="bundle" optional="true">
+<description>overrides (strings), suffix, addfactors (1/0), reps, seed</description>
+  </param>
  </params>
 <code>scalar ne = nelem(eqs)
 scalar m = ne + nelem(idents)
@@ -2469,57 +2520,90 @@ C.tobs = tobs
 C.ne = ne
 C.m = m
 C.dynamic = dynamic
+# options: scenario overrides, add factors, stochastic simulation
+strings ovr = array(0)
+string suf = &quot;_0&quot;
+scalar use_af = 0
+scalar reps = 0
+if exists(opts)
+  if inbundle(opts, &quot;overrides&quot;)
+    ovr = opts.overrides
+  endif
+  suf = inbundle(opts, &quot;suffix&quot;) ? opts.suffix : (nelem(ovr) ? &quot;_1&quot; : &quot;_0&quot;)
+  use_af = inbundle(opts, &quot;addfactors&quot;) ? opts.addfactors : 0
+  reps = inbundle(opts, &quot;reps&quot;) ? opts.reps : 0
+  if inbundle(opts, &quot;seed&quot;)
+    set seed opts.seed
+  endif
+endif
+loop k = 1..nelem(ovr)
+  errorif(rows(instrings(varnames(vars), ovr[k] ~ suf)) == 0, sprintf(&quot;Override series %s%s does not exist&quot;, ovr[k], suf))
+  errorif(rows(instrings(bases, ovr[k])) &gt; 0, sprintf(&quot;%s is endogenous and cannot be overridden&quot;, ovr[k]))
+endloop
+C.ovr = ovr
+C.suf = suf
+# regressors that use an overridden series must be recomputed in each period
+matrices UU = C.uses
+loop k = 1..ne
+  if C.rhs[k] == &quot;&quot;
+    bundle b = eqs[k]
+    strings tok = strsplit(b.spec)
+    matrix u = UU[k]
+    loop i = 2..nelem(tok)
+      loop j = 1..nelem(ovr)
+        if regsub(tok[i], &quot;(?i)(?&lt;![A-Za-z0-9_])&quot; ~ ovr[j] ~ &quot;(?![A-Za-z0-9_])&quot;, &quot;#&quot;) != tok[i]
+          u[i-1] = 1
+        endif
+      endloop
+    endloop
+    UU[k] = u
+  endif
+endloop
+C.uses = UU
+# add factors: series &lt;endogenous&gt;_a, in the units of each equation's left-hand side
+matrix AF = zeros(T, m)
+if use_af
+  loop k = 1..m
+    matrix pp = instrings(varnames(vars), bases[k] ~ &quot;_a&quot;)
+    if rows(pp) &gt; 0
+      series evm_af = vars[pp[1]]
+      AF[, k] = misszero({evm_af})
+    endif
+  endloop
+endif
 scalar maxit = 0
 scalar unconverged = 0
-loop t = 1..T
-  if !dynamic
-    D = zeros(T, m)
-  endif
-  # Newton's method on x = G(x) for this period (numerical Jacobian)
-  matrix x = Sol[t,]
-  scalar conv = 0
-  loop it = 1..100
-    matrix g = ev__mg(C, vars, t, x, D, Sol)
-    matrix F = x - g
-    if sum(!ok(F))
-      break
-    endif
-    if maxr(abs(F) ./ (1 + abs(x))) &lt; 1e-8      # EViews default convergence
-      conv = 1
-      maxit = max(maxit, it)
-      break
-    endif
-    matrix J = I(m)
-    loop k = 1..m
-      matrix xh = x
-      scalar h = 1e-6 * (1 + abs(x[k]))
-      xh[k] += h
-      matrix gh = ev__mg(C, vars, t, xh, D, Sol)
-      J[, k] = J[, k] - ((gh - g) / h)'
-    endloop
-    # damped step: halve it until the residual is defined and smaller
-    matrix dx = (inv(J) * F')'
-    scalar nF = maxr(abs(F) ./ (1 + abs(x)))
-    scalar lam = 1
-    loop 30
-      matrix xt = x - lam * dx
-      matrix gt = ev__mg(C, vars, t, xt, D, Sol)
-      matrix Ft = xt - gt
-      if sum(!ok(Ft)) == 0 &amp;&amp; maxr(abs(Ft) ./ (1 + abs(xt))) &lt; nF
-        break
-      endif
-      lam = lam / 2
-    endloop
-    x = xt
+Sol = ev__msolve(C, vars, AF, Sol, &amp;maxit, &amp;unconverged)
+# stochastic simulation: normal shocks with each equation's S.E. of regression
+matrix smean = {}
+matrix ssd = {}
+if reps &gt; 0
+  matrix sig = zeros(1, m)
+  loop k = 1..ne
+    bundle b = eqs[k]
+    sig[k] = b.sigma
   endloop
-  unconverged += !conv
-  Sol[t,] = x
-  loop k = 1..m
-    D[t, k] = ok(L[t, k]) ? x[k] - L[t, k] : 0
+  matrix s1 = zeros(T, m)
+  matrix s2 = zeros(T, m)
+  loop rr = 1..reps
+    matrix sh = mnormal(T, m) .* sig
+    scalar mi = 0
+    scalar un = 0
+    matrix Sr = ev__msolve(C, vars, AF + sh, Sol, &amp;mi, &amp;un)
+    s1 += Sr
+    s2 += Sr.^2
   endloop
-endloop
+  smean = s1 / reps
+  ssd = sqrt(abs(s2 / reps - smean.^2) * reps / (reps - 1))
+endif
 bundle ms
 ms.kind = &quot;model&quot;
+ms.suffix = suf
+ms.reps = reps
+if reps &gt; 0
+  ms.mean = smean
+  ms.sd = ssd
+endif
 ms.names = bases
 ms.sol = Sol
 ms.actual = L
@@ -2530,7 +2614,20 @@ ms.unconverged = unconverged
 ms.sample = sprintf(&quot;%s %s&quot;, obslabel($t1), obslabel($t2))
 if !quiet
   printf &quot;\nModel solution\nSolver: Newton, %s\nSample: %s\n&quot;, dynamic ? &quot;dynamic solution&quot; : &quot;static solution&quot;, ms.sample
-  printf &quot;Endogenous variables (solution series get the suffix _0):&quot;
+  if nelem(ovr)
+    printf &quot;Scenario: overrides&quot;
+    loop k = 1..nelem(ovr)
+      printf &quot; %s -&gt; %s%s&quot;, toupper(ovr[k]), toupper(ovr[k]), suf
+    endloop
+    printf &quot;\n&quot;
+  endif
+  if use_af
+    printf &quot;Add factors: series &lt;variable&gt;_a\n&quot;
+  endif
+  if reps &gt; 0
+    printf &quot;Stochastic simulation: %d repetitions (mean %sm, std. dev. %ss)\n&quot;, reps, suf, suf
+  endif
+  printf &quot;Endogenous variables (solution series get the suffix %s):&quot;, suf
   loop k = 1..m
     printf &quot; %s&quot;, toupper(bases[k])
   endloop
@@ -2552,15 +2649,293 @@ return ms
 </code>
 </gretl-function>
 <gretl-function name="ev_modelseries" type="series">
- <params count="2">
+ <params count="3">
   <param name="ms" type="bundle">
 <description>ev_modelsolve result</description>
   </param>
   <param name="k" type="int" min="1" default="1">
 <description>Endogenous variable number</description>
   </param>
+  <param name="what" type="string" optional="true">
+<description>empty: solution; mean or sd: stochastic simulation</description>
+  </param>
  </params>
-<code>return ev__toseries(ms.sol[, k], ms.tobs)
+<code>string w = exists(what) ? tolower(what) : &quot;&quot;
+if w == &quot;mean&quot;
+  return ev__toseries(ms.mean[, k], ms.tobs)
+elif w == &quot;sd&quot;
+  return ev__toseries(ms.sd[, k], ms.tobs)
+endif
+return ev__toseries(ms.sol[, k], ms.tobs)
+</code>
+</gretl-function>
+<gretl-function name="ev_eqres" type="series">
+ <params count="2">
+  <param name="b" type="bundle">
+<description>Estimated equation (ev_ls result)</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+ </params>
+<code># residual of an equation over the current sample, in the units of its
+# left-hand side (used to initialise model add factors)
+string kind = inbundle(b, &quot;kind&quot;) ? b.kind : &quot;ls&quot;
+errorif(kind != &quot;ls&quot; &amp;&amp; kind != &quot;nls&quot;, &quot;Least squares or explicit equations only&quot;)
+if kind == &quot;nls&quot;
+  series evr_y = ev_gen(b.lhs, vars)
+  string r = b.rhs
+  loop j = 1..b.k
+    r = regsub(r, sprintf(&quot;evn_c%d(?![0-9])&quot;, b.cidx[j]), sprintf(&quot;(%.17g)&quot;, b.coeff[j]))
+  endloop
+  series evr_f = ev_gen(r, vars)
+  return evr_y - evr_f
+endif
+strings tok = strsplit(b.spec)
+series evr_y = ev_gen(tok[1], vars)
+series evr_f = 0
+loop i = 2..nelem(tok)
+  if tolower(tok[i]) == &quot;c&quot;
+    evr_f += b.coeff[i-1]
+  else
+    series evr_x = ev_gen(tok[i], vars)
+    evr_f += b.coeff[i-1] * evr_x
+  endif
+endloop
+return evr_y - evr_f
+</code>
+</gretl-function>
+<gretl-function name="ev_nlsystem" type="bundle">
+ <params count="6">
+  <param name="eqs" type="strings">
+<description>Explicit equations, e.g. y = c(1) + c(2)*x^c(3)</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="method" type="string" optional="true">
+<description>ls, wls, sur, tsls, 3sls or gmm</description>
+  </param>
+  <param name="inst" type="string" optional="true">
+<description>Instruments (a constant is added)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+  <param name="haclag" type="int" min="-1" default="-1">
+<description>GMM weighting: -1 White, 0 Newey-West automatic, k lag</description>
+  </param>
+ </params>
+<code># systems of equations that are nonlinear in the coefficients c(i):
+# Gauss-Newton on the (weighted) stacked residuals, numerical derivatives
+string meth = exists(method) ? tolower(method) : &quot;ls&quot;
+errorif(!instring(&quot; ls wls sur tsls 3sls gmm &quot;, &quot; &quot; ~ meth ~ &quot; &quot;), &quot;method must be ls, wls, sur, tsls, 3sls or gmm&quot;)
+set skip_missing off
+scalar n = nelem(eqs)
+strings deps = array(0)
+strings rhx = array(0)
+strings rhs0 = array(0)
+matrix allc = {}
+matrix Y = {}
+loop i = 1..n
+  strings sd = strsplit(eqs[i], &quot;=&quot;)
+  errorif(nelem(sd) != 2, sprintf(&quot;Equation %d needs one '='&quot;, i))
+  string lhs = strstrip(sd[1])
+  string rr = strstrip(sd[2])
+  deps += toupper(lhs)
+  rhs0 += rr
+  series evq_y = ev_gen(lhs, vars)
+  Y ~= {evq_y}
+  string low = tolower(rr)
+  loop k = 1..99
+    if instring(low, sprintf(&quot;c(%d)&quot;, k))
+      allc ~= k
+    endif
+  endloop
+  rhx += ev__prep(regsub(rr, &quot;(?i)(?&lt;![A-Za-z0-9_])c\(([0-9]+)\)&quot;, &quot;evq_c\1&quot;), vars)
+endloop
+matrix cu = values(allc')'
+scalar p = cols(cu)
+errorif(p == 0, &quot;No coefficients c(i) in the equations&quot;)
+# start: zeros (as EViews' C vector), rows complete at a small perturbation
+matrix c = 0.001 * ones(p, 1)
+loop j = 1..p
+  string pn = sprintf(&quot;evq_c%d&quot;, cu[j])
+  scalar @pn = c[j]
+endloop
+matrix F0 = {}
+loop i = 1..n
+  string e = rhx[i]
+  series evq_f = @e
+  F0 ~= {evq_f}
+endloop
+matrix mask = (sumr(!ok(Y)) .= 0) .* (sumr(!ok(F0)) .= 0)
+matrix Z = {}
+if exists(inst) &amp;&amp; strstrip(inst) != &quot;&quot;
+  series evq_one = 1
+  Z = {evq_one}
+  strings zt = strsplit(inst)
+  loop j = 1..nelem(zt)
+    if tolower(zt[j]) != &quot;c&quot;
+      series evq_z = ev_gen(zt[j], vars)
+      Z ~= {evq_z}
+    endif
+  endloop
+  mask = mask .* (sumr(!ok(Z)) .= 0)
+  Z = selifr(Z, mask)
+endif
+scalar ivm = meth == &quot;tsls&quot; || meth == &quot;3sls&quot; || meth == &quot;gmm&quot;
+errorif(ivm &amp;&amp; cols(Z) == 0, meth ~ &quot; needs instruments&quot;)
+series evq_o = obs
+matrix tobs = selifr({evq_o}, mask)
+scalar T = rows(tobs)
+matrix P = ivm ? Z * inv(Z'Z) * Z' : I(T)
+# weighting of the stacked residuals
+matrix M = I(n) ** P
+scalar iters = 0
+scalar mu = 1e-3
+loop stage = 1..2
+  loop it = 1..200
+    matrix r = ev__nlres(rhx, Y, mask, vars, cu, c)
+    matrix J = zeros(n * T, p)
+    loop j = 1..p
+      matrix ch = c
+      scalar h = 1e-6 * (1 + abs(c[j]))
+      ch[j] += h
+      J[, j] = -(ev__nlres(rhx, Y, mask, vars, cu, ch) - r) / h
+    endloop
+    # Levenberg-Marquardt step: rejected steps are not applied
+    matrix H = J' * M * J
+    matrix gr = J' * M * r
+    scalar obj = qform(r', M)
+    scalar accepted = 0
+    matrix step = zeros(p, 1)
+    loop 40
+      matrix stp = inv(H + mu * (I(p) .* H)) * gr
+      matrix rn = ev__nlres(rhx, Y, mask, vars, cu, c + stp)
+      rn = ok(rn) ? rn : 1e300     # undefined values make the step unacceptable
+      if maxc(abs(rn)) &lt; 1e150
+        if qform(rn', M) &lt;= obj
+          accepted = 1
+          step = stp
+          mu = max(mu / 10, 1e-12)
+          break
+        endif
+      endif
+      mu = mu * 10
+    endloop
+    if !accepted
+      break
+    endif
+    c = c + step
+    iters++
+    if maxc(abs(step) ./ (1 + abs(c))) &lt; 1e-9
+      break
+    endif
+  endloop
+  matrix E = mshape(ev__nlres(rhx, Y, mask, vars, cu, c), T, n)
+  if stage == 1
+    # second stage weights for the system estimators
+    if meth == &quot;sur&quot; || meth == &quot;wls&quot;
+      matrix S = E'E / T
+      S = meth == &quot;wls&quot; ? I(n) .* S : S
+      M = inv(S) ** I(T)
+    elif meth == &quot;3sls&quot;
+      M = inv(E'E / T) ** P
+    elif meth == &quot;gmm&quot;
+      matrix Zb = I(n) ** Z
+      matrix Um = {}
+      loop t = 1..T
+        Um |= E[t,] ** Z[t,]
+      endloop
+      M = Zb * inv(ev__gmmS(Um, haclag)) * Zb'
+    else
+      break
+    endif
+  endif
+endloop
+# covariance
+matrix r = vec(E)
+matrix J = zeros(n * T, p)
+loop j = 1..p
+  matrix ch = c
+  scalar h = 1e-6 * (1 + abs(c[j]))
+  ch[j] += h
+  J[, j] = -(ev__nlres(rhx, Y, mask, vars, cu, ch) - r) / h
+endloop
+matrix kk = zeros(1, n)
+loop i = 1..n
+  scalar ki = 0
+  loop j = 1..p
+    ki += instring(tolower(rhs0[i]), sprintf(&quot;c(%d)&quot;, cu[j])) &gt; 0
+  endloop
+  kk[i] = ki
+endloop
+matrix A = inv(J' * M * J)
+matrix V = {}
+if meth == &quot;ls&quot; || meth == &quot;tsls&quot;
+  matrix Sd = (E'E) ./ sqrt((T - kk)' * (T - kk))
+  V = A * J' * M * (Sd ** I(T)) * M * J * A
+else
+  V = A
+endif
+bundle bs
+bs.kind = &quot;system&quot;
+bs.nonlinear = 1
+bs.iters = iters
+bs.method = meth
+bs.spec = &quot;system&quot;
+if meth == &quot;gmm&quot;
+  bs.weighting = haclag &lt; 0 ? &quot;White&quot; : sprintf(&quot;HAC (Bartlett kernel, Newey-West lag %d)&quot;, ev__nwlag(T, haclag))
+  matrix gb = (I(n) ** Z)' * r
+  bs.J = qform(gb', inv(ev__gmmS(Um, haclag)))
+  bs.Jdf = n * cols(Z) - p
+  bs.Jp = bs.Jdf &gt; 0 ? pvalue(X, bs.Jdf, bs.J) : NA
+endif
+bs.coeff = c
+bs.vcv = V
+bs.stderr = sqrt(diag(V))
+bs.cnums = cu
+strings lab = array(0)
+loop j = 1..p
+  lab += sprintf(&quot;C(%d)&quot;, cu[j])
+endloop
+bs.labels = lab
+bs.k = p
+bs.n = n
+bs.Tobs = T
+bs.T = n * T
+bs.uhat = E
+bs.sigma_mat = E'E / T
+bs.detS = det(E'E / T)
+bs.tobs = tobs
+bs.sample = sprintf(&quot;%s %s&quot;, obslabel(minc(tobs)), obslabel(maxc(tobs)))
+bs.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
+bs.tstat = c ./ bs.stderr
+matrix pv = zeros(p, 1)
+loop j = 1..p
+  pv[j] = 2 * pvalue(t, n * T - p, abs(bs.tstat[j]))
+endloop
+bs.pval = pv
+bs.deps = deps
+strings et = array(0)
+loop i = 1..n
+  et += regsub(toupper(eqs[i]), &quot;\s&quot;, &quot;&quot;)
+endloop
+bs.eqtext = et
+matrix st = {}
+matrix Ys = selifr(Y, mask)
+loop i = 1..n
+  matrix u = E[, i]
+  matrix d = Ys[, i] - meanc(Ys[, i])
+  scalar ssr = u'u
+  scalar r2 = 1 - ssr / (d'd)
+  matrix du = u[2:T] - u[1:T-1]
+  st |= {r2, 1 - (1 - r2) * (T - 1) / (T - kk[i]), sqrt(ssr / (T - kk[i])), (du'du) / ssr, meanc(Ys[, i]), sqrt(d'd / (T - 1)), ssr}
+endloop
+bs.eqstats = st
+if !quiet
+  ev_sysprint(&amp;bs)
+endif
+return bs
 </code>
 </gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
@@ -2998,6 +3373,57 @@ endloop
 return out
 </code>
 </gretl-function>
+<gretl-function name="ev__nwlag" type="scalar" private="1">
+ <params count="2">
+  <param name="T" type="scalar"/>
+  <param name="lag" type="int"/>
+ </params>
+<code>return lag &gt; 0 ? lag : floor(4 * (T / 100)^(2 / 9))
+</code>
+</gretl-function>
+<gretl-function name="ev__gmmS" type="matrix" private="1">
+ <params count="2">
+  <param name="U" type="matrix" const="true"/>
+  <param name="lag" type="int"/>
+ </params>
+<code># long-run covariance of moment contributions U (T x q): White (lag &lt; 0)
+# or Bartlett / Newey-West HAC (lag 0 = automatic)
+matrix S = U'U
+if lag &gt;= 0
+  scalar T = rows(U)
+  scalar L = ev__nwlag(T, lag)
+  loop j = 1..L
+    matrix G = U[j+1:T, ]' * U[1:T-j, ]
+    S += (1 - j / (L + 1)) * (G + G')
+  endloop
+endif
+return S
+</code>
+</gretl-function>
+<gretl-function name="ev__nlres" type="matrix" private="1">
+ <params count="6">
+  <param name="rhx" type="strings"/>
+  <param name="Y" type="matrix" const="true"/>
+  <param name="mask" type="matrix" const="true"/>
+  <param name="vars" type="list"/>
+  <param name="cu" type="matrix" const="true"/>
+  <param name="c" type="matrix" const="true"/>
+ </params>
+<code># stacked residuals y_i - f_i(c) over the rows in mask
+set skip_missing off       # keep rows with missing values when making matrices
+loop j = 1..cols(cu)
+  string pn = sprintf(&quot;evq_c%d&quot;, cu[j])
+  scalar @pn = c[j]
+endloop
+matrix r = {}
+loop i = 1..nelem(rhx)
+  string e = rhx[i]
+  series evq_f = @e
+  r |= selifr(Y[, i] - {evq_f}, mask)
+endloop
+return r
+</code>
+</gretl-function>
 <gretl-function name="ev__psi" type="matrix" private="1">
  <params count="3">
   <param name="sys" type="bundle"/>
@@ -3096,14 +3522,22 @@ return g
 </code>
 </gretl-function>
 <gretl-function name="ev__genm" type="series" private="1">
- <params count="4">
+ <params count="6">
   <param name="expr" type="string"/>
   <param name="vars" type="list"/>
   <param name="bases" type="strings"/>
   <param name="D" type="matrix" const="true"/>
+  <param name="ovr" type="strings" optional="true"/>
+  <param name="suf" type="string" optional="true"/>
  </params>
-<code># evaluate expr with each series bases[k] shifted by D[,k] (lags included)
+<code># evaluate expr with each series bases[k] shifted by D[,k] (lags included);
+# series named in ovr are replaced by their scenario versions name + suf
 string e = ev__prep(expr, vars)
+if exists(ovr)
+  loop k = 1..nelem(ovr)
+    e = regsub(e, &quot;vars\.&quot; ~ ovr[k] ~ &quot;(?![A-Za-z0-9_])&quot;, &quot;vars.&quot; ~ ovr[k] ~ suf)
+  endloop
+endif
 loop k = 1..nelem(bases)
   string dn = sprintf(&quot;evm_d%d&quot;, k)
   series @dn = D[, k]
@@ -3114,13 +3548,14 @@ return evm_out
 </code>
 </gretl-function>
 <gretl-function name="ev__mg" type="matrix" private="1">
- <params count="6">
+ <params count="7">
   <param name="C" type="bundle"/>
   <param name="vars" type="list"/>
   <param name="t" type="scalar"/>
   <param name="x" type="matrix"/>
   <param name="D" type="matrix"/>
   <param name="Sol" type="matrix" const="true"/>
+  <param name="AF" type="matrix" const="true"/>
  </params>
 <code># one evaluation of every model equation in period t, given the levels x of
 # the endogenous variables in t; returns the implied levels
@@ -3140,20 +3575,87 @@ loop k = 1..m
     strings tok = strsplit(b.spec)
     loop i = 1..cols(xr)
       if u[i]
-        series evm_c = ev__genm(tok[i+1], vars, C.bases, D)
+        series evm_c = ev__genm(tok[i+1], vars, C.bases, D, C.ovr, C.suf)
         xr[i] = evm_c[st]
       endif
     endloop
     v = xr * b.coeff
   else
-    series evm_c = ev__genm(C.rhs[k], vars, C.bases, D)
+    series evm_c = ev__genm(C.rhs[k], vars, C.bases, D, C.ovr, C.suf)
     v = evm_c[st]
   endif
+  v += AF[t, k]          # add factor and/or stochastic shock
   scalar prev = (C.dynamic &amp;&amp; t &gt; 1) ? Sol[t - 1, k] : C.Lp[t, k]
   scalar f = C.forms[k]
   g[k] = f == 0 ? v : (f == 1 ? exp(v) : (f == 2 ? prev + v : prev * exp(v)))
 endloop
 return g
+</code>
+</gretl-function>
+<gretl-function name="ev__msolve" type="matrix" private="1">
+ <params count="6">
+  <param name="C" type="bundle"/>
+  <param name="vars" type="list"/>
+  <param name="AF" type="matrix" const="true"/>
+  <param name="Sol" type="matrix"/>
+  <param name="maxit" type="scalarref"/>
+  <param name="unconverged" type="scalarref"/>
+ </params>
+<code># period-by-period damped Newton solution of x = G(x)
+scalar T = rows(Sol)
+scalar m = C.m
+matrix L = C.L
+matrix D = zeros(T, m)
+maxit = 0
+unconverged = 0
+loop t = 1..T
+  if !C.dynamic
+    D = zeros(T, m)
+  endif
+  matrix x = Sol[t,]
+  scalar conv = 0
+  loop it = 1..100
+    matrix g = ev__mg(C, vars, t, x, D, Sol, AF)
+    matrix F = x - g
+    if sum(!ok(F))
+      break
+    endif
+    if maxr(abs(F) ./ (1 + abs(x))) &lt; 1e-8      # EViews default convergence
+      conv = 1
+      maxit = max(maxit, it)
+      break
+    endif
+    matrix J = I(m)
+    loop k = 1..m
+      matrix xh = x
+      scalar h = 1e-6 * (1 + abs(x[k]))
+      xh[k] += h
+      matrix gh = ev__mg(C, vars, t, xh, D, Sol, AF)
+      J[, k] = J[, k] - ((gh - g) / h)'
+    endloop
+    matrix dx = (inv(J) * F')'
+    scalar nF = maxr(abs(F) ./ (1 + abs(x)))
+    scalar lam = 1
+    loop 30
+      matrix xt = x - lam * dx
+      matrix gt = ev__mg(C, vars, t, xt, D, Sol, AF)
+      matrix Ft = xt - gt
+      if sum(!ok(Ft)) == 0
+        if maxr(abs(Ft) ./ (1 + abs(xt))) &lt; nF
+          break
+        endif
+      endif
+      lam = lam / 2
+    endloop
+    x = xt
+  endloop
+  unconverged += !conv
+  Sol[t,] = x
+  loop k = 1..m
+    D[t, k] = ok(L[t, k]) ? x[k] - L[t, k] : 0
+  endloop
+endloop
+return Sol
 </code>
 </gretl-function>
 <sample-script>

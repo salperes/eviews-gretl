@@ -31,7 +31,7 @@ strings ev_sd = defarray("dlog(CONS)", "dlog(INV)")
 strings ev_sx = defarray("c dlog(GDP)", "c dlog(GDP) FFR")
 strings ev_sc = defarray("1 2", "3 2 4")
 strings ev_st = defarray("DLOG(CONS)=C(1)+C(2)*DLOG(GDP)", "DLOG(INV)=C(3)+C(2)*DLOG(GDP)+C(4)*FFR")
-bundle SYS1 = ev_system(ev_sd, ev_sx, ev_sc, dataset, "3sls", "FFR(-1) dlog(GDP(-1)) dlog(CONS(-1)) FFR", 1, ev_st)
+bundle SYS1 = ev_system(ev_sd, ev_sx, ev_sc, dataset, "3sls", "FFR(-1) dlog(GDP(-1)) dlog(CONS(-1)) FFR", 1, ev_st, -1)
 SYS1.name = "SYS1"
 ev_sysprint(&SYS1)
 bundle SYS1_wald = ev_wald(SYS1, "c(2)=1")

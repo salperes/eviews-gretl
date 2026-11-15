@@ -1,0 +1,98 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: nonlinear and HAC-GMM systems, text SVAR restrictions,
+# model scenarios, add factors and stochastic simulation
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+series OTH = GDP - CONS - INV
+smpl full
+smpl 1985:1 2015:4
+
+# system SNL declared
+# system SNL: cons = c(1)*gdp^c(2)
+# system SNL: inv = c(3)*gdp^c(2)
+strings ev_se = defarray("CONS = C(1)*GDP^C(2)", "INV = C(3)*GDP^C(2)")
+bundle SNL = ev_nlsystem(ev_se, dataset, "sur", "", 1, -1)
+SNL.name = "SNL"
+ev_sysprint(&SNL)
+# system SH declared
+# system SH: dlog(cons) = c(1) + c(2)*dlog(gdp)
+# system SH: inst ffr(-1) dlog(gdp(-1)) dlog(cons(-1))
+strings ev_sd = defarray("dlog(CONS)")
+strings ev_sx = defarray("c dlog(GDP)")
+strings ev_sc = defarray("1 2")
+strings ev_st = defarray("DLOG(CONS)=C(1)+C(2)*DLOG(GDP)")
+bundle SH = ev_system(ev_sd, ev_sx, ev_sc, dataset, "gmm", "FFR(-1) dlog(GDP(-1)) dlog(CONS(-1))", 1, ev_st, 0)
+SH.name = "SH"
+ev_sysprint(&SH)
+
+scalar ev_s1 = $t1
+scalar ev_s2 = $t2
+smpl full
+series ev_v1 = ldiff(CONS)
+series ev_v2 = ldiff(GDP)
+smpl ev_s1 ev_s2
+bundle V1 = ev_varest("1 2 ev_v1 ev_v2 FFR", dataset, 0, "dlog(cons) dlog(gdp) ffr")
+# text object TR
+# text TR: @e1 = c(1)*@u1
+# text TR: @e2 = c(2)*@e1 + c(3)*@u2
+# text TR: @e3 = c(4)*@e1 + c(5)*@e2 + c(6)*@u3
+matrix ev_A = {1.0, 0.0, 0.0; NA, 1.0, 0.0; NA, NA, 1.0}
+matrix ev_B = {NA, 0.0, 0.0; 0.0, NA, 0.0; 0.0, 0.0, NA}
+ev_svar(&V1, ev_A, ev_B)
+scalar ev_s1 = $t1
+scalar ev_s2 = $t2
+smpl full
+series ev_v3 = ldiff(GDP)
+series ev_v4 = ldiff(CONS)
+smpl ev_s1 ev_s2
+bundle V2 = ev_varest("1 2 ev_v3 ev_v4", dataset, 0, "dlog(gdp) dlog(cons)")
+# text object LR
+# text LR: @lr2(@u1) = 0
+ev_svar_lr(&V2, 0, {2, 1})
+ev_varirfplot(V2, 8, "plot01.png")
+
+bundle EQC = ev_ls("dlog(CONS) c dlog(CONS(-1)) dlog(GDP)", dataset)
+bundle EQI = ev_ls("dlog(INV) c dlog(INV(-1)) FFR", dataset)
+# model M1 declared
+# model M1: merge eqc eqi
+# model M1: identity gdp = cons + inv + oth
+smpl full
+smpl 2010:1 2019:4
+series CONS_a = ev_eqres(EQC, dataset)
+series INV_a = ev_eqres(EQI, dataset)
+bundles ev_mb = defarray(EQC, EQI)
+strings ev_mi = defarray("GDP = CONS + INV + OTH")
+bundle ev_mo = _(suffix = "_0", addfactors = 1, reps = 0)
+bundle M1 = ev_modelsolve(ev_mb, ev_mi, dataset, 0, 0, ev_mo)
+series CONS_0 = ev_modelseries(M1, 1)
+series INV_0 = ev_modelseries(M1, 2)
+series GDP_0 = ev_modelseries(M1, 3)
+series OTH_1 = OTH + 100
+# model M1: scenario Scenario 1 (solution suffix _1)
+# model M1: override oth
+bundles ev_mb = defarray(EQC, EQI)
+strings ev_mi = defarray("GDP = CONS + INV + OTH")
+bundle ev_mo = _(overrides = defarray("OTH"), suffix = "_1", addfactors = 1, reps = 0)
+bundle M1 = ev_modelsolve(ev_mb, ev_mi, dataset, 1, 0, ev_mo)
+series CONS_1 = ev_modelseries(M1, 1)
+series INV_1 = ev_modelseries(M1, 2)
+series GDP_1 = ev_modelseries(M1, 3)
+# model M1: scenario Baseline (solution suffix _0)
+bundles ev_mb = defarray(EQC, EQI)
+strings ev_mi = defarray("GDP = CONS + INV + OTH")
+bundle ev_mo = _(suffix = "_0", addfactors = 1, reps = 30)
+bundle M1 = ev_modelsolve(ev_mb, ev_mi, dataset, 1, 0, ev_mo)
+series CONS_0 = ev_modelseries(M1, 1)
+series INV_0 = ev_modelseries(M1, 2)
+series GDP_0 = ev_modelseries(M1, 3)
+series CONS_0m = ev_modelseries(M1, 1, "mean")
+series INV_0m = ev_modelseries(M1, 2, "mean")
+series GDP_0m = ev_modelseries(M1, 3, "mean")
+series CONS_0s = ev_modelseries(M1, 1, "sd")
+series INV_0s = ev_modelseries(M1, 2, "sd")
+series GDP_0s = ev_modelseries(M1, 3, "sd")
+

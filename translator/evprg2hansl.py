@@ -14,6 +14,7 @@ and lines with no gretl meaning (cd, close, graph styling) as
 from __future__ import annotations
 
 import argparse
+import itertools
 import datetime as dt
 import re
 import sys
@@ -65,6 +66,8 @@ class Ctx:
     systems: dict = field(default_factory=dict)     # name -> {"eqs": [...], "inst": "..."}
     eq_dep: dict = field(default_factory=dict)      # equation -> dependent expression
     matrices: dict = field(default_factory=dict)    # matrix -> (rows, cols)
+    matrix_values: dict = field(default_factory=dict)  # filled matrix -> grid of values
+    texts: dict = field(default_factory=dict)       # text object -> lines
     models: dict = field(default_factory=dict)      # model -> {"eqs": [...], "ids": [...]}
     var_endo: dict = field(default_factory=dict)    # VAR name -> series names of its variables
 
@@ -572,10 +575,32 @@ def _linear_equation(line: str) -> tuple[str, str, str]:
     return lhs.strip().replace(" ", ""), " ".join(xs), " ".join(cs)
 
 
-def _system_estimate(o: str, method: str, ctx: Ctx) -> list[str]:
+def _system_estimate(o: str, method: str, ctx: Ctx, opts: str | None = None) -> list[str]:
     sysd = ctx.systems.get(o)
     if not sysd or not sysd["eqs"]:
         raise ValueError(f"system {o} has no equations")
+    hac = "0" if "hac" in (opts or "").lower() else "-1"
+    q = lambda arr: ", ".join(f'"{a}"' for a in arr)
+    inst = _spec(sysd["inst"], ctx) if sysd["inst"] else ""
+    try:
+        for ln in sysd["eqs"]:
+            _linear_equation(program_vars(ln, ctx))
+    except ValueError as e:
+        if "linear" not in str(e):
+            raise
+        # nonlinear in the coefficients: Gauss-Newton / Levenberg-Marquardt estimator
+        eqs = []
+        for ln in sysd["eqs"]:
+            lhs, rhs = program_vars(ln, ctx).split("=", 1)
+            if ctx.case != "keep":
+                lhs, rhs = case_names(lhs, ctx), case_names(rhs, ctx)
+            eqs.append(f"{lhs.strip()} = {rhs.strip()}")
+        ctx.equations[o] = "system"
+        ctx.last_eq = o
+        return [f"strings ev_se = defarray({q(eqs)})",
+                f'bundle {o} = ev_nlsystem(ev_se, dataset, "{method}", "{inst}", 1, {hac})',
+                f'{o}.name = "{o.upper()}"',
+                f"ev_sysprint(&{o})"]
     deps, xs, cs, txt = [], [], [], []
     for ln in sysd["eqs"]:
         d, x, c = _linear_equation(program_vars(ln, ctx))
@@ -583,15 +608,13 @@ def _system_estimate(o: str, method: str, ctx: Ctx) -> list[str]:
         xs.append(_spec(x, ctx))
         cs.append(c)
         txt.append(re.sub(r"\s+", "", ln).upper())
-    q = lambda arr: ", ".join(f'"{a}"' for a in arr)
-    inst = _spec(sysd["inst"], ctx) if sysd["inst"] else ""
     ctx.equations[o] = "system"
     ctx.last_eq = o
     return [f"strings ev_sd = defarray({q(deps)})",
             f"strings ev_sx = defarray({q(xs)})",
             f"strings ev_sc = defarray({q(cs)})",
             f"strings ev_st = defarray({q(txt)})",
-            f'bundle {o} = ev_system(ev_sd, ev_sx, ev_sc, dataset, "{method}", "{inst}", 1, ev_st)',
+            f'bundle {o} = ev_system(ev_sd, ev_sx, ev_sc, dataset, "{method}", "{inst}", 1, ev_st, {hac})',
             f'{o}.name = "{o.upper()}"',
             f"ev_sysprint(&{o})"]
 
@@ -599,6 +622,11 @@ def _system_estimate(o: str, method: str, ctx: Ctx) -> list[str]:
 def _fiml_estimate(o: str, ctx: Ctx) -> list[str]:
     """FIML: gretl's system command at the top level, then ev_sysfrom."""
     sysd = ctx.systems[o]
+    try:
+        for ln in sysd["eqs"]:
+            _linear_equation(program_vars(ln, ctx))
+    except ValueError:
+        raise ValueError("FIML needs equations linear in c(i); use sur or 3sls for nonlinear systems")
     pre, eqlines, deps, txt, kk = [], [], [], [], []
     pos_of, cu, pos = {}, [], 0
     restr = []
@@ -680,11 +708,82 @@ def _model_solve(o: str, opts: str | None, ctx: Ctx) -> list[str]:
         names.append(_dep_base(lhs))
         ids.append(f"{lhs} = {rhs}")
     q = lambda arr: ", ".join(f'"{a}"' for a in arr)
+    op = _opts(opts)
+    stochastic = op.get("s", "d").lower().startswith("s")
+    reps = op.get("r", "100") if stochastic else "0"
+    suf = md.get("suffix", "_0")
+    ovr = md.get("overrides", []) if suf != "_0" else []
+    items = [f'suffix = "{suf}"', f"addfactors = {int(md.get('addf', False))}", f"reps = {reps}"]
+    if ovr:
+        items.insert(0, f"overrides = defarray({q(ovr)})")
     out = [f"bundles ev_mb = defarray({', '.join(md['eqs'])})" if md["eqs"] else "bundles ev_mb = array(0)",
            f"strings ev_mi = defarray({q(ids)})" if ids else "strings ev_mi = array(0)",
-           f"bundle {o} = ev_modelsolve(ev_mb, ev_mi, dataset, {dynamic})"]
-    out += [f"series {n}_0 = ev_modelseries({o}, {k})" for k, n in enumerate(names, 1)]
+           f"bundle ev_mo = _({', '.join(items)})",
+           f"bundle {o} = ev_modelsolve(ev_mb, ev_mi, dataset, {dynamic}, 0, ev_mo)"]
+    out += [f"series {n}{suf} = ev_modelseries({o}, {k})" for k, n in enumerate(names, 1)]
+    if stochastic:
+        out += [f'series {n}{suf}m = ev_modelseries({o}, {k}, "mean")' for k, n in enumerate(names, 1)]
+        out += [f'series {n}{suf}s = ev_modelseries({o}, {k}, "sd")' for k, n in enumerate(names, 1)]
     return out
+
+
+def svar_text(lines: list[str], n: int):
+    """EViews text restrictions -> ('ab', A, B) pattern matrices (None = estimated)
+    or ('lr', ordering) for long-run zeros @lrI(@uJ) = 0."""
+    lines = [ln.strip() for ln in lines if ln.strip()]
+    if lines and all(re.match(r"(?i)@lr\d", ln) for ln in lines):
+        zero = set()
+        for ln in lines:
+            m = re.fullmatch(r"(?i)@lr(\d+)\(\s*@u(\d+)\s*\)\s*=\s*0", ln)
+            if not m:
+                raise ValueError(f"long-run restriction not understood: {ln}")
+            zero.add((int(m.group(1)), int(m.group(2))))
+        if len(zero) != n * (n - 1) // 2:
+            raise ValueError(f"long-run restrictions: exactly {n * (n - 1) // 2} zeros are needed")
+        for perm in itertools.permutations(range(1, n + 1)):
+            pos = {v: i for i, v in enumerate(perm)}
+            if all(pos[j] > pos[i] for i, j in zero):
+                return "lr", list(perm)
+        raise ValueError("long-run zeros must form a recursive (triangular) pattern")
+    A = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+    B = [[0.0] * n for _ in range(n)]
+    seen = set()
+    for ln in lines:
+        m = re.fullmatch(r"(?i)@e(\d+)\s*=\s*(.+)", ln)
+        if not m:
+            raise ValueError(f"restriction not understood: {ln}")
+        i = int(m.group(1)) - 1
+        for t in _split_terms(m.group(2).replace(" ", "")):
+            sign = -1.0 if t.startswith("-") else 1.0
+            t = t.lstrip("+-")
+            mm = re.fullmatch(r"(?i)(?:(c\(\d+\)|[\d.]+)\*)?@([eu])(\d+)", t)
+            if not mm:
+                raise ValueError(f"term not understood: {t}")
+            coef, kind, j = mm.group(1), mm.group(2).lower(), int(mm.group(3)) - 1
+            if coef and coef.lower().startswith("c("):
+                if coef.lower() in seen:
+                    raise ValueError(f"{coef} appears twice: equality restrictions are not supported")
+                seen.add(coef.lower())
+                val = None
+            else:
+                val = sign * float(coef) if coef else sign
+            if kind == "e":
+                A[i][j] = None if val is None else -val
+            else:
+                B[i][j] = val
+    return "ab", A, B
+
+
+def _mat_literal(M) -> str:
+    return "{" + "; ".join(", ".join("NA" if v is None else repr(float(v)) for v in row) for row in M) + "}"
+
+
+def svar_text_commands(var: str, lines: list[str], n: int) -> list[str]:
+    res = svar_text(lines, n)
+    if res[0] == "lr":
+        return [f"ev_svar_lr(&{var}, 0, {{{', '.join(map(str, res[1]))}}})"]
+    return [f"matrix ev_A = {_mat_literal(res[1])}", f"matrix ev_B = {_mat_literal(res[2])}",
+            f"ev_svar(&{var}, ev_A, ev_B)"]
 
 
 def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -> list[str]:
@@ -702,7 +801,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         meth_map = {"ls": "ls", "wls": "wls", "sur": "sur", "tsls": "tsls", "wtsls": "wtsls",
                     "3sls": "3sls", "gmm": "gmm"}
         if ml in meth_map:
-            return _system_estimate(o, meth_map[ml], ctx)
+            return _system_estimate(o, meth_map[ml], ctx, opts)
         if ml == "fiml":
             return _fiml_estimate(o, ctx)
         if ml in ("output", "results", "display", "spec"):
@@ -717,12 +816,33 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if ctx.equations.get(o) not in ("var", "vecm"):
             raise ValueError("svar needs a VAR")
         op = _opts(opts)
-        if "lr" in op or "bq" in op or op.get("rtype", "").startswith("lr"):
+        rtype = op.get("rtype", "")
+        if rtype in ("text", "lrtext"):
+            tname = translate_name(args.split()[0], ctx) if args.split() else ""
+            if tname not in ctx.texts:
+                raise ValueError("svar(rtype=text) needs a text object with the restrictions")
+            n = len(ctx.var_endo.get(o, [])) or 0
+            if not n:
+                raise ValueError("svar: the VAR is not known here")
+            return svar_text_commands(o, ctx.texts[tname], n)
+        if rtype == "patlr":
+            # long-run pattern matrix: zeros restricted, NA free -> recursive ordering
+            name = translate_name(op.get("namelr", ""), ctx)
+            if name not in ctx.matrix_values:
+                raise ValueError("svar(rtype=patlr) needs namelr= a filled pattern matrix")
+            vals, (r, c) = ctx.matrix_values[name], ctx.matrices[name]
+            lines = [f"@lr{i + 1}(@u{j + 1}) = 0" for i in range(r) for j in range(c)
+                     if vals[i][j] not in (None,) and float(vals[i][j]) == 0.0]
+            return svar_text_commands(o, lines, r)
+        if "lr" in op or "bq" in op or rtype.startswith("lr"):
             return [f"ev_svar_lr(&{o})"]
         a, b = op.get("namea"), op.get("nameb")
         if not a or not b:
             raise ValueError("svar: give rtype=patsr, namea=A, nameb=B (pattern matrices) or lr")
         return [f"ev_svar(&{o}, {translate_name(a, ctx)}, {translate_name(b, ctx)})"]
+    if o in ctx.texts and ml == "append":
+        ctx.texts[o].append(args.strip())
+        return [f"# text {o}: {args.strip()}"]
     if o in ctx.matrices and ml == "fill":
         r, c = ctx.matrices[o]
         vals = [v.strip() for v in args.split(",") if v.strip()]
@@ -730,6 +850,9 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if len(vals) != r * c:
             raise ValueError(f"fill: {o} needs {r * c} values")
         byrow = _opts(opts).get("b", "c").lower().startswith("r")
+        nums = [None if v == "NA" else v for v in vals]
+        grid = [[nums[i * c + j] if byrow else nums[j * r + i] for j in range(c)] for i in range(r)]
+        ctx.matrix_values[o] = grid
         lit = "{" + ", ".join(vals) + "}"
         return [f"matrix {o} = mshape({lit}, {c}, {r})'" if byrow else f"matrix {o} = mshape({lit}, {r}, {c})"]
     if o in ctx.models:
@@ -745,7 +868,25 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             return [f"# model {o}: identity {a}"]
         if ml == "solve":
             return _model_solve(o, opts, ctx)
-        raise ValueError(f"model method .{meth} not supported (merge, append, solve)")
+        if ml == "scenario":
+            nm = args.strip().strip('"')
+            if nm.lower().startswith("base"):
+                md["suffix"] = "_0"
+            else:
+                m = re.search(r"(\d+)", nm)
+                md["suffix"] = f"_{m.group(1) if m else 1}"
+            return [f"# model {o}: scenario {nm} (solution suffix {md['suffix']})"]
+        if ml == "override":
+            md["overrides"] += [translate_name(x, ctx) for x in args.split()]
+            return [f"# model {o}: override {args.strip()}"]
+        if ml in ("addassign", "addinit"):
+            md["addf"] = True
+            out = []
+            for e in md["eqs"]:
+                base = _dep_base(ctx.eq_dep[e])
+                out.append(f"series {base}_a = " + (f"ev_eqres({e}, dataset)" if ml == "addinit" else "0"))
+            return out
+        raise ValueError(f"model method .{meth} not supported")
     if ml == "coint":
         case, lag = "c", "4"
         for x in (opts or "").replace(",", " ").split():
@@ -914,9 +1055,13 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             ctx.matrices[name] = (r, c)
             return [f"matrix {name} = zeros({r}, {c})"]
         raise ValueError("matrix: use matrix(rows, cols) name")
+    if word == "text":
+        name = translate_name(rest.split()[0], ctx)
+        ctx.texts[name] = []
+        return [f"# text object {name}"]
     if word == "model":
         name = translate_name(rest.split()[0], ctx) if rest else "model01"
-        ctx.models[name] = {"eqs": [], "ids": []}
+        ctx.models[name] = {"eqs": [], "ids": [], "suffix": "_0", "overrides": [], "addf": False}
         ctx.equations[name] = "model"
         return [f"# model {name} declared"]
     if word == "system":

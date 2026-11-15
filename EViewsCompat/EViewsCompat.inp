@@ -1688,6 +1688,25 @@ end function
 #   estimators ls, sur, tsls, 3sls (computed here in matrix form)
 # -------------------------------------------------------------------
 
+function scalar ev__nwlag (scalar T, int lag)
+    return lag > 0 ? lag : floor(4 * (T / 100)^(2 / 9))
+end function
+
+function matrix ev__gmmS (const matrix U, int lag)
+    # long-run covariance of moment contributions U (T x q): White (lag < 0)
+    # or Bartlett / Newey-West HAC (lag 0 = automatic)
+    matrix S = U'U
+    if lag >= 0
+        scalar T = rows(U)
+        scalar L = ev__nwlag(T, lag)
+        loop j = 1..L
+            matrix G = U[j+1:T, ]' * U[1:T-j, ]
+            S += (1 - j / (L + 1)) * (G + G')
+        endloop
+    endif
+    return S
+end function
+
 function bundle ev_system (strings deps "Dependent variable of each equation",
                            strings xspecs "Regressors of each equation, e.g. c x1 x2",
                            strings cnums "Coefficient numbers of each equation, e.g. 1 2 3",
@@ -1695,7 +1714,8 @@ function bundle ev_system (strings deps "Dependent variable of each equation",
                            string method[null] "ls, sur, tsls or 3sls",
                            string inst[null] "Instruments (a constant is added)",
                            bool quiet[0],
-                           strings eqtext[null] "Equations as written, for the output")
+                           strings eqtext[null] "Equations as written, for the output",
+                           int haclag[-1::-1] "GMM weighting: -1 White, 0 Newey-West automatic lag, k lag k")
     string meth = exists(method) ? tolower(method) : "ls"
     errorif(!instring(" ls ols wls sur tsls 2sls wtsls 3sls gmm ", " " ~ meth ~ " "), \
       "method must be ls, wls, sur, tsls, wtsls, 3sls or gmm (fiml: see ev_sysfrom)")
@@ -1802,11 +1822,11 @@ function bundle ev_system (strings deps "Dependent variable of each equation",
         matrix G = Zb' * Xs
         matrix gy = Zb' * ys
         scalar m = cols(Z)
-        matrix Sg = zeros(n * m, n * m)
+        matrix Um = {}
         loop t = 1..T
-            matrix ut = E[t,] ** Z[t,]
-            Sg += ut'ut
+            Um |= E[t,] ** Z[t,]
         endloop
+        matrix Sg = ev__gmmS(Um, haclag)
         matrix Wg = inv(Sg)
         V = inv(G' * Wg * G)
         b = V * (G' * Wg * gy)
@@ -1825,6 +1845,7 @@ function bundle ev_system (strings deps "Dependent variable of each equation",
     bs.kind = "system"
     bs.method = meth
     if meth == "gmm"
+        bs.weighting = haclag < 0 ? "White" : sprintf("HAC (Bartlett kernel, Newey-West lag %d)", ev__nwlag(T, haclag))
         bs.J = Jst
         bs.Jdf = n * cols(Z) - cols(b')
         bs.Jp = bs.Jdf > 0 ? pvalue(X, bs.Jdf, Jst) : NA
@@ -1883,13 +1904,255 @@ function bundle ev_system (strings deps "Dependent variable of each equation",
     return bs
 end function
 
+function matrix ev__nlres (strings rhx, const matrix Y, const matrix mask, list vars, const matrix cu, const matrix c)
+    # stacked residuals y_i - f_i(c) over the rows in mask
+    set skip_missing off       # keep rows with missing values when making matrices
+    loop j = 1..cols(cu)
+        string pn = sprintf("evq_c%d", cu[j])
+        scalar @pn = c[j]
+    endloop
+    matrix r = {}
+    loop i = 1..nelem(rhx)
+        string e = rhx[i]
+        series evq_f = @e
+        r |= selifr(Y[, i] - {evq_f}, mask)
+    endloop
+    return r
+end function
+
+function bundle ev_nlsystem (strings eqs "Explicit equations, e.g. y = c(1) + c(2)*x^c(3)",
+                             list vars "Series used (e.g. dataset)",
+                             string method[null] "ls, wls, sur, tsls, 3sls or gmm",
+                             string inst[null] "Instruments (a constant is added)",
+                             bool quiet[0],
+                             int haclag[-1::-1] "GMM weighting: -1 White, 0 Newey-West automatic, k lag")
+    # systems of equations that are nonlinear in the coefficients c(i):
+    # Gauss-Newton on the (weighted) stacked residuals, numerical derivatives
+    string meth = exists(method) ? tolower(method) : "ls"
+    errorif(!instring(" ls wls sur tsls 3sls gmm ", " " ~ meth ~ " "), "method must be ls, wls, sur, tsls, 3sls or gmm")
+    set skip_missing off
+    scalar n = nelem(eqs)
+    strings deps = array(0)
+    strings rhx = array(0)
+    strings rhs0 = array(0)
+    matrix allc = {}
+    matrix Y = {}
+    loop i = 1..n
+        strings sd = strsplit(eqs[i], "=")
+        errorif(nelem(sd) != 2, sprintf("Equation %d needs one '='", i))
+        string lhs = strstrip(sd[1])
+        string rr = strstrip(sd[2])
+        deps += toupper(lhs)
+        rhs0 += rr
+        series evq_y = ev_gen(lhs, vars)
+        Y ~= {evq_y}
+        string low = tolower(rr)
+        loop k = 1..99
+            if instring(low, sprintf("c(%d)", k))
+                allc ~= k
+            endif
+        endloop
+        rhx += ev__prep(regsub(rr, "(?i)(?<![A-Za-z0-9_])c\(([0-9]+)\)", "evq_c\1"), vars)
+    endloop
+    matrix cu = values(allc')'
+    scalar p = cols(cu)
+    errorif(p == 0, "No coefficients c(i) in the equations")
+    # start: zeros (as EViews' C vector), rows complete at a small perturbation
+    matrix c = 0.001 * ones(p, 1)
+    loop j = 1..p
+        string pn = sprintf("evq_c%d", cu[j])
+        scalar @pn = c[j]
+    endloop
+    matrix F0 = {}
+    loop i = 1..n
+        string e = rhx[i]
+        series evq_f = @e
+        F0 ~= {evq_f}
+    endloop
+    matrix mask = (sumr(!ok(Y)) .= 0) .* (sumr(!ok(F0)) .= 0)
+    matrix Z = {}
+    if exists(inst) && strstrip(inst) != ""
+        series evq_one = 1
+        Z = {evq_one}
+        strings zt = strsplit(inst)
+        loop j = 1..nelem(zt)
+            if tolower(zt[j]) != "c"
+                series evq_z = ev_gen(zt[j], vars)
+                Z ~= {evq_z}
+            endif
+        endloop
+        mask = mask .* (sumr(!ok(Z)) .= 0)
+        Z = selifr(Z, mask)
+    endif
+    scalar ivm = meth == "tsls" || meth == "3sls" || meth == "gmm"
+    errorif(ivm && cols(Z) == 0, meth ~ " needs instruments")
+    series evq_o = obs
+    matrix tobs = selifr({evq_o}, mask)
+    scalar T = rows(tobs)
+    matrix P = ivm ? Z * inv(Z'Z) * Z' : I(T)
+    # weighting of the stacked residuals
+    matrix M = I(n) ** P
+    scalar iters = 0
+    scalar mu = 1e-3
+    loop stage = 1..2
+        loop it = 1..200
+            matrix r = ev__nlres(rhx, Y, mask, vars, cu, c)
+            matrix J = zeros(n * T, p)
+            loop j = 1..p
+                matrix ch = c
+                scalar h = 1e-6 * (1 + abs(c[j]))
+                ch[j] += h
+                J[, j] = -(ev__nlres(rhx, Y, mask, vars, cu, ch) - r) / h
+            endloop
+            # Levenberg-Marquardt step: rejected steps are not applied
+            matrix H = J' * M * J
+            matrix gr = J' * M * r
+            scalar obj = qform(r', M)
+            scalar accepted = 0
+            matrix step = zeros(p, 1)
+            loop 40
+                matrix stp = inv(H + mu * (I(p) .* H)) * gr
+                matrix rn = ev__nlres(rhx, Y, mask, vars, cu, c + stp)
+                rn = ok(rn) ? rn : 1e300     # undefined values make the step unacceptable
+                if maxc(abs(rn)) < 1e150
+                    if qform(rn', M) <= obj
+                        accepted = 1
+                        step = stp
+                        mu = max(mu / 10, 1e-12)
+                        break
+                    endif
+                endif
+                mu = mu * 10
+            endloop
+            if !accepted
+                break
+            endif
+            c = c + step
+            iters++
+            if maxc(abs(step) ./ (1 + abs(c))) < 1e-9
+                break
+            endif
+        endloop
+        matrix E = mshape(ev__nlres(rhx, Y, mask, vars, cu, c), T, n)
+        if stage == 1
+            # second stage weights for the system estimators
+            if meth == "sur" || meth == "wls"
+                matrix S = E'E / T
+                S = meth == "wls" ? I(n) .* S : S
+                M = inv(S) ** I(T)
+            elif meth == "3sls"
+                M = inv(E'E / T) ** P
+            elif meth == "gmm"
+                matrix Zb = I(n) ** Z
+                matrix Um = {}
+                loop t = 1..T
+                    Um |= E[t,] ** Z[t,]
+                endloop
+                M = Zb * inv(ev__gmmS(Um, haclag)) * Zb'
+            else
+                break
+            endif
+        endif
+    endloop
+    # covariance
+    matrix r = vec(E)
+    matrix J = zeros(n * T, p)
+    loop j = 1..p
+        matrix ch = c
+        scalar h = 1e-6 * (1 + abs(c[j]))
+        ch[j] += h
+        J[, j] = -(ev__nlres(rhx, Y, mask, vars, cu, ch) - r) / h
+    endloop
+    matrix kk = zeros(1, n)
+    loop i = 1..n
+        scalar ki = 0
+        loop j = 1..p
+            ki += instring(tolower(rhs0[i]), sprintf("c(%d)", cu[j])) > 0
+        endloop
+        kk[i] = ki
+    endloop
+    matrix A = inv(J' * M * J)
+    matrix V = {}
+    if meth == "ls" || meth == "tsls"
+        matrix Sd = (E'E) ./ sqrt((T - kk)' * (T - kk))
+        V = A * J' * M * (Sd ** I(T)) * M * J * A
+    else
+        V = A
+    endif
+    bundle bs
+    bs.kind = "system"
+    bs.nonlinear = 1
+    bs.iters = iters
+    bs.method = meth
+    bs.spec = "system"
+    if meth == "gmm"
+        bs.weighting = haclag < 0 ? "White" : sprintf("HAC (Bartlett kernel, Newey-West lag %d)", ev__nwlag(T, haclag))
+        matrix gb = (I(n) ** Z)' * r
+        bs.J = qform(gb', inv(ev__gmmS(Um, haclag)))
+        bs.Jdf = n * cols(Z) - p
+        bs.Jp = bs.Jdf > 0 ? pvalue(X, bs.Jdf, bs.J) : NA
+    endif
+    bs.coeff = c
+    bs.vcv = V
+    bs.stderr = sqrt(diag(V))
+    bs.cnums = cu
+    strings lab = array(0)
+    loop j = 1..p
+        lab += sprintf("C(%d)", cu[j])
+    endloop
+    bs.labels = lab
+    bs.k = p
+    bs.n = n
+    bs.Tobs = T
+    bs.T = n * T
+    bs.uhat = E
+    bs.sigma_mat = E'E / T
+    bs.detS = det(E'E / T)
+    bs.tobs = tobs
+    bs.sample = sprintf("%s %s", obslabel(minc(tobs)), obslabel(maxc(tobs)))
+    bs.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    bs.tstat = c ./ bs.stderr
+    matrix pv = zeros(p, 1)
+    loop j = 1..p
+        pv[j] = 2 * pvalue(t, n * T - p, abs(bs.tstat[j]))
+    endloop
+    bs.pval = pv
+    bs.deps = deps
+    strings et = array(0)
+    loop i = 1..n
+        et += regsub(toupper(eqs[i]), "\s", "")
+    endloop
+    bs.eqtext = et
+    matrix st = {}
+    matrix Ys = selifr(Y, mask)
+    loop i = 1..n
+        matrix u = E[, i]
+        matrix d = Ys[, i] - meanc(Ys[, i])
+        scalar ssr = u'u
+        scalar r2 = 1 - ssr / (d'd)
+        matrix du = u[2:T] - u[1:T-1]
+        st |= {r2, 1 - (1 - r2) * (T - 1) / (T - kk[i]), sqrt(ssr / (T - kk[i])), (du'du) / ssr, meanc(Ys[, i]), sqrt(d'd / (T - 1)), ssr}
+    endloop
+    bs.eqstats = st
+    if !quiet
+        ev_sysprint(&bs)
+    endif
+    return bs
+end function
+
 function void ev_sysprint (bundle *b)
     strings mkey = defarray("ls", "wls", "sur", "tsls", "wtsls", "3sls", "gmm", "fiml")
     strings mname = defarray("Least Squares", "Weighted Least Squares", "Seemingly Unrelated Regression", \
       "Two-Stage Least Squares", "Weighted Two-Stage Least Squares", "Three-Stage Least Squares", \
-      "Generalized Method of Moments (White weighting, two-step)", "Full Information Maximum Likelihood")
+      "Generalized Method of Moments (two-step)", "Full Information Maximum Likelihood")
     scalar mi = instrings(mkey, b.method)[1]
     printf "\nSystem: %s\nEstimation Method: %s\nDate: %s\n", inbundle(b, "name") ? b.name : "UNTITLED", mname[mi], b.estdate
+    if inbundle(b, "weighting")
+        printf "Weighting matrix: %s\n", b.weighting
+    endif
+    if inbundle(b, "nonlinear")
+        printf "Convergence achieved after %d iterations\n", b.iters
+    endif
     printf "Sample: %s\nIncluded observations: %d\n", b.sample, b.Tobs
     printf "Total system (balanced) observations %d\n\n", b.T
     ev__line(78)
@@ -2351,7 +2614,8 @@ function matrix ev__svar_grad (matrix th, const matrix Ap, const matrix Bp, cons
     return g
 end function
 
-function void ev_svar_lr (bundle *v "VAR result (ev_varest)", bool quiet[0])
+function void ev_svar_lr (bundle *v "VAR result (ev_varest)", bool quiet[0],
+                          matrix order[null] "Recursive ordering of the variables for the long-run zeros")
     # long-run (Blanchard-Quah) identification: the accumulated response of
     # variable i to shock j is zero for j > i
     errorif(!inbundle(v, "sys") || (inbundle(v, "kind") && v.kind == "vecm"), "Long-run restrictions need a VAR in stationary variables")
@@ -2366,8 +2630,26 @@ function void ev_svar_lr (bundle *v "VAR result (ev_varest)", bool quiet[0])
         sumA += A[1:n, (l - 1) * n + 1:l * n]
     endloop
     matrix C1 = inv(I(n) - sumA)
-    matrix L = cholesky(C1 * S * C1')
-    v.svarS = inv(C1) * L
+    matrix perm = seq(1, n)
+    if exists(order)
+        perm = vec(order)'
+    endif
+    errorif(cols(perm) != n, "order must list every variable once")
+    # Cholesky of the long-run covariance in the given ordering, mapped back
+    matrix C1p = C1[perm, perm]
+    matrix Lp = cholesky(C1p * S[perm, perm] * C1p')
+    matrix Sp = inv(C1p) * Lp
+    matrix Sim = zeros(n, n)
+    matrix L = zeros(n, n)
+    loop i = 1..n
+        scalar pi = perm[i]
+        loop j = 1..n
+            scalar pj = perm[j]
+            Sim[pi, pj] = Sp[i, j]
+            L[pi, pj] = Lp[i, j]
+        endloop
+    endloop
+    v.svarS = Sim
     v.svarA = I(n)
     v.svarB = v.svarS
     v.svar_lrmat = L
@@ -2412,9 +2694,16 @@ end function
 # Model objects: solve estimated equations and identities together
 # -------------------------------------------------------------------
 
-function series ev__genm (string expr, list vars, strings bases, const matrix D)
-    # evaluate expr with each series bases[k] shifted by D[,k] (lags included)
+function series ev__genm (string expr, list vars, strings bases, const matrix D,
+                          strings ovr[null], string suf[null])
+    # evaluate expr with each series bases[k] shifted by D[,k] (lags included);
+    # series named in ovr are replaced by their scenario versions name + suf
     string e = ev__prep(expr, vars)
+    if exists(ovr)
+        loop k = 1..nelem(ovr)
+            e = regsub(e, "vars\." ~ ovr[k] ~ "(?![A-Za-z0-9_])", "vars." ~ ovr[k] ~ suf)
+        endloop
+    endif
     loop k = 1..nelem(bases)
         string dn = sprintf("evm_d%d", k)
         series @dn = D[, k]
@@ -2425,7 +2714,7 @@ function series ev__genm (string expr, list vars, strings bases, const matrix D)
     return evm_out
 end function
 
-function matrix ev__mg (bundle C, list vars, scalar t, matrix x, matrix D, const matrix Sol)
+function matrix ev__mg (bundle C, list vars, scalar t, matrix x, matrix D, const matrix Sol, const matrix AF)
     # one evaluation of every model equation in period t, given the levels x of
     # the endogenous variables in t; returns the implied levels
     scalar m = C.m
@@ -2444,15 +2733,16 @@ function matrix ev__mg (bundle C, list vars, scalar t, matrix x, matrix D, const
             strings tok = strsplit(b.spec)
             loop i = 1..cols(xr)
                 if u[i]
-                    series evm_c = ev__genm(tok[i+1], vars, C.bases, D)
+                    series evm_c = ev__genm(tok[i+1], vars, C.bases, D, C.ovr, C.suf)
                     xr[i] = evm_c[st]
                 endif
             endloop
             v = xr * b.coeff
         else
-            series evm_c = ev__genm(C.rhs[k], vars, C.bases, D)
+            series evm_c = ev__genm(C.rhs[k], vars, C.bases, D, C.ovr, C.suf)
             v = evm_c[st]
         endif
+        v += AF[t, k]          # add factor and/or stochastic shock
         scalar prev = (C.dynamic && t > 1) ? Sol[t - 1, k] : C.Lp[t, k]
         scalar f = C.forms[k]
         g[k] = f == 0 ? v : (f == 1 ? exp(v) : (f == 2 ? prev + v : prev * exp(v)))
@@ -2460,11 +2750,98 @@ function matrix ev__mg (bundle C, list vars, scalar t, matrix x, matrix D, const
     return g
 end function
 
+function matrix ev__msolve (bundle C, list vars, const matrix AF, matrix Sol, scalar *maxit, scalar *unconverged)
+    # period-by-period damped Newton solution of x = G(x)
+    scalar T = rows(Sol)
+    scalar m = C.m
+    matrix L = C.L
+    matrix D = zeros(T, m)
+    maxit = 0
+    unconverged = 0
+    loop t = 1..T
+        if !C.dynamic
+            D = zeros(T, m)
+        endif
+        matrix x = Sol[t,]
+        scalar conv = 0
+        loop it = 1..100
+            matrix g = ev__mg(C, vars, t, x, D, Sol, AF)
+            matrix F = x - g
+            if sum(!ok(F))
+                break
+            endif
+            if maxr(abs(F) ./ (1 + abs(x))) < 1e-8      # EViews default convergence
+                conv = 1
+                maxit = max(maxit, it)
+                break
+            endif
+            matrix J = I(m)
+            loop k = 1..m
+                matrix xh = x
+                scalar h = 1e-6 * (1 + abs(x[k]))
+                xh[k] += h
+                matrix gh = ev__mg(C, vars, t, xh, D, Sol, AF)
+                J[, k] = J[, k] - ((gh - g) / h)'
+            endloop
+            matrix dx = (inv(J) * F')'
+            scalar nF = maxr(abs(F) ./ (1 + abs(x)))
+            scalar lam = 1
+            loop 30
+                matrix xt = x - lam * dx
+                matrix gt = ev__mg(C, vars, t, xt, D, Sol, AF)
+                matrix Ft = xt - gt
+                if sum(!ok(Ft)) == 0
+                    if maxr(abs(Ft) ./ (1 + abs(xt))) < nF
+                        break
+                    endif
+                endif
+                lam = lam / 2
+            endloop
+            x = xt
+        endloop
+        unconverged += !conv
+        Sol[t,] = x
+        loop k = 1..m
+            D[t, k] = ok(L[t, k]) ? x[k] - L[t, k] : 0
+        endloop
+    endloop
+    return Sol
+end function
+
+function series ev_eqres (bundle b "Estimated equation (ev_ls result)", list vars "Series used (e.g. dataset)")
+    # residual of an equation over the current sample, in the units of its
+    # left-hand side (used to initialise model add factors)
+    string kind = inbundle(b, "kind") ? b.kind : "ls"
+    errorif(kind != "ls" && kind != "nls", "Least squares or explicit equations only")
+    if kind == "nls"
+        series evr_y = ev_gen(b.lhs, vars)
+        string r = b.rhs
+        loop j = 1..b.k
+            r = regsub(r, sprintf("evn_c%d(?![0-9])", b.cidx[j]), sprintf("(%.17g)", b.coeff[j]))
+        endloop
+        series evr_f = ev_gen(r, vars)
+        return evr_y - evr_f
+    endif
+    strings tok = strsplit(b.spec)
+    series evr_y = ev_gen(tok[1], vars)
+    series evr_f = 0
+    loop i = 2..nelem(tok)
+        if tolower(tok[i]) == "c"
+            evr_f += b.coeff[i-1]
+        else
+            series evr_x = ev_gen(tok[i], vars)
+            evr_f += b.coeff[i-1] * evr_x
+        endif
+    endloop
+    return evr_y - evr_f
+end function
+
 function bundle ev_modelsolve (bundles eqs "Estimated equations (ev_ls results)",
                                strings idents "Identities, e.g. Y = C + I + G",
                                list vars "Series used (e.g. dataset)",
                                bool dynamic[1] "Dynamic (1) or static (0) solution",
-                               bool quiet[0])
+                               bool quiet[0],
+                               bundle opts[null] "overrides (strings), suffix, addfactors (1/0), reps, seed")
     scalar ne = nelem(eqs)
     scalar m = ne + nelem(idents)
     errorif(m == 0, "The model has no equations")
@@ -2563,57 +2940,91 @@ function bundle ev_modelsolve (bundles eqs "Estimated equations (ev_ls results)"
     C.ne = ne
     C.m = m
     C.dynamic = dynamic
+    # options: scenario overrides, add factors, stochastic simulation
+    strings ovr = array(0)
+    string suf = "_0"
+    scalar use_af = 0
+    scalar reps = 0
+    if exists(opts)
+        if inbundle(opts, "overrides")
+            ovr = opts.overrides
+        endif
+        suf = inbundle(opts, "suffix") ? opts.suffix : (nelem(ovr) ? "_1" : "_0")
+        use_af = inbundle(opts, "addfactors") ? opts.addfactors : 0
+        reps = inbundle(opts, "reps") ? opts.reps : 0
+        if inbundle(opts, "seed")
+            set seed opts.seed
+        endif
+    endif
+    loop k = 1..nelem(ovr)
+        errorif(rows(instrings(varnames(vars), ovr[k] ~ suf)) == 0, \
+          sprintf("Override series %s%s does not exist", ovr[k], suf))
+        errorif(rows(instrings(bases, ovr[k])) > 0, sprintf("%s is endogenous and cannot be overridden", ovr[k]))
+    endloop
+    C.ovr = ovr
+    C.suf = suf
+    # regressors that use an overridden series must be recomputed in each period
+    matrices UU = C.uses
+    loop k = 1..ne
+        if C.rhs[k] == ""
+            bundle b = eqs[k]
+            strings tok = strsplit(b.spec)
+            matrix u = UU[k]
+            loop i = 2..nelem(tok)
+                loop j = 1..nelem(ovr)
+                    if regsub(tok[i], "(?i)(?<![A-Za-z0-9_])" ~ ovr[j] ~ "(?![A-Za-z0-9_])", "#") != tok[i]
+                        u[i-1] = 1
+                    endif
+                endloop
+            endloop
+            UU[k] = u
+        endif
+    endloop
+    C.uses = UU
+    # add factors: series <endogenous>_a, in the units of each equation's left-hand side
+    matrix AF = zeros(T, m)
+    if use_af
+        loop k = 1..m
+            matrix pp = instrings(varnames(vars), bases[k] ~ "_a")
+            if rows(pp) > 0
+                series evm_af = vars[pp[1]]
+                AF[, k] = misszero({evm_af})
+            endif
+        endloop
+    endif
     scalar maxit = 0
     scalar unconverged = 0
-    loop t = 1..T
-        if !dynamic
-            D = zeros(T, m)
-        endif
-        # Newton's method on x = G(x) for this period (numerical Jacobian)
-        matrix x = Sol[t,]
-        scalar conv = 0
-        loop it = 1..100
-            matrix g = ev__mg(C, vars, t, x, D, Sol)
-            matrix F = x - g
-            if sum(!ok(F))
-                break
-            endif
-            if maxr(abs(F) ./ (1 + abs(x))) < 1e-8      # EViews default convergence
-                conv = 1
-                maxit = max(maxit, it)
-                break
-            endif
-            matrix J = I(m)
-            loop k = 1..m
-                matrix xh = x
-                scalar h = 1e-6 * (1 + abs(x[k]))
-                xh[k] += h
-                matrix gh = ev__mg(C, vars, t, xh, D, Sol)
-                J[, k] = J[, k] - ((gh - g) / h)'
-            endloop
-            # damped step: halve it until the residual is defined and smaller
-            matrix dx = (inv(J) * F')'
-            scalar nF = maxr(abs(F) ./ (1 + abs(x)))
-            scalar lam = 1
-            loop 30
-                matrix xt = x - lam * dx
-                matrix gt = ev__mg(C, vars, t, xt, D, Sol)
-                matrix Ft = xt - gt
-                if sum(!ok(Ft)) == 0 && maxr(abs(Ft) ./ (1 + abs(xt))) < nF
-                    break
-                endif
-                lam = lam / 2
-            endloop
-            x = xt
+    Sol = ev__msolve(C, vars, AF, Sol, &maxit, &unconverged)
+    # stochastic simulation: normal shocks with each equation's S.E. of regression
+    matrix smean = {}
+    matrix ssd = {}
+    if reps > 0
+        matrix sig = zeros(1, m)
+        loop k = 1..ne
+            bundle b = eqs[k]
+            sig[k] = b.sigma
         endloop
-        unconverged += !conv
-        Sol[t,] = x
-        loop k = 1..m
-            D[t, k] = ok(L[t, k]) ? x[k] - L[t, k] : 0
+        matrix s1 = zeros(T, m)
+        matrix s2 = zeros(T, m)
+        loop rr = 1..reps
+            matrix sh = mnormal(T, m) .* sig
+            scalar mi = 0
+            scalar un = 0
+            matrix Sr = ev__msolve(C, vars, AF + sh, Sol, &mi, &un)
+            s1 += Sr
+            s2 += Sr.^2
         endloop
-    endloop
+        smean = s1 / reps
+        ssd = sqrt(abs(s2 / reps - smean.^2) * reps / (reps - 1))
+    endif
     bundle ms
     ms.kind = "model"
+    ms.suffix = suf
+    ms.reps = reps
+    if reps > 0
+        ms.mean = smean
+        ms.sd = ssd
+    endif
     ms.names = bases
     ms.sol = Sol
     ms.actual = L
@@ -2624,7 +3035,20 @@ function bundle ev_modelsolve (bundles eqs "Estimated equations (ev_ls results)"
     ms.sample = sprintf("%s %s", obslabel($t1), obslabel($t2))
     if !quiet
         printf "\nModel solution\nSolver: Newton, %s\nSample: %s\n", dynamic ? "dynamic solution" : "static solution", ms.sample
-        printf "Endogenous variables (solution series get the suffix _0):"
+        if nelem(ovr)
+            printf "Scenario: overrides"
+            loop k = 1..nelem(ovr)
+                printf " %s -> %s%s", toupper(ovr[k]), toupper(ovr[k]), suf
+            endloop
+            printf "\n"
+        endif
+        if use_af
+            printf "Add factors: series <variable>_a\n"
+        endif
+        if reps > 0
+            printf "Stochastic simulation: %d repetitions (mean %sm, std. dev. %ss)\n", reps, suf, suf
+        endif
+        printf "Endogenous variables (solution series get the suffix %s):", suf
         loop k = 1..m
             printf " %s", toupper(bases[k])
         endloop
@@ -2645,7 +3069,14 @@ function bundle ev_modelsolve (bundles eqs "Estimated equations (ev_ls results)"
     return ms
 end function
 
-function series ev_modelseries (bundle ms "ev_modelsolve result", int k[1::1] "Endogenous variable number")
+function series ev_modelseries (bundle ms "ev_modelsolve result", int k[1::1] "Endogenous variable number",
+                                string what[null] "empty: solution; mean or sd: stochastic simulation")
+    string w = exists(what) ? tolower(what) : ""
+    if w == "mean"
+        return ev__toseries(ms.mean[, k], ms.tobs)
+    elif w == "sd"
+        return ev__toseries(ms.sd[, k], ms.tobs)
+    endif
     return ev__toseries(ms.sol[, k], ms.tobs)
 end function
 

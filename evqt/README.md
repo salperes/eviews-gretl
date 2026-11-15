@@ -63,8 +63,14 @@ of iCloud-synced folders on purpose.
 - Unsaved changes: `*` in the titles; Save (Cmd+S) writes the current page to its .gdt
   and other pages next to it as `<name>_<page>.gdt`; closing or opening another file asks first.
 
-Not yet: stochastic simulation and scenarios in models, add factors, nonlinear system
-equations, GMM with HAC weighting, structural VAR restrictions written as text (@e1 = ...).
+Also: nonlinear system equations (estimated with Levenberg-Marquardt), GMM with HAC
+(Newey-West) weighting, structural VAR restrictions in EViews text form (`@e1 = c(1)*@u1`,
+`@lr1(@u2) = 0`), and in the Model window: scenario overrides with a solution suffix,
+add factors (and initialising them so the equations fit), stochastic simulation
+(mean and standard deviation series).
+
+Not yet: EViews workfile pages with panel structure, programs with subroutines, and
+EViews-specific add-ins.
 
 ## Tests
 ```bash

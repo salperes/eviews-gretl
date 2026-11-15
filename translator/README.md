@@ -45,9 +45,13 @@ Pages: `pagecreate(page=x) freq start end`, `pageselect`, `pagedelete`, `pageren
 `d()` and `dlog()` of a series or of its lag are written with explicit lags, so the first
 observation of a sample uses earlier data, as in EViews.
 
+Also: nonlinear system equations, `s.gmm(w=hac)`, `text t` + `t.append @e1 = ...` with
+`v.svar(rtype=text) t` / `rtype=lrtext` / `rtype=patlr, namelr=M`, and models with
+`m.scenario "Scenario 1"`, `m.override x`, `m.addassign @all`, `m.addinit(v=n) @all`,
+`m.solve(s=s, r=100)` (stochastic: `<name>_0m` and `<name>_0s` series).
+
 Not yet: TGARCH/EGARCH, panel pages (`pagestruct`, `pageunstack`), IPS test,
-subroutines/`call`, `include`, matrix algebra beyond declare/fill/element assignment,
-model scenarios and stochastic simulation, text-form SVAR restrictions.
+subroutines/`call`, `include`, matrix algebra beyond declare/fill/element assignment.
 
 ## Real programs (`real_prg/`, local testing only: the source repos have no licence)
 | Program | Lines | Untranslated | Ran in gretl |

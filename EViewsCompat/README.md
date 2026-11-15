@@ -18,7 +18,7 @@ export GRETL_HOME=/Applications/Gretl.app/Contents/Resources/share/gretl/
 ```
 
 ```bash
-for t in test_evcompat test_usmacro test_forecast_var test_estimators test_systems test_advanced; do /Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/$t.inp" | grep -E '^(ok|FAIL)'; done
+for t in test_evcompat test_usmacro test_forecast_var test_estimators test_systems test_advanced test_more; do /Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/$t.inp" | grep -E '^(ok|FAIL)'; done
 ```
 
 ```bash

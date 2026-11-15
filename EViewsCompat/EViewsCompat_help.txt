@@ -111,3 +111,20 @@ Model objects (model m / m.merge eq / m.append identity / m.solve)
   ev_modelsolve(bundles eqs, strings identities, dataset [, dynamic=1])
       Solves least-squares and explicit equations plus identities period by period
       (Newton). ev_modelseries(m, k) is the solution of endogenous variable k.
+
+Nonlinear systems and HAC GMM
+  ev_nlsystem(eqs, dataset, "ls|wls|sur|tsls|3sls|gmm" [, "z1 z2"] [, quiet] [, haclag])
+      equations written as y = f(x, c(i)); shared c(i) across equations;
+      Levenberg-Marquardt with numerical derivatives
+  ev_system(..., "gmm", "z1 z2", quiet, eqtext, haclag)   haclag 0 = Newey-West
+      automatic lag, k = Bartlett lag k, -1 (default) = White
+
+Text-form structural restrictions (EViews @e / @u / @lr) are turned into A/B
+patterns or a long-run ordering by the translator and evqt; in hansl call
+ev_svar(&v, A, B) or ev_svar_lr(&v, 0, {order}).
+
+Model options: ev_modelsolve(eqs, identities, dataset, dynamic, quiet, opts)
+  opts = _(overrides = defarray("x"), suffix = "_1", addfactors = 1, reps = 100, seed = 1)
+  overrides use series x_1 in place of x; add factors are series <variable>_a
+  (ev_eqres(eq, dataset) makes an equation fit exactly); reps > 0 runs a
+  stochastic simulation: ev_modelseries(m, k, "mean") and (m, k, "sd").
