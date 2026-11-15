@@ -9040,6 +9040,112 @@ loop r = 1..rows(b.coeff)
 endloop
 </code>
 </gretl-function>
+<gretl-function name="ev_stop" type="void">
+ <params count="1">
+  <param name="msg" type="string">
+<description>Message</description>
+  </param>
+ </params>
+<code># stop the program with an error message (translated setmaxerrs)
+funcerr msg
+</code>
+</gretl-function>
+<gretl-function name="ev_fred" type="series">
+ <params count="2">
+  <param name="id" type="string">
+<description>FRED series code, e.g. GDPC1</description>
+  </param>
+  <param name="agg" type="string" optional="true">
+<description>Conversion of higher-frequency data: a (average, default), s (sum), f (first), l (last)</description>
+  </param>
+ </params>
+<code># FRED (St. Louis Fed) public CSV download; observations are matched to the workfile by date and
+# higher-frequency data are converted to the workfile frequency (EViews fetch default: average)
+errorif($pd != 1 &amp;&amp; $pd != 4 &amp;&amp; $pd != 12 &amp;&amp; $pd &lt; 5, &quot;FRED: annual, quarterly, monthly or daily workfiles&quot;)
+string how = exists(agg) ? tolower(agg) : &quot;a&quot;
+string url = sprintf(&quot;https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s&quot;, toupper(id))
+# curl() with a plain user agent: FRED's servers reset the HTTP/2 stream for gretl's default one
+bundle cb = _(URL = url, header = &quot;User-Agent: curl/8.7.1&quot;)
+scalar cerr = curl(&amp;cb)
+if cerr != 0
+  string why = &quot;no internet access?&quot;
+  if inbundle(cb, &quot;errmsg&quot;)
+    why = cb.errmsg
+  endif
+  string em = &quot;FRED: download failed for &quot; ~ id ~ &quot;: &quot; ~ why
+  funcerr em
+endif
+string txt = cb.output
+strings L = strsplit(txt, sprintf(&quot;\n&quot;))
+errorif(nelem(L) &lt; 2 || strstr(L[1], &quot;,&quot;) == &quot;&quot;, &quot;FRED: unexpected reply for &quot; ~ id)
+matrix S = zeros($nobs, 1)
+matrix C = zeros($nobs, 1)
+matrix F = NA * ones($nobs, 1)
+matrix La = NA * ones($nobs, 1)
+loop i = 2..nelem(L)
+  string ln = strstrip(L[i])
+  if strlen(ln) &lt; 12
+    continue
+  endif
+  scalar y = atof(substr(ln, 1, 4))
+  scalar m = atof(substr(ln, 6, 7))
+  string vs = strstrip(substr(ln, 12, strlen(ln)))
+  if vs == &quot;.&quot; || vs == &quot;&quot;
+    continue
+  endif
+  scalar v = atof(vs)
+  if $pd == 1
+    string od = sprintf(&quot;%d&quot;, y)
+  elif $pd == 4
+    string od = sprintf(&quot;%d:%d&quot;, y, floor((m - 1) / 3) + 1)
+  elif $pd == 12
+    string od = sprintf(&quot;%d:%02d&quot;, y, m)
+  else
+    string od = substr(ln, 1, 10)
+  endif
+  scalar t = obsnum(od)
+  if !ok(t)
+    continue
+  endif
+  S[t] += v
+  C[t] += 1
+  if !ok(F[t])
+    F[t] = v
+  endif
+  La[t] = v
+endloop
+matrix out = how == &quot;s&quot; ? S : (how == &quot;f&quot; ? F : (how == &quot;l&quot; ? La : S ./ C))
+series cnt = C
+series x = out
+x = cnt == 0 ? NA : x
+string desc = &quot;FRED &quot; ~ toupper(id)
+setinfo x --description=&quot;@desc&quot;
+return x
+</code>
+</gretl-function>
+<gretl-function name="ev_uiprompt" type="scalar">
+ <params count="2">
+  <param name="msg" type="string">
+<description>Prompt text</description>
+  </param>
+  <param name="kind" type="string" optional="true">
+<description>O, OC, YN or YNC</description>
+  </param>
+ </params>
+<code># EViews @uiprompt in a script: print the prompt and answer OK / Yes (1)
+printf &quot;[prompt] %s -&gt; answered %s (no dialogs in a script)\n&quot;, msg, exists(kind) &amp;&amp; strstr(toupper(kind), &quot;Y&quot;) != &quot;&quot; ? &quot;Yes&quot; : &quot;OK&quot;
+return 1
+</code>
+</gretl-function>
+<gretl-function name="ev_uiskip" type="scalar">
+ <params count="1">
+  <param name="what" type="string" optional="true"/>
+ </params>
+<code># EViews @uiedit, @uilist, @uiradio, @uidialog in a script: keep the current values, return 0 (OK)
+printf &quot;[dialog %s skipped: current values kept]\n&quot;, exists(what) ? what : &quot;ui&quot;
+return 0
+</code>
+</gretl-function>
 <gretl-function name="ev_factorprint" type="void">
  <params count="1">
   <param name="r" type="bundleref">

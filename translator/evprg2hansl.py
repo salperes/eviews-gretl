@@ -77,6 +77,7 @@ class Ctx:
     samples: dict = field(default_factory=dict)     # sample objects: name -> smpl arguments
     svectors: set = field(default_factory=set)      # string vectors
     need_dbnomics: bool = False
+    maxerrs: int = 1                               # setmaxerrs: errors tolerated before the program stops
     logls: dict = field(default_factory=dict)      # logl objects: name -> appended lines
     sspaces: dict = field(default_factory=dict)    # sspace objects: name -> appended lines
     cvals: dict = field(default_factory=dict)      # starting values of c(i) (param, c(i) = v)
@@ -85,6 +86,7 @@ class Ctx:
     vec_restr: dict = field(default_factory=dict)  # VEC name -> restriction text (append(coint))
     vec_info: dict = field(default_factory=dict)   # VEC name -> (spec, case, rank) once estimated
     pools: dict = field(default_factory=dict)      # pool name -> identifiers
+    valmaps: dict = field(default_factory=dict)    # valmap name -> {value: label}
     spools: dict = field(default_factory=dict)     # spool name -> object names
     graph_names: dict = field(default_factory=dict)  # graph -> {element: legend text}
     args_used: set = field(default_factory=set)     # program arguments %0 %1 ...
@@ -125,6 +127,7 @@ KEYWORD_MAP = [
     (r"@trend(\(\))?", "ev_trend()"),
     (r"@obsnum", "obs"),
     (r"@obssmpl", "$nobs"),
+    (r"@errorcount", "ev_errcount"),
     (r"@obsrange", "ev_N"),
     (r"@year", "$obsmajor"),
     (r"@quarter", "$obsminor"),
@@ -296,8 +299,28 @@ def program_vars(p: str, ctx: Ctx) -> str:
     return p
 
 
+def _ui_calls(expr: str) -> str:
+    """EViews dialogs in a script: @uiprompt answers OK/Yes, the others keep the current values."""
+    expr = re.sub(r"(?i)@uiprompt\s*\(", "ev_uiprompt(", expr)
+    while True:
+        m = re.search(r"(?i)@ui(edit|list|radio|filedlg|dialog|mlist)\s*\(", expr)
+        if not m:
+            return expr
+        i, depth, q = m.end(), 1, False
+        while i < len(expr) and depth:
+            ch = expr[i]
+            if ch == '"':
+                q = not q
+            elif not q and ch == "(":
+                depth += 1
+            elif not q and ch == ")":
+                depth -= 1
+            i += 1
+        expr = expr[:m.start()] + f'ev_uiskip("{m.group(1).lower()}")' + expr[i:]
+
+
 def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
-    expr = expr.strip()
+    expr = _ui_calls(expr.strip())
     out = []
     for is_lit, part in _split_strings(expr):
         if is_lit:
@@ -1400,6 +1423,26 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return [f"ev_svar(&{o}, {translate_name(a, ctx)}, {translate_name(b, ctx)})"]
     if o in ctx.tables:
         return _table_method(o, ml, opts, args, ctx)
+    if o in ctx.valmaps:
+        if ml != "append":
+            raise ValueError(f"valmap method .{meth} not supported (append)")
+        toks = re.findall(r'"[^"]*"|\S+', args)
+        if len(toks) % 2:
+            raise ValueError("valmap append: give value label pairs")
+        for v, lab in zip(toks[::2], toks[1::2]):
+            ctx.valmaps[o][v] = lab.strip('"')
+        return [f"# valmap {o}: {args.strip()}"]
+    if ml == "map" and translate_name(args.strip(), ctx) in ctx.valmaps:
+        vm = ctx.valmaps[translate_name(args.strip(), ctx)]
+        try:
+            keys = {int(float(k)): v for k, v in vm.items() if float(k) == int(float(k))}
+        except ValueError:
+            raise ValueError("valmap: only numeric values can be mapped here")
+        if len(keys) != len(vm) or min(keys) < 1:
+            raise ValueError("valmap: gretl value labels need positive integer codes (1, 2, ...)")
+        labs = [keys.get(i, str(i)) for i in range(1, max(keys) + 1)]
+        q = ", ".join('"' + x.replace('"', "'") + '"' for x in labs)
+        return [f"strings ev_vlab = defarray({q})", f"stringify({o}, ev_vlab)    # value labels (EViews valmap)"]
     if o in ctx.pools:
         if ml == "ls":
             op = _opts(opts)
@@ -1864,6 +1907,17 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         raise Ignored(word)
 
     # --- databases: EViews .edb -> gretl .bin
+    if word in ("dbopen", "db") and _opts(cmd_opts).get("type", "").lower() == "fred":
+        ctx.default_db = "fred"
+        raise Ignored("default database is now FRED (online)")
+    if word == "fetch" and (_opts(cmd_opts).get("d", "").lower() == "fred" or "fred::" in rest.lower() or
+                            (ctx.default_db == "fred" and "d" not in _opts(cmd_opts))):
+        out = []
+        for code in rest.split():
+            code = re.sub(r"(?i)^fred::", "", code.strip('"'))
+            nm = translate_name(re.sub(r"\W+", "_", code).strip("_").lower(), ctx)
+            out.append(f'series {nm} = ev_fred("{code.upper()}")    # FRED, converted to the workfile frequency')
+        return out
     if word in ("dbopen", "db", "dbcreate") and _opts(cmd_opts).get("type", "").lower() == "dbnomics":
         ctx.default_db = "dbnomics"
         raise Ignored("default database is now DBnomics (online)")
@@ -1989,7 +2043,15 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
     if word == "seterr":
         txt = rest.strip()
         return [f"errorif(1, {txt if txt.startswith(chr(34)) else chr(34) + txt + chr(34)})"]
-    if word in ("setmaxerrs", "logmode", "logsave", "logclear"):
+    if word == "setmaxerrs":
+        try:
+            ctx.maxerrs = max(1, int(float(rest.split()[0])))
+        except (ValueError, IndexError):
+            raise ValueError("setmaxerrs needs a number")
+        return [f"# setmaxerrs {ctx.maxerrs}: commands run under catch, errors are counted in ev_errcount"]
+    if word == "clearerrs":
+        return ["ev_errcount = 0"]
+    if word in ("logmode", "logsave", "logclear"):
         raise Ignored(word)
     if word == "pagestruct":
         # pagestruct id @date(t) -> panel: unit and time variables
@@ -2048,6 +2110,10 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         return [f"bundle {name} = ev_table({translate_expr(r or '1', ctx)}, {translate_expr(c or '1', ctx)})"]
     if word == "copy":
         return _copy(cmd_opts, rest, ctx)
+    if word == "valmap":
+        name = translate_name(rest.split()[0], ctx)
+        ctx.valmaps[name] = {}
+        return [f"# valmap {name}"]
     if word == "pool":
         toks = rest.split()
         if len(toks) < 2:
@@ -2144,6 +2210,24 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             if m:
                 extra += f" --coloffset={int(_col_number(m.group(1))) - 1} --rowoffset={int(m.group(2)) - 1}"
         return [f'open "{f}"{extra}', "scalar ev_N = $nobs"]
+    if word == "write":
+        # write(t=csv|txt|xls|dta) file series... -> store; Excel files are written as CSV
+        op = _opts(cmd_opts)
+        toks = re.findall(r'"[^"]*"|\S+', rest)
+        if not toks:
+            raise ValueError("write needs a file name")
+        f = toks[0].strip('"')
+        names = [translate_name(n, ctx) for n in toks[1:]]
+        t = (op.get("t") or op.get("type") or os.path.splitext(f)[1].lstrip(".") or "txt").lower()
+        out = []
+        if t in ("xls", "xlsx", "excel"):
+            f = os.path.splitext(f)[0] + ".csv"
+            out.append(f"# EViews write to Excel: written as CSV ({f})")
+        elif not os.path.splitext(f)[1]:
+            f += {"csv": ".csv", "dta": ".dta", "stata": ".dta"}.get(t, ".txt")
+        flag = " --decimal-comma" if op.get("decsep", "") == "," else ""
+        out.append(f'store "{f}" {" ".join(names)}'.rstrip() + flag)   # format from the extension
+        return out
     if word == "read":
         f = rest.split('"')[1] if rest.startswith('"') else rest.split()[0]
         # EViews read adds series to the current workfile, like gretl append
@@ -2902,6 +2986,10 @@ def _substitute(line: str, params: list[str], args: list[str]) -> str:
     return code + cmt
 
 
+_BLOCK_WORDS = {"loop", "endloop", "if", "elif", "else", "endif", "function", "end", "outfile", "restrict",
+                "system", "mle", "gmm", "nls", "foreign", "plot", "break", "continue", "include", "catch", "set"}
+
+
 def _expand_calls(lines, subs, depth=0):
     out = []
     for lineno, ln in lines:
@@ -2922,7 +3010,10 @@ def _expand_calls(lines, subs, depth=0):
             continue
         out.append((lineno, f"' --- call {m.group(1)}"))
         inner = [(lineno, b if b.strip().startswith("'") else _substitute(b, params, args)) for _, b in body]
-        # return: the body runs inside a one-pass loop and return becomes break
+        # return: the body runs inside a one-pass loop and return becomes break; a return inside
+        # loops sets a flag and each enclosing loop of the subroutine breaks when the flag is set
+        _expand_calls.n = getattr(_expand_calls, "n", 0) + 1
+        k = _expand_calls.n
         has_ret, lev, marked = False, 0, []
         for ln_, b in inner:
             c = _strip_comment(b).strip().lower()
@@ -2932,14 +3023,13 @@ def _expand_calls(lines, subs, depth=0):
             elif w in ("next", "wend"):
                 lev -= 1
             if c == "return":
-                if lev > 0:
-                    b = "__return_in_loop__"
-                else:
-                    b, has_ret = "__return__", True
+                b, has_ret = (f"__return_flag__ {k}" if lev > 0 else "__return__"), True
             marked.append((ln_, b))
+            if w in ("next", "wend") and has_ret:
+                marked.append((ln_, f"__ret_check__ {k}"))
         expanded = _expand_calls(marked, subs, depth + 1)
         if has_ret:
-            expanded = [(lineno, "__sub_begin__")] + expanded + [(lineno, "__sub_end__")]
+            expanded = [(lineno, f"__sub_begin__ {k}")] + expanded + [(lineno, "__sub_end__")]
         out += expanded
         out.append((lineno, f"' --- end of {m.group(1)}"))
     return out
@@ -2955,6 +3045,7 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False, base
     ctx = Ctx(case=case, plot_files=plot_files)
     lines = _expand_includes(_join_continuations(text), base_dir)
     subs, lines = _collect_subs(lines)
+    _expand_calls.n = 0
     lines = _expand_calls(lines, subs)
 
     body, indent, has_wf = [], 0, False
@@ -2971,14 +3062,14 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False, base
             if code.startswith("__call_unknown__"):
                 code = code.split(None, 1)[1]
                 raise ValueError("unknown subroutine or wrong number of arguments")
-            if code.strip() == "__return_in_loop__":
-                code = "return"
-                raise ValueError("return inside a loop of a subroutine: restructure with if/else")
             if re.fullmatch(r"(?i)\s*return\s*", code):
                 raise ValueError("return outside a subroutine")
-            marks = {"__sub_begin__": ["loop 1    # subroutine body (return = break)"],
-                     "__sub_end__": ["endloop"], "__return__": ["break"]}
-            res = marks.get(code.strip()) or translate_line(code, ctx)
+            mk = code.strip().split() or [""]
+            marks = {"__sub_begin__": [f"scalar ev_ret{mk[-1]} = 0", "loop 1    # subroutine body (return = break)"],
+                     "__sub_end__": ["endloop"], "__return__": ["break"],
+                     "__return_flag__": [f"ev_ret{mk[-1]} = 1", "break"],
+                     "__ret_check__": [f"if ev_ret{mk[-1]}", "break", "endif"]}
+            res = marks.get(mk[0] if mk else "") or translate_line(code, ctx)
         except Ignored as e:
             ctx.ignored.append((lineno, stripped))
             body.append("    " * indent + f"# ignored(EViews line {lineno}, {e}): {code.strip()}")
@@ -2987,6 +3078,15 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False, base
             ctx.todos.append((lineno, stripped))
             body.append("    " * indent + f"# TODO(EViews line {lineno}, {e}): {code.strip()}")
             continue
+        if ctx.maxerrs > 1 and res and not any(
+                (r.split() or [""])[0] in _BLOCK_WORDS or r.startswith("#") or r.endswith("\\") for r in res):
+            wrapped = []
+            for r in res:
+                if not r.strip():
+                    continue
+                wrapped += [f"catch {r}", "ev_errcount += $error != 0",
+                            f"if ev_errcount >= {ctx.maxerrs}", f'ev_stop("{ctx.maxerrs} errors: the program stops (setmaxerrs)")', "endif"]
+            res = wrapped
         for r in res:
             if r.startswith("scalar ev_N"):
                 has_wf = True
@@ -3005,6 +3105,14 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False, base
         head.append("scalar ev_N = $nobs    # size of the workfile (EViews @last)")
     if ctx.need_pages:
         head.append("# workfile pages are kept as .gdtb files in gretl's dot directory (ev_pagedir)")
+    if any("ev_errcount" in b for b in body):
+        head.append("scalar ev_errcount = 0    # EViews @errorcount (restarts when data are opened)")
+        nb = []
+        for b in body:
+            nb.append(b)
+            if re.match(r"\s*(catch\s+)?(open|nulldata)\b", b):
+                nb.append(re.match(r"\s*", b).group(0) + "scalar ev_errcount = 0")
+        body = nb
     if ctx.need_dbnomics:
         head.append("include dbnomics.gfn    # online DBnomics database (needs internet access)")
     if ctx.args_used or args:

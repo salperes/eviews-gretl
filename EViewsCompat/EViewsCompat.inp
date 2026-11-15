@@ -8703,6 +8703,89 @@ end function
 # Phase 3 objects: Bayesian VAR, model control, pool, factor, seasonal graph
 # -------------------------------------------------------------------
 
+function series ev_fred (string id "FRED series code, e.g. GDPC1",
+                         string agg[null] "Conversion of higher-frequency data: a (average, default), s (sum), f (first), l (last)")
+    # FRED (St. Louis Fed) public CSV download; observations are matched to the workfile by date and
+    # higher-frequency data are converted to the workfile frequency (EViews fetch default: average)
+    errorif($pd != 1 && $pd != 4 && $pd != 12 && $pd < 5, "FRED: annual, quarterly, monthly or daily workfiles")
+    string how = exists(agg) ? tolower(agg) : "a"
+    string url = sprintf("https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s", toupper(id))
+    # curl() with a plain user agent: FRED's servers reset the HTTP/2 stream for gretl's default one
+    bundle cb = _(URL = url, header = "User-Agent: curl/8.7.1")
+    scalar cerr = curl(&cb)
+    if cerr != 0
+        string why = "no internet access?"
+        if inbundle(cb, "errmsg")
+            why = cb.errmsg
+        endif
+        string em = "FRED: download failed for " ~ id ~ ": " ~ why
+        funcerr em
+    endif
+    string txt = cb.output
+    strings L = strsplit(txt, sprintf("\n"))
+    errorif(nelem(L) < 2 || strstr(L[1], ",") == "", "FRED: unexpected reply for " ~ id)
+    matrix S = zeros($nobs, 1)
+    matrix C = zeros($nobs, 1)
+    matrix F = NA * ones($nobs, 1)
+    matrix La = NA * ones($nobs, 1)
+    loop i = 2..nelem(L)
+        string ln = strstrip(L[i])
+        if strlen(ln) < 12
+            continue
+        endif
+        scalar y = atof(substr(ln, 1, 4))
+        scalar m = atof(substr(ln, 6, 7))
+        string vs = strstrip(substr(ln, 12, strlen(ln)))
+        if vs == "." || vs == ""
+            continue
+        endif
+        scalar v = atof(vs)
+        if $pd == 1
+            string od = sprintf("%d", y)
+        elif $pd == 4
+            string od = sprintf("%d:%d", y, floor((m - 1) / 3) + 1)
+        elif $pd == 12
+            string od = sprintf("%d:%02d", y, m)
+        else
+            string od = substr(ln, 1, 10)
+        endif
+        scalar t = obsnum(od)
+        if !ok(t)
+            continue
+        endif
+        S[t] += v
+        C[t] += 1
+        if !ok(F[t])
+            F[t] = v
+        endif
+        La[t] = v
+    endloop
+    matrix out = how == "s" ? S : (how == "f" ? F : (how == "l" ? La : S ./ C))
+    series cnt = C
+    series x = out
+    x = cnt == 0 ? NA : x
+    string desc = "FRED " ~ toupper(id)
+    setinfo x --description="@desc"
+    return x
+end function
+
+function scalar ev_uiprompt (string msg "Prompt text", string kind[null] "O, OC, YN or YNC")
+    # EViews @uiprompt in a script: print the prompt and answer OK / Yes (1)
+    printf "[prompt] %s -> answered %s (no dialogs in a script)\n", msg, exists(kind) && strstr(toupper(kind), "Y") != "" ? "Yes" : "OK"
+    return 1
+end function
+
+function scalar ev_uiskip (string what[null])
+    # EViews @uiedit, @uilist, @uiradio, @uidialog in a script: keep the current values, return 0 (OK)
+    printf "[dialog %s skipped: current values kept]\n", exists(what) ? what : "ui"
+    return 0
+end function
+
+function void ev_stop (string msg "Message")
+    # stop the program with an error message (translated setmaxerrs)
+    funcerr msg
+end function
+
 function void ev_bvarprint (bundle *b "Result of ev_bvar")
     # Bayesian VAR coefficient table (posterior means, s.d. in parentheses)
     printf "\nBayesian VAR Estimates\n%s\nSample: %s\nIncluded observations: %d\n\n", b.prior, b.sample, rows(b.sys.Y)

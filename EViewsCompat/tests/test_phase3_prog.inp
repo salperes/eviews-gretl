@@ -1,0 +1,36 @@
+# Phase 3 programming helpers: dialogs in scripts, stopping on errors, printers
+# (ev_fred needs internet access and is checked by hand: GDPC1 = usmacro GDP, UNRATE averaged to quarters)
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+# P10: @uiprompt answers OK / Yes, the other dialogs keep values
+check("uiprompt answers 1", ev_uiprompt("Continue?", "YN"), 1)
+check("uiedit etc. return 0 (OK)", ev_uiskip("edit"), 0)
+# P11: ev_stop raises an error that catch sees
+catch ev_stop("stop here")
+check("ev_stop raises an error", $error != 0, 1)
+# printers of Phase 3 objects run on their bundles
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+smpl 1985:1 2015:4
+bundle v = ev_varest("1 2 dc dg", dataset, 1)
+bundle bv = ev_bvar(v, 0, 0.1, 0.99, 1, 1)
+outfile --buffer=t1 --quiet
+    ev_bvarprint(&bv)
+end outfile
+check("BVAR printer", strstr(t1, "Bayesian VAR Estimates") != "", 1)
+bundle fa = ev_factor("dc dg FFR", dataset, 1, "ml", 1)
+outfile --buffer=t2 --quiet
+    ev_factorprint(&fa)
+end outfile
+check("factor printer", strstr(t2, "Communality") != "", 1)

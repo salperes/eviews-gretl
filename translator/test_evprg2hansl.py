@@ -555,7 +555,29 @@ call safe(gdp)
         self.assertIn("loop 1", h)
         self.assertIn("break", h)
         prg2 = "subroutine s2(series x)\nfor !i = 1 to 3\nreturn\nnext\nendsub\ncall s2(gdp)\n"
-        self.assertEqual(len(translate(prg2)[1]), 1)
+        h2, todos2 = translate(prg2)
+        self.assertEqual(todos2, [])
+        self.assertIn("ev_ret1 = 1", h2)         # return inside a loop: flag, then break chain
+        self.assertIn("if ev_ret1", h2)
+
+    def test_errors_and_write(self):
+        h, todos = translate("setmaxerrs 2\nseries y = x + 1\nscalar n = @errorcount\nclearerrs\n")
+        self.assertEqual(todos, [])
+        self.assertIn("catch series y = x + 1", h)
+        self.assertIn("ev_errcount += $error != 0", h)
+        self.assertIn("catch scalar n = ev_errcount", h)
+        self.assertIn("scalar ev_errcount = 0", h)
+        self.assertEqual(tl("write(t=csv) out.csv x y"), ['store "out.csv" x y'])
+        self.assertEqual(tl("write(t=xls) out x")[-1], 'store "out.csv" x')
+        c = Ctx()
+        self.assertEqual(translate_line("fetch(d=fred) gdpc1", c)[0].split("    #")[0], 'series gdpc1 = ev_fred("GDPC1")')
+        self.assertEqual(translate_line("fetch fred::unrate", c)[0].split("    #")[0], 'series unrate = ev_fred("UNRATE")')
+        h, todos = translate('wfcreate u 4\nvalmap vm\nvm.append 1 "a" 2 "b"\nseries g = 1\ng.map vm\n')
+        self.assertIn('strings ev_vlab = defarray("a", "b")', h)
+        self.assertIn("stringify(g, ev_vlab)", h)
+        h, todos = translate('wfcreate u 4\n!r = @uiprompt("Go?", "YN")\n!e = @uiedit(%s, "Name (x)")\n')
+        self.assertIn('scalar r = ev_uiprompt("Go?", "YN")', h)
+        self.assertIn('scalar e = ev_uiskip("edit")', h)
 
     def test_nested_calls(self):
         prg = """subroutine a(series x)
