@@ -1,0 +1,77 @@
+# Phase 1: frequency conversion, string and date functions, table objects
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+# --- W7: monthly -> quarterly against gretl's compaction
+nulldata 48
+setobs 12 2015:01 --time-series
+set seed 3
+series x = 100 + cum(normal())
+matrix S = ev_pagecol(x)
+nulldata 16 --preserve
+setobs 4 2015:1 --time-series
+series xa = ev_freqconv(S, "a")
+series xs = ev_freqconv(S, "s")
+series xl = ev_freqconv(S, "l")
+check("monthly -> quarterly average, 2015Q1", xa[1], meanc(S[1:3, 2]))
+check("monthly -> quarterly sum, 2016Q3", xs[7], sumc(S[19:21, 2]))
+check("monthly -> quarterly last, 2018Q4", xl[16], S[48, 2])
+# --- quarterly -> monthly: constant, divide, linear
+matrix Q = ev_pagecol(xa)
+nulldata 48 --preserve
+setobs 12 2015:01 --time-series
+series mr = ev_freqconv(Q, "r")
+series md = ev_freqconv(Q, "d")
+series mi = ev_freqconv(Q, "i")
+check("quarterly -> monthly constant", mr[2], Q[1, 2])
+check("quarterly -> monthly divide keeps the quarterly sum", md[4] + md[5] + md[6], Q[2, 2])
+check("quarterly -> monthly linear matches the last month", mi[6], Q[2, 2])
+check("linear interpolation in between", mi[4], Q[1, 2] + (Q[2, 2] - Q[1, 2]) / 3)
+# against gretl's own compaction
+nulldata 48
+setobs 12 2015:01 --time-series
+series y = 100 + cum(normal())
+matrix S2 = ev_pagecol(y)
+dataset compact 4 avg
+series yc = ev_freqconv(S2, "a")
+check("average = gretl dataset compact avg", yc[9], y[9])
+
+# --- F5 string functions
+string s = "gross domestic product"
+check("@left", ev_left(s, 5) == "gross", 1)
+check("@right", ev_right(s, 7) == "product", 1)
+check("@mid", ev_mid(s, 7, 8) == "domestic", 1)
+check("@mid to the end", ev_mid(s, 16) == "product", 1)
+check("@instr", ev_instr(s, "o"), 3)
+check("@instr second occurrence", ev_instr(s, "o", 2), 8)
+check("@instr not found", ev_instr(s, "z"), 0)
+check("@word", ev_word(s, 2) == "domestic", 1)
+check("@word out of range", ev_word(s, 9) == "", 1)
+# --- F6 dates
+check("@dateval 2000-01-01 = EViews date number 730119", ev_dateval("2000-01-01"), 730119)
+check("@dateval with MM/DD/YYYY", ev_dateval("03/15/2021", "MM/DD/YYYY") - ev_dateval("2021-03-01"), 14)
+check("@datestr round trip", ev_datestr(ev_dateval("2019-12-31")) == "2019-12-31", 1)
+nulldata 8
+setobs 4 2020:1 --time-series
+series dn = ev_date()
+check("@date of 2020Q2 = date number of 2020-04-01", dn[2], ev_dateval("2020-04-01"))
+# --- O3 tables
+bundle t = ev_table(2, 2)
+ev_tset(&t, 1, 1, "Variable")
+ev_tsetnum(&t, 2, 2, 3.25)
+ev_tset(&t, 4, 3, "grown")
+check("table grows when a cell outside is set", t.rows * 10 + t.cols, 43)
+check("table cell kept after growing", ev_tget(t, 2, 2) == "3.25", 1)
+ev_twidth(&t, 1, 12)
+ev_tprint(t)
+string csv = ev_ttext(t, "csv")
+check("csv text has 4 lines", nelem(strsplit(csv, "\n")), 4)

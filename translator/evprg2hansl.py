@@ -72,6 +72,9 @@ class Ctx:
     models: dict = field(default_factory=dict)      # model -> {"eqs": [...], "ids": [...]}
     var_endo: dict = field(default_factory=dict)    # VAR name -> series names of its variables
     panel: tuple | None = None                      # (unit id, time) after pagestruct
+    tables: set = field(default_factory=set)        # table objects (EViewsCompat bundles)
+    page_panel: dict = field(default_factory=dict)  # page -> (unit id, time) of panel pages
+    args_used: set = field(default_factory=set)     # program arguments %0 %1 ...
 
 
 def safe_name(name: str, prefix: str) -> str:
@@ -115,6 +118,11 @@ KEYWORD_MAP = [
     (r"@month", "$obsminor"),
     (r"@first", "1"),
     (r"@last", "ev_N"),
+    (r"@rnorm(?!\s*\()", "normal()"),
+    (r"@runif(?!\s*\()", "uniform()"),
+    (r"@date(?!\w|\s*\()", "ev_date()"),
+    (r"@day", "$obsmicro"),
+    (r"@weekday", "((weekday($obsmajor, $obsminor, $obsmicro) + 6) % 7 + 1)"),
     (r"nrnd(?!\s*\()", "normal()"),
     (r"rnd(?!\s*\()", "uniform()"),
     (r"na\b", "NA"),
@@ -137,6 +145,12 @@ MATRIX_FUNCS = [
     ("@cholesky", "cholesky"), ("@eigenvalues", "eigensym"), ("@trace", "tr"),
     ("@rank", "rank"), ("@vec", "vec"), ("@rows", "rows"), ("@columns", "cols"),
     ("@getmaindiagonal", "diag"),
+    # strings and dates (EViewsCompat helpers)
+    ("@left", "ev_left"), ("@right", "ev_right"), ("@mid", "ev_mid"), ("@instr", "ev_instr"),
+    ("@word", "ev_word"), ("@len", "strlen"), ("@length", "strlen"), ("@upper", "toupper"),
+    ("@lower", "tolower"), ("@trim", "strstrip"), ("@ltrim", "strstrip"), ("@rtrim", "strstrip"),
+    ("@replace", "strsub"), ("@val", "atof"), ("@dateval", "ev_dateval"), ("@datestr", "ev_datestr"),
+    ("@isna", "missing"),
 ]
 _MFUNC_RES = [(re.compile(re.escape(a) + r"\s*\(", re.IGNORECASE), b + "(") for a, b in MATRIX_FUNCS]
 
@@ -174,8 +188,24 @@ def _matrix_funcs(p: str) -> str:
         "@rowextract": lambda a: f"{a[0]}[{a[1]},]",
         "@subextract": lambda a: f"{a[0]}[{a[1]}:{a[3] if len(a) > 3 else 'rows(' + a[0] + ')'},"
                                  f"{a[2]}:{a[4] if len(a) > 4 else 'cols(' + a[0] + ')'}]",
+        # distributions: EViews (x, parameters) -> hansl (distribution, parameters, x)
+        "@ctdist": lambda a: f"cdf(t, {a[1]}, {a[0]})", "@dtdist": lambda a: f"pdf(t, {a[1]}, {a[0]})",
+        "@qtdist": lambda a: f"invcdf(t, {a[1]}, {a[0]})",
+        "@cchisq": lambda a: f"cdf(X, {a[1]}, {a[0]})", "@dchisq": lambda a: f"pdf(X, {a[1]}, {a[0]})",
+        "@qchisq": lambda a: f"invcdf(X, {a[1]}, {a[0]})",
+        "@cfdist": lambda a: f"cdf(F, {a[1]}, {a[2]}, {a[0]})", "@dfdist": lambda a: f"pdf(F, {a[1]}, {a[2]}, {a[0]})",
+        "@qfdist": lambda a: f"invcdf(F, {a[1]}, {a[2]}, {a[0]})",
+        "@rnorm": lambda a: "normal()", "@runif": lambda a: f"uniform({a[0]}, {a[1]})" if len(a) > 1 else "uniform()",
+        "@rchisq": lambda a: f"randgen(X, {a[0]})", "@rtdist": lambda a: f"randgen(t, {a[0]})",
+        # logical helpers
+        "@recode": lambda a: f"(({a[0]}) ? ({a[1]}) : ({a[2]}))", "@iif": lambda a: f"(({a[0]}) ? ({a[1]}) : ({a[2]}))",
+        "@nan": lambda a: f"(ok({a[0]}) ? ({a[0]}) : ({a[1]}))",
+        "@inlist": lambda a: _inlist(a[0], a[1]),
+        "@str": lambda a: f'sprintf("%g", {a[0]})', "@wcount": lambda a: f"nelem(strsplit({a[0]}))",
     }
-    rx = re.compile(r"(@kronecker|@emult|@ediv|@convert|@columnextract|@rowextract|@subextract)\s*(?=\()", re.IGNORECASE)
+    rx = re.compile(r"(@kronecker|@emult|@ediv|@convert|@columnextract|@rowextract|@subextract|@ctdist|@dtdist|@qtdist"
+                    r"|@cchisq|@dchisq|@qchisq|@cfdist|@dfdist|@qfdist|@rnorm|@runif|@rchisq|@rtdist|@recode|@iif"
+                    r"|@nan|@inlist|@str|@wcount)\s*(?=\()", re.IGNORECASE)
     while True:
         m = rx.search(p)
         if not m:
@@ -183,6 +213,32 @@ def _matrix_funcs(p: str) -> str:
         args, end = _call_args(p, m.end())
         args = [_matrix_funcs(a) for a in args]
         p = p[:m.start()] + forms[m.group(1).lower()](args) + p[end:]
+
+
+def _inlist(x: str, lst: str) -> str:
+    """@inlist(x, "a b c") -> (x == a || x == b || x == c); strings are compared as strings."""
+    items = lst.strip().strip('"').split()
+    if not items:
+        return "0"
+    num = all(re.fullmatch(r"[-+]?\d+(\.\d*)?", i) for i in items)
+    return "(" + " || ".join(f"{x} == {i}" if num else f'{x} == "{i}"' for i in items) + ")"
+
+
+def _string_plus(e: str) -> str:
+    """EViews joins strings with +: hansl uses ~ (only + at parenthesis depth 0, outside literals)."""
+    out, depth, inq = [], 0, False
+    for ch in e:
+        if ch == '"':
+            inq = not inq
+        elif not inq:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "+" and depth == 0:
+                ch = "~"
+        out.append(ch)
+    return "".join(out)
 
 
 def _split_strings(s: str):
@@ -200,13 +256,22 @@ def program_vars(p: str, ctx: Ctx) -> str:
     """
     def braced_str(m):
         v = m.group(1)
+        if v.isdigit():
+            ctx.args_used.add(int(v))
+            return f"@ev_arg{v}"
         return f"${v}" if v in ctx.foreach_vars else f"@{safe_name(v, 's_')}"
+
+    def plain_str(m):
+        v = m.group(1)
+        if v.isdigit():
+            ctx.args_used.add(int(v))
+            return f"ev_arg{v}"
+        return v if v in ctx.foreach_vars else safe_name(v, "s_")
     p = re.sub(r"\{!(\w+)\}", lambda m: f"${safe_name(m.group(1), 'v_')}", p)
     p = re.sub(r"\{%(\w+)\}", braced_str, p)
     p = re.sub(r"(?<=[A-Za-z0-9_])!(\w+)", lambda m: f"${safe_name(m.group(1), 'v_')}", p)
     p = re.sub(r"!(\w+)", lambda m: safe_name(m.group(1), "v_"), p)
-    p = re.sub(r"%(\w+)", lambda m: m.group(1) if m.group(1) in ctx.foreach_vars
-               else safe_name(m.group(1), "s_"), p)
+    p = re.sub(r"%(\w+)", plain_str, p)
     return p
 
 
@@ -251,12 +316,13 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
             p = re.sub(r"([\w.$\[\]]+)\s*!=\s*NA\b", r"!missing(\1)", p)
         if ctx.case != "keep":
             p = case_names(p, ctx)
-        # matrix functions last: their hansl names (inv, I, ...) must not be re-cased
-        p = _matrix_funcs(p)
-        for rx, dst in _MFUNC_RES:
-            p = rx.sub(dst, p)
         out.append(p)
-    return "".join(out)
+    # matrix/string/distribution functions last (their hansl names must not be re-cased);
+    # on the whole expression, since their arguments may be string literals
+    p = _matrix_funcs("".join(out))
+    for rx, dst in _MFUNC_RES:
+        p = rx.sub(dst, p)
+    return p
 
 
 _KEEP_CASE = {"NA", "obs", "const", "ev_N", "z"}
@@ -1010,6 +1076,8 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if not a or not b:
             raise ValueError("svar: give rtype=patsr, namea=A, nameb=B (pattern matrices) or lr")
         return [f"ev_svar(&{o}, {translate_name(a, ctx)}, {translate_name(b, ctx)})"]
+    if o in ctx.tables:
+        return _table_method(o, ml, opts, args, ctx)
     if o in ctx.texts and ml == "append":
         ctx.texts[o].append(args.strip())
         return [f"# text {o}: {args.strip()}"]
@@ -1276,12 +1344,14 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
                 raise ValueError("pagecreate needs frequency, start and end")
             ctx.pages.add(new)
             ctx.page = new
+            ctx.panel = None
             return save_cur + body + ["scalar ev_N = $nobs"]
         if word == "pageselect":
             new = rest.split()[0]
             if new not in ctx.pages:
                 raise ValueError(f"unknown page {new}")
             ctx.page = new
+            ctx.panel = ctx.page_panel.get(new)
             relist = [f"list {g} = {' '.join(m)}" for g, m in ctx.groups.items()
                       if ctx.group_page.get(g) == new]
             return save_cur + [f'open "@ev_pagedir/{new}.gdtb" --quiet --preserve', "scalar ev_N = $nobs"] + relist
@@ -1305,6 +1375,7 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             raise ValueError("pagestruct: use pagestruct id @date(timevar)")
         uid, tv = translate_name(m.group(1), ctx), translate_name(m.group(2), ctx)
         ctx.panel = (uid, tv)
+        ctx.page_panel[ctx.page] = ctx.panel
         return [f"setobs {uid} {tv} --panel-vars", "scalar ev_N = $nobs"]
     if word == "pageunstack":
         return _pageunstack(cmd_opts, rest, ctx)
@@ -1344,6 +1415,16 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         if dst in ctx.groups:
             return [f"series {g} = {src}[,{j}]" for j, g in enumerate(ctx.groups[dst], 1)]
         return [f"series {dst} = {src}"]
+    if word == "table":
+        m = re.fullmatch(r"(?i)table\s*(?:\(\s*([^,()]+?)\s*,\s*([^()]+?)\s*\))?\s+(\w+)", s)
+        if not m:
+            raise ValueError("table: use table(rows, cols) name")
+        r, c, name = m.groups()
+        name = translate_name(name, ctx)
+        ctx.tables.add(name)
+        return [f"bundle {name} = ev_table({translate_expr(r or '1', ctx)}, {translate_expr(c or '1', ctx)})"]
+    if word == "copy":
+        return _copy(cmd_opts, rest, ctx)
     if word == "text":
         name = translate_name(rest.split()[0], ctx)
         ctx.texts[name] = []
@@ -1370,6 +1451,8 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             ctx.equations[translate_name(name, ctx)] = "var"
             return [f"# VAR {name} declared (estimated later)"]
         return _var_call(name, opts, spec, ctx)
+    if word == "exitloop":
+        return ["break"]
     if word in ("stop", "exit"):
         return ["quit"]
     if word in ("wfopen", "load", "import"):
@@ -1465,6 +1548,9 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         for n in rest.split():
             pv = program_vars(n.strip(), ctx)
             n = pv if pv in ctx.scalars or pv in ctx.strings else translate_name(n, ctx)
+            if n in ctx.tables:
+                res.append(f"ev_tprint({n})")
+                continue
             if n in ctx.equations or n in ctx.graphs:
                 continue        # already printed / drawn when created
             else:
@@ -1528,6 +1614,11 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
     m = re.fullmatch(r"([!%]?)([\w{}!%$]+)\s*(?:\(([^()]+)\))?\s*=\s*(.+)", s)
     if m:
         sigil, name, elem, expr = m.groups()
+        if elem is not None and translate_name(name, ctx) in ctx.tables:
+            ij = [translate_expr(x, ctx) for x in _call_args("(" + elem + ")", 0)[0]]
+            if len(ij) != 2:
+                raise ValueError("table cells need two indices: t(i, j)")
+            return [_table_set(translate_name(name, ctx), ij[0], ij[1], expr, ctx)]
         if elem is not None and translate_name(name, ctx) in ctx.matrices:
             v = "NA" if expr.strip().lower() == "na" else translate_expr(expr, ctx)
             return [f"{translate_name(name, ctx)}[{translate_expr(elem, ctx)}] = {v}"]
@@ -1546,7 +1637,7 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         if sigil == "%":
             v = safe_name(name, "s_")
             ctx.strings.add(v)
-            return [f"string {v} = {translate_expr(expr, ctx)}"]
+            return [f"string {v} = {_string_plus(translate_expr(expr, ctx))}"]
         if name in ctx.scalars:
             return [f"{name} = {translate_expr(expr, ctx)}"]
         if translate_name(name, ctx) in ctx.matrices:
@@ -1593,6 +1684,117 @@ def _pageunstack(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
     return out + ["scalar ev_N = $nobs"]
 
 
+def _is_string_expr(expr: str, ctx: Ctx) -> bool:
+    e = expr.strip()
+    return '"' in e or e.startswith("%") or bool(re.match(
+        r"(?i)@(left|right|mid|word|str|upper|lower|trim|ltrim|rtrim|replace|datestr)\s*\(", e))
+
+
+def _table_set(t: str, i: str, j: str, expr: str, ctx: Ctx) -> str:
+    if _is_string_expr(expr, ctx):
+        return f"ev_tset(&{t}, {i}, {j}, {_string_plus(translate_expr(expr, ctx))})"
+    return f"ev_tsetnum(&{t}, {i}, {j}, {translate_expr(expr, ctx)})"
+
+
+def _col_number(c: str) -> str:
+    c = c.strip()
+    if re.fullmatch(r"[A-Za-z]{1,2}", c):
+        n = 0
+        for ch in c.upper():
+            n = n * 26 + ord(ch) - 64
+        return str(n)
+    return c
+
+
+def _table_method(t: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> list[str]:
+    if ml == "setcell":
+        a = _call_args("(" + (opts or "") + ")", 0)[0] if opts else [x.strip() for x in args.split(",")]
+        if len(a) < 3:
+            raise ValueError("setcell needs row, column and value")
+        return [_table_set(t, translate_expr(a[0], ctx), _col_number(a[1]), a[2], ctx)]
+    if ml == "setwidth":
+        cols = (opts or "").strip()
+        w = args.strip() or "10"
+        if ":" in cols:
+            a, b = cols.split(":", 1)
+            return [f"ev_twidth(&{t}, {k}, {w})" for k in range(int(_col_number(a)), int(_col_number(b)) + 1)]
+        return [f"ev_twidth(&{t}, {_col_number(cols or '1')}, {w})"]
+    if ml == "save":
+        fmt = _opts(opts).get("t", "csv").lower()
+        fmt = {"txt": "txt", "text": "txt", "csv": "csv", "html": "html"}.get(fmt)
+        if not fmt:
+            raise ValueError("table save: t=csv, txt or html (rtf/pdf are not supported)")
+        f = args.strip().strip('"') or t
+        if not re.search(r"\.\w+$", f):
+            f += "." + fmt
+        return [f'ev_tsave({t}, "{f}", "{fmt}")']
+    if ml in ("display", "show", "output", "print"):
+        return [f"ev_tprint({t})"]
+    if ml in ("setjust", "setformat", "setlines", "setfont", "setfillcolor", "settextcolor", "title", "setmerge",
+              "setindent", "deleterow", "deletecol", "insertrow", "insertcol"):
+        raise Ignored("table formatting")
+    raise ValueError(f"table method .{ml} not supported")
+
+
+_COPY_METHODS = {"a": "a", "s": "s", "f": "f", "l": "l", "x": "x", "n": "n", "r": "r", "d": "d", "i": "i"}
+
+
+def _copy(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
+    """copy [(c=method)] [page\\]src [[page\\]dest]: objects, and series between pages with frequency conversion."""
+    toks = rest.split()
+    if not toks or len(toks) > 2:
+        raise ValueError("copy: give a source and (optionally) a destination")
+    if any("*" in t or "?" in t for t in toks):
+        raise ValueError("copy with wildcards is not supported")
+
+    def split(t):
+        if "\\" in t:
+            pg, nm = t.split("\\", 1)
+            return pg, nm
+        return None, t
+    sp, sn = split(toks[0])
+    dp, dn = split(toks[1]) if len(toks) > 1 else (None, sn)
+    sp = sp if sp else ctx.page
+    dp = dp if dp else ctx.page
+    sn, dn = translate_name(sn, ctx), translate_name(dn, ctx)
+    op = _opts(cmd_opts)
+    meth = op.get("c", "").lower()[:1]
+    if meth and meth not in _COPY_METHODS:
+        raise ValueError(f"copy(c={op.get('c')}): quadratic/cubic conversions are not supported (use a, s, f, l, x, n, r, d, i)")
+    if sp == ctx.page and dp == ctx.page:
+        # objects within the page
+        if sn in ctx.equations:
+            ctx.equations[dn] = ctx.equations[sn]
+            return [f"bundle {dn} = {sn}"]
+        if sn in ctx.matrices:
+            ctx.matrices[dn] = ctx.matrices[sn]
+            return [f"matrix {dn} = {sn}"]
+        if sn in ctx.tables:
+            ctx.tables.add(dn)
+            return [f"bundle {dn} = {sn}"]
+        if sn in ctx.groups:
+            ctx.groups[dn] = list(ctx.groups[sn])
+            ctx.group_page[dn] = ctx.page
+            return [f"list {dn} = {sn}"]
+        return [f"series {dn} = {sn}"]
+    for pg in (sp, dp):
+        if pg not in ctx.pages:
+            raise ValueError(f"unknown page {pg}")
+    ctx.need_pages = True
+    marg = f', "{meth}"' if meth else ""
+    out = ["string ev_pagedir = $dotdir", "scalar ev_s1 = $t1", "scalar ev_s2 = $t2", "smpl full",
+           f'store "@ev_pagedir/{ctx.page}.gdtb"']
+    if sp != ctx.page:
+        out.append(f'open "@ev_pagedir/{sp}.gdtb" --quiet --preserve')
+    out.append(f"matrix ev_cv = ev_pagecol({sn})")
+    out += [f'open "@ev_pagedir/{dp}.gdtb" --quiet --preserve', f"series {dn} = ev_freqconv(ev_cv{marg})"]
+    if dp != ctx.page:
+        out += [f'store "@ev_pagedir/{dp}.gdtb"', f'open "@ev_pagedir/{ctx.page}.gdtb" --quiet --preserve']
+    out += [f"list {g} = {' '.join(m)}" for g, m in ctx.groups.items() if ctx.group_page.get(g) == ctx.page]
+    out += ["smpl ev_s1 ev_s2", "scalar ev_N = $nobs"]
+    return out
+
+
 def _pagestack(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
     """pagestack(page=name) x_? y? -> a panel page with one stacked series per pattern."""
     op = {}
@@ -1608,8 +1810,8 @@ def _pagestack(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
     ctx.need_pages = True
     out = ["smpl full", f'strings ev_sid = ev_stackids("{pats[0]}", dataset)']
     for k, p in enumerate(pats, 1):
-        out.append(f'matrix ev_s{k} = ev_stack("{p}", dataset, ev_sid)')
-    out += ["scalar ev_T = rows(ev_s1)", "scalar ev_NS = nelem(ev_sid)", "matrix ev_idv = seq(1, ev_NS)'",
+        out.append(f'matrix ev_stk{k} = ev_stack("{p}", dataset, ev_sid)')
+    out += ["scalar ev_T = rows(ev_stk1)", "scalar ev_NS = nelem(ev_sid)", "matrix ev_idv = seq(1, ev_NS)'",
             "loop ev_j = 1..ev_NS",
             "scalar ev_v = atof(ev_sid[ev_j])",
             "if ok(ev_v)",
@@ -1621,11 +1823,12 @@ def _pagestack(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
             "series crossid = vec(ones(ev_T, 1) * ev_idv')",
             "series period = vec(seq(1, ev_T)' * ones(1, ev_NS))"]
     for k, p in enumerate(pats, 1):
-        out.append(f"series {p.replace('?', '')} = vec(ev_s{k})")
+        out.append(f"series {p.replace('?', '')} = vec(ev_stk{k})")
     out += ["setobs crossid period --panel-vars", "scalar ev_N = $nobs"]
     ctx.pages.add(new)
     ctx.page = new
     ctx.panel = ("crossid", "period")
+    ctx.page_panel[new] = ctx.panel
     return out
 
 
@@ -1651,10 +1854,16 @@ def _expand_includes(lines, base_dir, depth=0):
     out = []
     for lineno, ln in lines:
         m = re.fullmatch(r'(?i)\s*include\s+"?([^"\']+?)"?\s*(\'.*)?', ln)
+        pargs = []
         if not m:
-            out.append((lineno, ln))
-            continue
-        f = m.group(1).strip()
+            m2 = re.fullmatch(r'(?i)\s*(?:run|exec)(?:\([^)]*\))?\s+("[^"]+"|\S+)(.*)', _strip_comment(ln))
+            if m2:
+                pargs = m2.group(2).split()
+                m = m2
+            else:
+                out.append((lineno, ln))
+                continue
+        f = m.group(1).strip().strip('"')
         if not re.search(r"\.\w+$", f):
             f += ".prg"
         path = os.path.join(base_dir or ".", *re.split(r"[\\/]", f))
@@ -1663,6 +1872,13 @@ def _expand_includes(lines, base_dir, depth=0):
             continue
         with open(path, encoding="utf-8", errors="replace") as fh:
             sub = _join_continuations(fh.read(), os.path.basename(path))
+        if pargs:
+            # program arguments are text: substitute them into the called program
+            def put(line):
+                for k in range(len(pargs) - 1, -1, -1):
+                    line = line.replace("{%" + str(k) + "}", pargs[k]).replace("%" + str(k), pargs[k])
+                return line
+            sub = [(n, put(t)) for n, t in sub]
         out.append((lineno, f"' --- include {f}"))
         out += _expand_includes(sub, os.path.dirname(path), depth + 1)
         out.append((lineno, f"' --- end of include {f}"))
@@ -1761,7 +1977,8 @@ def translate(text: str, case: str = "keep") -> tuple[str, list[tuple[int, str]]
     return hansl, todos
 
 
-def translate_full(text: str, case: str = "keep", plot_files: bool = False, base_dir: str | None = None):
+def translate_full(text: str, case: str = "keep", plot_files: bool = False, base_dir: str | None = None,
+                   args: list | None = None):
     ctx = Ctx(case=case, plot_files=plot_files)
     lines = _expand_includes(_join_continuations(text), base_dir)
     subs, lines = _collect_subs(lines)
@@ -1815,6 +2032,11 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False, base
         head.append("scalar ev_N = $nobs    # size of the workfile (EViews @last)")
     if ctx.need_pages:
         head.append("# workfile pages are kept as .gdtb files in gretl's dot directory (ev_pagedir)")
+    if ctx.args_used or args:
+        head.append("# program arguments (EViews %0, %1, ...)")
+        for k in range(max(list(ctx.args_used) + [len(args or []) - 1]) + 1):
+            v = (args or [])[k] if k < len(args or []) else ""
+            head.append(f'string ev_arg{k} = "{v}"')
     return "\n".join(head + [""] + body) + "\n", ctx.todos, ctx.ignored
 
 
@@ -1824,12 +2046,15 @@ def main(argv=None) -> int:
     ap.add_argument("-o", "--output", help="output .inp (default: same name)")
     ap.add_argument("--case", choices=["keep", "upper", "lower"], default="keep",
                     help="change series-name case (hansl is case-sensitive)")
+    ap.add_argument("--args", nargs="*", default=[],
+                    help="program arguments: the values of %%0, %%1, ...")
     ap.add_argument("--plot-files", action="store_true",
                     help="write graphs to plotNN.png instead of showing them (for gretlcli)")
     a = ap.parse_args(argv)
     with open(a.prg, encoding="utf-8", errors="replace") as f:
         text = f.read()
-    hansl, todos, ignored = translate_full(text, a.case, a.plot_files, os.path.dirname(os.path.abspath(a.prg)))
+    hansl, todos, ignored = translate_full(text, a.case, a.plot_files, os.path.dirname(os.path.abspath(a.prg)),
+                                           a.args)
     outp = a.output or re.sub(r"\.prg$", "", a.prg, flags=re.IGNORECASE) + ".inp"
     with open(outp, "w", encoding="utf-8") as f:
         f.write(hansl)

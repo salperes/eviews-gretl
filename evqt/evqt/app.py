@@ -266,9 +266,10 @@ class SeriesWindow(ObjectWindow):
                       ("-", None),
                       ("Descriptive Statistics", lambda: self.run_text(f"summary {name}\nnormtest {name} --jbera")),
                       ("Correlogram...", self.correlogram),
-                      ("Unit Root Test (ADF)...", self.adf)]),
+                      ("Unit Root Test...", self.adf)]),
             ("Proc", [("Generate by Equation...", lambda: main.genr_dialog(f"{name} = ")),
-                      ("Hodrick-Prescott Filter...", self.hpf)]),
+                      ("Hodrick-Prescott Filter...", self.hpf),
+                      ("Seasonal Adjustment: Moving Average...", self.seas)]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
             ("Name", lambda: main.rename_object(name)),
@@ -300,9 +301,36 @@ class SeriesWindow(ObjectWindow):
             self.run_text(f"corrgm {self.name} {k} --quiet\ncorrgm {self.name} {k}")
 
     def adf(self):
-        k, ok = QInputDialog.getInt(self, "Unit Root Test", "Maximum lags (AIC selection):", 8, 0, 60)
+        """EViews Unit Root Test dialog: ADF, Phillips-Perron or KPSS."""
+        test, level, det, lags = QComboBox(), QComboBox(), QComboBox(), QSpinBox()
+        test.addItems(["Augmented Dickey-Fuller", "Phillips-Perron", "Kwiatkowski-Phillips-Schmidt-Shin"])
+        level.addItems(["Level", "1st difference"])
+        det.addItems(["Intercept", "Trend and intercept", "None"])
+        lags.setRange(0, 60)
+        lags.setValue(8)
+        d = _form_dialog(self, "Unit Root Test", [("Test type:", test), ("Test for unit root in:", level),
+                                                   ("Include in test equation:", det),
+                                                   ("Maximum lags (ADF, AIC):", lags)])
+        if not d:
+            return
+        x, dif = self.name, level.currentIndex() == 1
+        if test.currentIndex() == 0:
+            opt = ["--c", "--ct", "--nc"][det.currentIndex()]
+            self.run_text(f"adf {lags.value()} {x} {opt} --test-down=AIC" + (" --difference" if dif else ""))
+        elif test.currentIndex() == 1:
+            dd = ["c", "ct", "nc"][det.currentIndex()]
+            self.run_text(f'bundle ev_ur = ev_pp("{x}", dataset, "{dd}", -1, {int(dif)})')
+        else:
+            src = f"diff({x})" if dif else x
+            self.run_text(f"series ev_kx = {src}\nscalar ev_kl = int(4 * ($nobs / 100)^0.25)\n"
+                          f"kpss ev_kl ev_kx" + (" --trend" if det.currentIndex() == 1 else ""))
+
+    def seas(self):
+        kind, ok = QInputDialog.getItem(self, "Seasonal Adjustment", "Moving average method:",
+                                        ["Ratio to moving average - Multiplicative", "Difference from moving average - Additive"], 0, False)
         if ok:
-            self.run_text(f"adf {k} {self.name} --c --test-down=AIC")
+            k = "m" if kind.startswith("Ratio") else "a"
+            self.main.execute(f"{self.name}.seas({k}) {self.name}_sa {self.name}_sf")
 
     def hpf(self):
         lam, ok = QInputDialog.getDouble(self, "Hodrick-Prescott Filter", "Lambda (0 = default for frequency):", 0, 0, 1e9, 2)
@@ -321,7 +349,9 @@ class GroupWindow(ObjectWindow):
                       ("Graph: Scatter", self.scatter),
                       ("-", None),
                       ("Descriptive Stats", lambda: self.run_text(f"summary {name}")),
-                      ("Covariance / Correlation", lambda: self.run_text(f"corr {name}"))]),
+                      ("Covariance / Correlation", lambda: self.run_text(f"corr {name}")),
+                      ("Cointegration Test: Engle-Granger", lambda: self.coint("eg")),
+                      ("Cointegration Test: Phillips-Ouliaris", lambda: self.coint("po"))]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
             ("Name", lambda: main.rename_object(name)),
@@ -330,6 +360,9 @@ class GroupWindow(ObjectWindow):
             ("Sample", main.sample_dialog),
         ]))
         self.spreadsheet()
+
+    def coint(self, method):
+        self.run_text(f'bundle ev_cg = ev_cointeg("{" ".join(self.members())}", dataset, "{method}")')
 
     def members(self) -> list[str]:
         out = self.main.engine.run(f'printf "%s\\n", varname({self.name})')
@@ -357,6 +390,22 @@ class EquationWindow(ObjectWindow):
         except GretlError:
             self.kind = "ls"
         self.garch = self.kind == "garch"
+        if self.kind in ("tsls", "binary", "ardl"):
+            views = [("Estimation Output", self.output)]
+            if self.kind == "ardl":
+                views.append(("Cointegration and Long Run Form: Bounds Test", lambda: self.run_text(f"ev_boundsprint(&{name})")))
+            self.set_toolbar(_toolbar([
+                ("View", views),
+                ("Proc", [("Make Residual Series...", lambda: self.make("resid")),
+                          ("Make Fitted Series...", lambda: self.make("fit"))]),
+                ("Object", [("Delete", lambda: main.delete_object(name))]),
+                ("|", None),
+                ("Name", lambda: main.rename_object(name)),
+                ("Freeze", self.freeze),
+                ("Stats", self.output),
+            ]))
+            self.output()
+            return
         if self.kind == "panel":
             self.set_toolbar(_toolbar([
                 ("View", [("Estimation Output", self.output),
@@ -391,7 +440,14 @@ class EquationWindow(ObjectWindow):
             ("View", [("Estimation Output", self.output),
                       ("Actual, Fitted, Residual Graph", self.afr),
                       ("Residual Diagnostics", self.diag),
-                      ("Coefficient Diagnostics: Wald Test...", self.wald)]),
+                      ("Residual Diagnostics: Heteroskedasticity Tests...", self.hettest),
+                      ("Coefficient Diagnostics: Wald Test...", self.wald),
+                      ("Coefficient Diagnostics: Omitted Variables Test...", lambda: self.addrop("add")),
+                      ("Coefficient Diagnostics: Redundant Variables Test...", lambda: self.addrop("drop")),
+                      ("Stability Diagnostics: Chow Breakpoint Test...", lambda: self.chow(0)),
+                      ("Stability Diagnostics: Chow Forecast Test...", lambda: self.chow(1)),
+                      ("Stability Diagnostics: Ramsey RESET Test...", self.reset),
+                      ("Stability Diagnostics: Recursive Estimates (CUSUM)...", self.rls)]),
             ("Proc", [("Make Residual Series...", lambda: self.make("resid")),
                       ("Make Fitted Series...", lambda: self.make("fit"))]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
@@ -437,6 +493,52 @@ class EquationWindow(ObjectWindow):
                 return
             fn = "ev_resid" if kind == "resid" else "ev_fit"
             self.main.execute(f"series {n.strip()} = {fn}({self.name})", hansl=True)
+
+    def hettest(self):
+        ty, ok = QInputDialog.getItem(self, "Heteroskedasticity Tests", "Test type:",
+                                      ["Breusch-Pagan-Godfrey", "Harvey", "Glejser", "ARCH", "White"], 0, False)
+        if not ok:
+            return
+        key = {"Breusch-Pagan-Godfrey": "bpg", "Harvey": "harvey", "Glejser": "glejser", "ARCH": "arch", "White": "white"}[ty]
+        lags = 1
+        if key == "arch":
+            lags, ok = QInputDialog.getInt(self, "ARCH LM Test", "Number of lags:", 1, 1, 48)
+            if not ok:
+                return
+        self.run_text(f'bundle ev_h = ev_hettest({self.name}, "{key}", {lags})')
+
+    def addrop(self, which):
+        title = "Omitted Variables Test" if which == "add" else "Redundant Variables Test"
+        v, ok = QInputDialog.getText(self, title, "Variables, separated by spaces:")
+        if ok and v.strip():
+            v = self.main.fix_case(v.strip())
+            fn = f'ev_testadd({self.name}, dataset, "{v}")' if which == "add" else f'ev_testdrop({self.name}, "{v}")'
+            self.run_text(f"bundle ev_t = {fn}")
+
+    def chow(self, forecast):
+        v, ok = QInputDialog.getText(self, "Chow Tests", "Breakpoint date(s), e.g. 1990q1:"
+                                     if not forecast else "First forecast date, e.g. 2015q1:")
+        if ok and v.strip():
+            dates = " ".join(tr.translate_date(d) or d for d in v.split())
+            self.run_text(f'bundle ev_c = ev_chow({self.name}, "{dates}", {forecast})')
+
+    def reset(self):
+        n, ok = QInputDialog.getInt(self, "Ramsey RESET Test", "Number of fitted terms:", 1, 1, 4)
+        if ok:
+            self.run_text(f"bundle ev_rst = ev_reset({self.name}, {n})")
+
+    def rls(self):
+        what, ok = QInputDialog.getItem(self, "Recursive Estimates", "Output:",
+                                        ["CUSUM Test", "CUSUM of Squares Test", "Recursive Residuals"], 0, False)
+        if ok:
+            w = {"CUSUM Test": "c", "CUSUM of Squares Test": "q", "Recursive Residuals": "r"}[what]
+            try:
+                self.main.engine.run(f"bundle ev_rl = ev_rls({self.name}, 1)", check=True)
+                png = self.main.engine.tmp_png()
+                self.main.engine.run(f'ev_rlsplot(ev_rl, "{w}", "{png}")', check=True)
+                self.show_image(png)
+            except GretlError as e:
+                self.main.error(str(e))
 
     def garch_graph(self):
         try:
@@ -495,6 +597,61 @@ class EquationWindow(ObjectWindow):
         m.refresh()
 
 
+class TableWindow(ObjectWindow):
+    """EViews table object: cells can be edited; Save writes csv, txt or html."""
+
+    def __init__(self, main, name):
+        super().__init__(main, f"Table: {name.upper()}   Workfile: {main.wf_title()}")
+        self.name = name
+        self.set_toolbar(_toolbar([
+            ("Object", [("Delete", lambda: main.delete_object(name))]),
+            ("|", None),
+            ("Name", lambda: main.rename_object(name)),
+            ("Save", self.save),
+            ("Edit+/-", self.toggle_edit),
+        ]))
+        self.editing = False
+        self.spreadsheet()
+
+    def spreadsheet(self):
+        t = self.table
+        try:
+            t.itemChanged.disconnect(self._table_edit)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            rows = self.main.engine.table_cells(self.name)
+        except GretlError as e:
+            self.main.error(str(e))
+            return
+        t.clear()
+        t.setRowCount(len(rows))
+        t.setColumnCount(max((len(r) for r in rows), default=0))
+        t.setHorizontalHeaderLabels([chr(65 + j) if j < 26 else f"C{j + 1}" for j in range(t.columnCount())])
+        for i, r in enumerate(rows):
+            for j, v in enumerate(r):
+                t.setItem(i, j, QTableWidgetItem(v))
+        t.resizeColumnsToContents()
+        t.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.AnyKeyPressed
+                          if self.editing else QAbstractItemView.NoEditTriggers)
+        t.setStyleSheet("QTableWidget { background: #fffdf0; }" if self.editing else "")
+        if self.editing:
+            t.itemChanged.connect(self._table_edit)
+        self.stack.setCurrentWidget(t)
+
+    def _table_edit(self, item):
+        v = item.text().replace('"', "'")
+        self.main.engine.run(f'ev_tset(&{self.name}, {item.row() + 1}, {item.column() + 1}, "{v}")')
+        self.main.log_append(f'> {self.name}({item.row() + 1},{item.column() + 1}) = "{v}"')
+
+    def save(self):
+        path, flt = QFileDialog.getSaveFileName(self, "Save table", f"{self.name}.csv",
+                                                "CSV (*.csv);;Text (*.txt);;HTML (*.html)")
+        if path:
+            fmt = "html" if path.endswith(".html") else ("txt" if path.endswith(".txt") else "csv")
+            self.main.engine.run(f'ev_tsave({self.name}, "{path}", "{fmt}")')
+
+
 class VarWindow(ObjectWindow):
     def __init__(self, main, name):
         super().__init__(main, f"Var: {name.upper()}   Workfile: {main.wf_title()}")
@@ -507,8 +664,12 @@ class VarWindow(ObjectWindow):
                       ("Lag Structure: Lag Length Criteria...", self.laglen),
                       ("Impulse Response...", self.impulse),
                       ("Variance Decomposition...", self.decomp),
-                      ("Residuals: Graphs", self.resid_graph)]),
+                      ("Residuals: Graphs", self.resid_graph),
+                      ("Lag Structure: AR Roots Table", lambda: self.var_view(f"matrix ev_vroots = ev_varroots({name})")),
+                      ("Residual Tests: Serial Correlation LM...", self.var_lm),
+                      ("Residual Tests: Normality (Cholesky)", lambda: self.var_view(f"bundle ev_n = ev_varnorm({name})"))]),
             ("Proc", [("Make Residuals", self.make_resids),
+                      ("Forecast...", self.var_forecast),
                       ("Estimate Structural Factorization...", self.svar)]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
@@ -523,6 +684,43 @@ class VarWindow(ObjectWindow):
 
     def output(self):
         self.run_text(f"ev_vecprint(&{self.name})" if self.vec else f"ev_varprint(&{self.name})")
+
+    def var_view(self, cmd):
+        if self.vec:
+            self.main.error("This view is available for unrestricted VARs.")
+            return
+        self.run_text(cmd)
+
+    def var_lm(self):
+        h, ok = QInputDialog.getInt(self, "VAR Residual Serial Correlation LM Tests", "Lags to include:", 2, 1, 24)
+        if ok:
+            self.var_view(f"matrix ev_lm = ev_varlm({self.name}, {h})")
+
+    def var_forecast(self):
+        if self.vec:
+            self.main.error("Forecasts are available for unrestricted VARs.")
+            return
+        wf = self.main.engine.wf
+        method, smp, suf = QComboBox(), QLineEdit(f"{wf.sample_first} {wf.sample_last}"), QLineEdit("_f")
+        method.addItems(["Dynamic", "Static"])
+        d = _form_dialog(self, f"VAR Forecast: {self.name.upper()}", [("Method:", method), ("Forecast sample:", smp),
+                                                                      ("Series name suffix:", suf)])
+        if not d:
+            return
+        m = self.main
+        if smp.text().strip() != f"{wf.sample_first} {wf.sample_last}":
+            m.execute("smpl " + m.eviews_dates(smp.text().strip()))
+        out = "".join(m.engine.run(f'printf "%s\\n", strjoin({self.name}.ytok, " ")')).split()
+        dyn = 1 if method.currentIndex() == 0 else 0
+        cmds = [f"bundle ev_fc = ev_varfcast({self.name}, dataset, {dyn})"]
+        for k, nm in enumerate(out, 1):
+            base = re.sub(r"\W+", "_", nm).strip("_")
+            cmds.append(f"series {base}{suf.text().strip()} = ev_varfseries(ev_fc, {k})")
+        try:
+            self.show_lines(m.engine.run("\n".join(cmds), check=True))
+        except GretlError as e:
+            m.error(str(e))
+        m.refresh()
 
     def granger(self):
         if self.vec:
@@ -1325,6 +1523,7 @@ class MainWindow(QMainWindow):
                     self.engine.new_page(name, "u", "", rest[1])
                 else:
                     self.engine.new_page(name, rest[0].lower(), rest[1], rest[2])
+                self._sync_panel()
             elif cmd == "pageselect" and rest:
                 self.select_page(rest[0])
                 return True
@@ -1340,6 +1539,7 @@ class MainWindow(QMainWindow):
                     raise ValueError("use pagestruct id @date(timevar)")
                 self.engine.set_panel(m.group(1), m.group(2))
                 self.ctx.panel = (m.group(1), m.group(2))
+                self._panel_page = self.engine.wf.page
             elif cmd == "pagestack":
                 op = dict((k.lower(), v.strip().strip('"'))
                           for k, v in re.findall(r'(\w+)\s*=\s*("[^"]*"|[^,]+)', opts))
@@ -1350,6 +1550,7 @@ class MainWindow(QMainWindow):
                 name = op.get("page") or f"untitled{len(self.engine.wf.pages) + 1}"
                 self.engine.stack_page(name, pats)
                 self.ctx.panel = ("crossid", "period")
+                self._panel_page = self.engine.wf.page
             elif cmd == "pageunstack":
                 left, _, right = " ".join(rest).partition("@")
                 ids, series = left.split(), right.split()
@@ -1364,6 +1565,7 @@ class MainWindow(QMainWindow):
                 name = op.get("page") or f"untitled{len(self.engine.wf.pages) + 1}"
                 self.engine.unstack_page(name, ids[0], time, series, op.get("namepat", "*?"))
                 self.ctx.panel = None
+                self._sync_panel()
             else:
                 return False
         except (GretlError, IndexError, ValueError) as e:
@@ -1449,8 +1651,23 @@ class MainWindow(QMainWindow):
             self.error(str(e))
             return
         self._close_object_windows()
+        self._sync_panel()
         self.log_append(f"Page: {page}")
         self.show_workfile()
+
+    def _sync_panel(self):
+        """The translator's panel state follows the page shown (pagestruct / pagestack pages)."""
+        pp = getattr(self, "_page_panel", {})
+        if self.ctx.panel and getattr(self, "_panel_page", None):
+            pp[self._panel_page] = self.ctx.panel
+        self._page_panel = pp
+        page = self.engine.wf.page
+        try:
+            panel = self.engine.is_panel()
+        except GretlError:
+            panel = False
+        self.ctx.panel = pp.get(page) if panel else None
+        self._panel_page = page
 
     def new_page_dialog(self):
         name = QLineEdit(f"untitled{len(self.engine.wf.pages) + 1}")
@@ -1587,6 +1804,8 @@ class MainWindow(QMainWindow):
             self.add_window(name, SystemWindow(self, name), (720, 560), "system")
         elif kind == "model":
             self.add_window(name, ModelWindow(self, name), (680, 560), "model")
+        elif kind == "table":
+            self.add_window(name, TableWindow(self, name), (560, 380), "table")
         elif kind == "scalar":
             self.statusBar().showMessage(f"{name} = {self.engine.wf.scalars.get(name)}")
         elif kind == "string":
@@ -1808,7 +2027,21 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         method = QComboBox()
         method.addItems(["LS - Least Squares (NLS and ARMA)",
-                         "ARCH - Autoregressive Conditional Heteroskedasticity"])
+                         "ARCH - Autoregressive Conditional Heteroskedasticity",
+                         "TSLS - Two-Stage Least Squares",
+                         "BINARY - Binary Choice (Logit, Probit)",
+                         "ARDL - Auto-regressive Distributed Lag Models"])
+        inst = QLineEdit()
+        inst.setPlaceholderText("instrument list, e.g. c z1 z2")
+        bdist = QComboBox()
+        bdist.addItems(["Logit", "Probit"])
+        dlag, rlag = QSpinBox(), QSpinBox()
+        dlag.setRange(1, 12)
+        dlag.setValue(4)
+        rlag.setRange(0, 12)
+        rlag.setValue(4)
+        icr = QComboBox()
+        icr.addItems(["Akaike info criterion (AIC)", "Schwarz criterion (SIC)", "Hannan-Quinn criterion (HQ)"])
         # ARCH options (EViews: model, ARCH order, GARCH order)
         amodel = QComboBox()
         amodel.addItems(["GARCH/TARCH (symmetric)", "TARCH (threshold, asymmetric)", "EGARCH"])
@@ -1851,6 +2084,11 @@ class MainWindow(QMainWindow):
         form.addRow("GARCH order:", gord)
         form.addRow("Threshold order:", thr)
         form.addRow("ARCH-M term:", archm)
+        form.addRow("Instrument list (TSLS):", inst)
+        form.addRow("Binary estimation method:", bdist)
+        form.addRow("ARDL max. dependent lags:", dlag)
+        form.addRow("ARDL max. regressor lags:", rlag)
+        form.addRow("ARDL model selection:", icr)
         if is_panel:
             form.addRow("Cross-section effects:", cxe)
             form.addRow("", perf)
@@ -1861,6 +2099,10 @@ class MainWindow(QMainWindow):
                 w.setEnabled(i == 1)
             for w in (cov, cxe, perf):
                 w.setEnabled(i == 0)
+            inst.setEnabled(i == 2)
+            bdist.setEnabled(i == 3)
+            for w in (dlag, rlag, icr):
+                w.setEnabled(i == 4)
         method.currentIndexChanged.connect(_arch_rows)
         _arch_rows(method.currentIndex())
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1896,6 +2138,25 @@ class MainWindow(QMainWindow):
             self.ctx.equations[name] = "garch"
             self.ctx.last_eq = name
             self.refresh()
+            if name in self.engine.wf.bundles:
+                if window is not None:
+                    window.output()
+                else:
+                    self.open_object((name, "equation"))
+            return
+        if method.currentIndex() in (2, 3, 4):
+            mi = method.currentIndex()
+            if mi == 2:
+                if not inst.text().strip():
+                    self.error("TSLS needs an instrument list.")
+                    return
+                cmd = f"equation {name}.tsls {s} @ {inst.text().strip()}"
+            elif mi == 3:
+                cmd = f"equation {name}.binary(d={'l' if bdist.currentIndex() == 0 else 'p'}) {s}"
+            else:
+                ic = ["aic", "sic", "hq"][icr.currentIndex()]
+                cmd = f"equation {name}.ardl(deplags={dlag.value()}, reglags={rlag.value()}, ic={ic}) {s}"
+            self.execute(cmd)
             if name in self.engine.wf.bundles:
                 if window is not None:
                     window.output()

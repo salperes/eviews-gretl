@@ -184,7 +184,7 @@ class GretlEngine:
                 parts = ln.strip().split("|")
                 if len(parts) == 4:
                     b, sys_, uh, kind = parts
-                    if kind in ("vecm", "system", "model"):
+                    if kind in ("vecm", "system", "model", "table"):
                         self.wf.kinds[b] = kind
                     else:
                         self.wf.kinds[b] = "var" if sys_ != "0" else ("equation" if uh != "0" else "bundle")
@@ -405,7 +405,8 @@ class GretlEngine:
             return db
         self._save_page()
         try:
-            self.run(f'clear --dataset\nopen "{path}" --quiet', check=True)
+            # --preserve: opening the file must not delete equations, VARs and other objects
+            self.run(f'clear --dataset\nopen "{path}" --quiet --preserve', check=True)
             self.run(f'store "{db}" --database --overwrite', check=True)
         finally:
             self.run(f'clear --dataset\nopen "{self._page_file(self.wf.page)}" --quiet --preserve')
@@ -436,6 +437,13 @@ class GretlEngine:
         lines = [x.strip() for x in out if x.strip()]
         return lines[-1] if lines else "ls"
 
+    def table_cells(self, name: str) -> list[list[str]]:
+        """Cells of an EViewsCompat table object, row by row."""
+        out = self.run(f'loop ev_i = 1..{name}.rows\nloop ev_j = 1..{name}.cols\n'
+                       f'printf "%s\\t", ev_tget({name}, ev_i, ev_j)\nendloop\nprintf "\\n"\nendloop')
+        rows = [ln.rstrip("\n").split("\t")[:-1] for ln in out if "\t" in ln]
+        return rows
+
     def is_garch(self, name: str) -> bool:
         # nested ifs: hansl's ?: evaluates both branches
         out = self.run(f'scalar ev_g = 0\nif inbundle({name}, "kind")\nif {name}.kind == "garch"\n'
@@ -443,7 +451,8 @@ class GretlEngine:
         return "".join(out).strip().endswith("1")
 
     def equation_text(self, name: str) -> str:
-        fn = {"garch": "ev_garchprint", "panel": "ev_panelprint"}.get(self.eq_kind(name), "ev_print")
+        fn = {"garch": "ev_garchprint", "panel": "ev_panelprint", "binary": "ev_binaryprint",
+              "ardl": "ev_ardlprint"}.get(self.eq_kind(name), "ev_print")
         return "\n".join(self.run(f"{fn}(&{name})", check=True)).strip("\n")
 
     # -- panel pages --------------------------------------------------------
@@ -461,8 +470,8 @@ class GretlEngine:
         if name in self.wf.pages:
             raise GretlError(f"page {name} already exists")
         cmds = ["smpl full", f'strings ev_sid = ev_stackids("{patterns[0]}", dataset)']
-        cmds += [f'matrix ev_s{k} = ev_stack("{p}", dataset, ev_sid)' for k, p in enumerate(patterns, 1)]
-        cmds += ["scalar ev_T = rows(ev_s1)", "scalar ev_NS = nelem(ev_sid)", "matrix ev_idv = seq(1, ev_NS)'",
+        cmds += [f'matrix ev_stk{k} = ev_stack("{p}", dataset, ev_sid)' for k, p in enumerate(patterns, 1)]
+        cmds += ["scalar ev_T = rows(ev_stk1)", "scalar ev_NS = nelem(ev_sid)", "matrix ev_idv = seq(1, ev_NS)'",
                  "loop ev_j = 1..ev_NS", "scalar ev_v = atof(ev_sid[ev_j])", "if ok(ev_v)",
                  "ev_idv[ev_j] = ev_v", "endif", "endloop"]
         self.run("\n".join(cmds), check=True)
@@ -470,7 +479,7 @@ class GretlEngine:
         body = ["scalar ev_NT = ev_T * ev_NS", "nulldata ev_NT --preserve",
                 "series crossid = vec(ones(ev_T, 1) * ev_idv')",
                 "series period = vec(seq(1, ev_T)' * ones(1, ev_NS))"]
-        body += [f"series {p.replace('?', '')} = vec(ev_s{k})" for k, p in enumerate(patterns, 1)]
+        body += [f"series {p.replace('?', '')} = vec(ev_stk{k})" for k, p in enumerate(patterns, 1)]
         body += ["setobs crossid period --panel-vars"]
         self.run("\n".join(body), check=True)
         self.wf.pages.append(name)

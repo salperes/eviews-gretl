@@ -185,8 +185,8 @@ class RealPrograms(unittest.TestCase):
         c = Ctx()
         out = translate_line("pagestack(page=long) gdp_? cpi?", c)
         self.assertIn('strings ev_sid = ev_stackids("gdp_?", dataset)', out)
-        self.assertIn("series gdp_ = vec(ev_s1)", out)
-        self.assertIn("series cpi = vec(ev_s2)", out)
+        self.assertIn("series gdp_ = vec(ev_stk1)", out)
+        self.assertIn("series cpi = vec(ev_stk2)", out)
         self.assertIn("setobs crossid period --panel-vars", out)
         self.assertEqual(c.page, "long")
         self.assertEqual(c.panel, ("crossid", "period"))
@@ -279,6 +279,63 @@ class Phase1Var(unittest.TestCase):
                          ["bundle v1_fc = ev_varfcast(v1, dataset, 1)",
                           "series dc_f = ev_varfseries(v1_fc, 1)", "series dg_f = ev_varfseries(v1_fc, 2)"])
         self.assertEqual(translate_line("v1.forecast(s)", c)[0], "bundle v1_fc = ev_varfcast(v1, dataset, 0)")
+
+
+class Phase1Data(unittest.TestCase):
+    def test_functions(self):
+        c = Ctx()
+        self.assertEqual(translate_expr("@ctdist(z, 10) + @qchisq(0.95, 2)", c), "cdf(t, 10, z) + invcdf(X, 2, 0.95)")
+        self.assertEqual(translate_expr("@recode(x > 0, 1, 0)", c), "((x > 0) ? (1) : (0))")
+        self.assertEqual(translate_expr('@inlist(code, "1 2 3")', c), "(code == 1 || code == 2 || code == 3)")
+        self.assertEqual(translate_expr("@isna(x)", c), "missing(x)")
+        self.assertEqual(translate_expr("@left(%s, 3)", c), "ev_left(s, 3)")
+        self.assertEqual(translate_expr('@instr(%s, "a")', c), 'ev_instr(s, "a")')
+        self.assertEqual(translate_expr("@weekday", c), "((weekday($obsmajor, $obsminor, $obsmicro) + 6) % 7 + 1)")
+        self.assertEqual(translate_expr("@date", c), "ev_date()")
+        self.assertEqual(translate_expr('@dateval("2020-01-01")', c), 'ev_dateval("2020-01-01")')
+
+    def test_strings_and_loops(self):
+        c = Ctx()
+        self.assertEqual(translate_line('%s = "gdp" + @str(!i)', c), ['string s = "gdp" ~ sprintf("%g", i)'])
+        self.assertEqual(translate_line("exitloop", c), ["break"])
+
+    def test_program_arguments(self):
+        from evprg2hansl import translate_full
+        h, todos, _ = translate_full("series y = {%0}\nscalar n = @val(%1)\n", args=["gdp", "4"])
+        self.assertIn('string ev_arg0 = "gdp"', h)
+        self.assertIn("series y = @ev_arg0", h)
+        self.assertIn("scalar n = atof(ev_arg1)", h)
+
+    def test_run_with_arguments(self):
+        import os, tempfile
+        from evprg2hansl import translate_full
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "sub.prg"), "w") as f:
+            f.write("series {%0}_log = log({%0})\n")
+        h, todos, _ = translate_full("run sub gdp\n", base_dir=d)
+        self.assertIn("series gdp_log = log(gdp)", h)
+        self.assertEqual(todos, [])
+
+    def test_tables(self):
+        c = Ctx()
+        self.assertEqual(translate_line("table(3,2) tab", c), ["bundle tab = ev_table(3, 2)"])
+        self.assertEqual(translate_line('tab(1,1) = "Variable"', c), ['ev_tset(&tab, 1, 1, "Variable")'])
+        self.assertEqual(translate_line("tab(2,2) = !x * 2", c), ["ev_tsetnum(&tab, 2, 2, x * 2)"])
+        self.assertEqual(translate_line('tab.setcell(3, b, "end")', c)[0], 'ev_tset(&tab, 3, 2, "end")')
+        self.assertEqual(translate_line("tab.setwidth(a:b) 14", c), ["ev_twidth(&tab, 1, 14)", "ev_twidth(&tab, 2, 14)"])
+        self.assertEqual(translate_line("tab.save(t=csv) results", c), ['ev_tsave(tab, "results.csv", "csv")'])
+
+    def test_copy(self):
+        c = Ctx()
+        self.assertEqual(translate_line("copy gdp gdp2", c), ["series gdp2 = gdp"])
+        translate_line("equation e1.ls y c x", c)
+        self.assertEqual(translate_line("copy e1 e2", c), ["bundle e2 = e1"])
+        translate_line("pagecreate(page=annual) a 1990 2019", c)
+        out = translate_line(r"copy(c=s) page1\gdp gdpa", c)
+        self.assertIn("matrix ev_cv = ev_pagecol(gdp)", out)
+        self.assertIn('series gdpa = ev_freqconv(ev_cv, "s")', out)
+        with self.assertRaises(ValueError):
+            translate_line(r"copy(c=q) page1\gdp gdpq", c)
 
 
 class Structure(unittest.TestCase):

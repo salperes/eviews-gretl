@@ -4859,6 +4859,298 @@ function series ev_varfseries (bundle r "ev_varfcast result", int i[1::1] "Varia
 end function
 
 # -------------------------------------------------------------------
+# Frequency conversion between pages (copy(c=...) page\series)
+# -------------------------------------------------------------------
+
+function series ev__epochdays (void)
+    # calendar day number (days since 1 Jan 1 AD, day 1) of each observation's start
+    errorif($datatype != 2, "Frequency conversion needs dated time-series pages")
+    series d = $obsdate
+    series y = floor(d / 10000)
+    series m = floor(d / 100) - 100 * y
+    series dd = d - 10000 * y - 100 * m
+    series r = NA
+    loop t = 1..$nobs
+        r[t] = epochday(y[t], m[t], dd[t])
+    endloop
+    return r
+end function
+
+function matrix ev_pagecol (series x "Series of the source page")
+    # [day number, value] of every observation, for ev_freqconv
+    set skip_missing off
+    series d = ev__epochdays()
+    return {d} ~ {x}
+end function
+
+function series ev_freqconv (const matrix S "ev_pagecol() of the source series",
+                             string method[null] "a s f l x n (high to low); r d i (low to high)")
+    # convert to the frequency of the current page, as EViews copy(c=...)
+    set skip_missing off
+    series d = ev__epochdays()
+    matrix D = {d}
+    scalar T = rows(D)
+    scalar ns = rows(S)
+    # length of a period: next start date (the last one: same spacing as before)
+    matrix Dn = D[2:T] | (2 * D[T] - D[T - 1])
+    matrix Sn = S[2:ns, 1] | (2 * S[ns, 1] - S[ns - 1, 1])
+    scalar tgt_len = meanc(Dn - D)
+    scalar src_len = meanc(Sn - S[, 1])
+    string m = exists(method) ? tolower(method) : (src_len < tgt_len ? "a" : "r")
+    series r = NA
+    if src_len < tgt_len
+        errorif(!instring(" a s f l x n ", " " ~ m ~ " "), "high to low frequency: c=a, s, f, l, x or n")
+        loop t = 1..T
+            matrix in = (S[, 1] .>= D[t]) .* (S[, 1] .< Dn[t])
+            if sumc(in) > 0
+                matrix v = selifr(S[, 2], in)
+                if sumc(!ok(v)) == 0
+                    if m == "a"
+                        r[t] = meanc(v)
+                    elif m == "s"
+                        r[t] = sumc(v)
+                    elif m == "f"
+                        r[t] = v[1]
+                    elif m == "l"
+                        r[t] = v[rows(v)]
+                    elif m == "x"
+                        r[t] = maxc(v)
+                    else
+                        r[t] = minc(v)
+                    endif
+                endif
+            endif
+        endloop
+    else
+        errorif(!instring(" r d i ", " " ~ m ~ " "), "low to high frequency: c=r (constant), d (divide) or i (linear)")
+        # the source period that contains each target date
+        matrix j = zeros(T, 1)
+        loop t = 1..T
+            matrix in = (S[, 1] .<= D[t]) .* (Sn .> D[t])
+            j[t] = sumc(in) > 0 ? imaxc(in) : 0
+        endloop
+        if m == "i"
+            # linear interpolation, matching the source value in the last period of each source period
+            matrix xs = {}
+            matrix ys = {}
+            loop k = 1..ns
+                matrix in = j .= k
+                if sumc(in) > 0
+                    scalar last = 0
+                    loop t = 1..T
+                        if in[t]
+                            last = t
+                        endif
+                    endloop
+                    xs |= last
+                    ys |= S[k, 2]
+                endif
+            endloop
+            loop t = 1..T
+                loop k = 1..rows(xs) - 1
+                    if t >= xs[k] && t <= xs[k + 1]
+                        r[t] = ys[k] + (ys[k + 1] - ys[k]) * (t - xs[k]) / (xs[k + 1] - xs[k])
+                    endif
+                endloop
+            endloop
+        else
+            loop t = 1..T
+                scalar k = j[t]
+                if k > 0
+                    scalar cnt = m == "d" ? sumc(j .= k) : 1
+                    r[t] = S[k, 2] / cnt
+                endif
+            endloop
+        endif
+    endif
+    return r
+end function
+
+# -------------------------------------------------------------------
+# String and date functions (EViews @left, @mid, @instr, @word, @dateval, ...)
+# -------------------------------------------------------------------
+
+function string ev_left (string s, int n)
+    if n <= 0
+        return ""
+    endif
+    return substr(s, 1, min(n, strlen(s)))
+end function
+
+function string ev_right (string s, int n)
+    scalar L = strlen(s)
+    if n <= 0 || L == 0
+        return ""
+    endif
+    return substr(s, max(1, L - n + 1), L)
+end function
+
+function string ev_mid (string s, int n1, int n2[-1])
+    scalar L = strlen(s)
+    if n1 > L || n2 == 0
+        return ""
+    endif
+    scalar e = n2 < 0 ? L : min(L, n1 + n2 - 1)
+    return substr(s, max(1, n1), e)
+end function
+
+function scalar ev_instr (string s, string t, int nth[1::1])
+    # position of the nth occurrence of t in s (0 if not found), as EViews @instr
+    scalar base = 0
+    string rest = s
+    loop k = 1..nth
+        if !instring(rest, t)
+            return 0
+        endif
+        scalar p = strlen(rest) - strlen(strstr(rest, t)) + 1
+        if k == nth
+            return base + p
+        endif
+        if p >= strlen(rest)
+            return 0
+        endif
+        base += p
+        rest = substr(rest, p + 1, strlen(rest))
+    endloop
+    return 0
+end function
+
+function string ev_word (string s, int n)
+    strings w = strsplit(s)
+    if n < 1 || n > nelem(w)
+        return ""
+    endif
+    return w[n]
+end function
+
+function scalar ev_dateval (string s, string fmt[null] "EViews format, e.g. YYYY-MM-DD or MM/DD/YYYY")
+    # EViews date number (days since 1 Jan 1 AD, starting at 0)
+    string f = exists(fmt) ? fmt : (instring(s, "/") ? "MM/DD/YYYY" : "YYYY-MM-DD")
+    f = strsub(strsub(strsub(toupper(f), "YYYY", "%Y"), "MM", "%m"), "DD", "%d")
+    scalar sec = strptime(s, f)
+    errorif(!ok(sec), "Cannot read the date " ~ s)
+    return round(sec / 86400) + 719162         # strptime reads local time: round to the day
+end function
+
+function string ev_datestr (scalar d "EViews date number", string fmt[null] "EViews format, default YYYY-MM-DD")
+    string f = exists(fmt) ? fmt : "YYYY-MM-DD"
+    f = strsub(strsub(strsub(toupper(f), "YYYY", "%Y"), "MM", "%m"), "DD", "%d")
+    return strftime((d - 719162) * 86400 + 43200, f)   # noon UTC: the same day in any time zone
+end function
+
+function series ev_date (void)
+    # EViews @date: date number of each observation
+    series r = ev__epochdays()
+    return r - 1
+end function
+
+# -------------------------------------------------------------------
+# Table objects: table(r,c) t, t(i,j) = v, t.setcell, t.setwidth, t.save
+# -------------------------------------------------------------------
+
+function bundle ev_table (int r[1::1], int c[1::1])
+    bundle t
+    t.kind = "table"
+    t.rows = r
+    t.cols = c
+    strings cells = array(r * c)
+    loop i = 1..r * c
+        cells[i] = ""
+    endloop
+    t.cells = cells
+    t.width = 10 * ones(1, c)
+    return t
+end function
+
+function void ev__tgrow (bundle *t, int i, int j)
+    # tables grow when a cell outside them is set (as EViews)
+    if i > t.rows || j > t.cols
+        scalar r = max(i, t.rows)
+        scalar c = max(j, t.cols)
+        strings nc = array(r * c)
+        loop a = 1..r
+            loop b = 1..c
+                nc[(a - 1) * c + b] = ""
+                if a <= t.rows && b <= t.cols
+                    nc[(a - 1) * c + b] = t.cells[(a - 1) * t.cols + b]
+                endif
+            endloop
+        endloop
+        matrix w = 10 * ones(1, c)
+        w[1:t.cols] = t.width
+        t.cells = nc
+        t.width = w
+        t.rows = r
+        t.cols = c
+    endif
+end function
+
+function void ev_tset (bundle *t, int i[1::], int j[1::], string v)
+    ev__tgrow(&t, i, j)
+    strings cl = t.cells
+    cl[(i - 1) * t.cols + j] = v
+    t.cells = cl
+end function
+
+function void ev_tsetnum (bundle *t, int i[1::], int j[1::], scalar v)
+    ev_tset(&t, i, j, ok(v) ? sprintf("%.8g", v) : "NA")
+end function
+
+function string ev_tget (bundle t, int i, int j)
+    if i > t.rows || j > t.cols
+        return ""
+    endif
+    return t.cells[(i - 1) * t.cols + j]
+end function
+
+function void ev_twidth (bundle *t, int j[1::], int w[1::])
+    ev__tgrow(&t, 1, j)
+    matrix ww = t.width
+    ww[j] = w
+    t.width = ww
+end function
+
+function string ev_ttext (bundle t, string fmt[null] "txt, csv or html")
+    string f = exists(fmt) ? tolower(fmt) : "txt"
+    string out = ""
+    string nl = sprintf("\n")             # string literals do not expand \n
+    if f == "html"
+        out = "<table>" ~ nl
+    endif
+    loop i = 1..t.rows
+        string line = ""
+        loop j = 1..t.cols
+            string v = t.cells[(i - 1) * t.cols + j]
+            if f == "csv"
+                line ~= (j > 1 ? "," : "") ~ (instring(v, ",") || instring(v, "\"") ? "\"" ~ strsub(v, "\"", "\"\"") ~ "\"" : v)
+            elif f == "html"
+                line ~= "<td>" ~ v ~ "</td>"
+            else
+                string fm = sprintf("%%%ds", t.width[j])
+                line ~= sprintf(fm, v)
+            endif
+        endloop
+        out ~= f == "html" ? "<tr>" ~ line ~ "</tr>" ~ nl : line ~ nl
+    endloop
+    if f == "html"
+        out ~= "</table>" ~ nl
+    endif
+    return out
+end function
+
+function void ev_tprint (bundle t)
+    printf "%s", ev_ttext(t, "txt")
+end function
+
+function void ev_tsave (bundle t, string fname, string fmt[null] "txt, csv or html")
+    string f = exists(fmt) ? tolower(fmt) : "csv"
+    string txt = ev_ttext(t, f)
+    outfile "@fname" --quiet
+        printf "%s", txt
+    end outfile
+end function
+
+# -------------------------------------------------------------------
 # Panel least squares on a panel page: ls(cx=f|r, per=f)
 # -------------------------------------------------------------------
 

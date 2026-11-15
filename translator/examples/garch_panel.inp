@@ -141,8 +141,8 @@ print LY_13
 # stack the wide page back into a panel page
 smpl full
 strings ev_sid = ev_stackids("LY_?", dataset)
-matrix ev_s1 = ev_stack("LY_?", dataset, ev_sid)
-scalar ev_T = rows(ev_s1)
+matrix ev_stk1 = ev_stack("LY_?", dataset, ev_sid)
+scalar ev_T = rows(ev_stk1)
 scalar ev_NS = nelem(ev_sid)
 matrix ev_idv = seq(1, ev_NS)'
 loop ev_j = 1..ev_NS
@@ -157,7 +157,7 @@ scalar ev_NT = ev_T * ev_NS
 nulldata ev_NT --preserve
 series crossid = vec(ones(ev_T, 1) * ev_idv')
 series period = vec(seq(1, ev_T)' * ones(1, ev_NS))
-series LY_ = vec(ev_s1)
+series LY_ = vec(ev_stk1)
 setobs crossid period --panel-vars
 scalar ev_N = $nobs
 bundle EFE = ev_panel("LY_ c LY_(-1)", dataset, "fixed", 0)

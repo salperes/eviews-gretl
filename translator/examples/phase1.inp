@@ -2,6 +2,7 @@
 # Requires the EViewsCompat gretl package
 set verbose off
 include EViewsCompat.gfn
+# workfile pages are kept as .gdtb files in gretl's dot directory (ev_pagedir)
 
 # EViews program: Phase 1 of the gap analysis (docs/GAP_ANALIZI.md)
 # TSLS, logit/probit, ARDL with bounds test, equation tests
@@ -69,4 +70,68 @@ bundle V1_fc = ev_varfcast(V1, dataset, 1)
 series DC_f = ev_varfseries(V1_fc, 1)
 series DG_f = ev_varfseries(V1_fc, 2)
 series FFR_f = ev_varfseries(V1_fc, 3)
+
+# W7, W8: an annual page with series converted from the quarterly page
+string ev_pagedir = $dotdir
+smpl full
+store "@ev_pagedir/usmacro.gdtb"
+nulldata 30 --preserve
+setobs 1 1990 --time-series
+scalar ev_N = $nobs
+string ev_pagedir = $dotdir
+scalar ev_s1 = $t1
+scalar ev_s2 = $t2
+smpl full
+store "@ev_pagedir/annual.gdtb"
+open "@ev_pagedir/usmacro.gdtb" --quiet --preserve
+matrix ev_cv = ev_pagecol(GDP)
+open "@ev_pagedir/annual.gdtb" --quiet --preserve
+series GDP_AVG = ev_freqconv(ev_cv, "a")
+smpl ev_s1 ev_s2
+scalar ev_N = $nobs
+string ev_pagedir = $dotdir
+scalar ev_s1 = $t1
+scalar ev_s2 = $t2
+smpl full
+store "@ev_pagedir/annual.gdtb"
+open "@ev_pagedir/usmacro.gdtb" --quiet --preserve
+matrix ev_cv = ev_pagecol(GDP)
+open "@ev_pagedir/annual.gdtb" --quiet --preserve
+series GDP_SUM = ev_freqconv(ev_cv, "s")
+smpl ev_s1 ev_s2
+scalar ev_N = $nobs
+print GDP_AVG
+print GDP_SUM
+string ev_pagedir = $dotdir
+smpl full
+store "@ev_pagedir/annual.gdtb"
+open "@ev_pagedir/usmacro.gdtb" --quiet --preserve
+scalar ev_N = $nobs
+list GC = LCONS LGDP
+series GDP_COPY = GDP
+
+# F4-F8: distributions, strings, logical helpers
+scalar pv = 1 - cdf(t, 1000, 1.96)
+string name = "gdp"
+string label = toupper(name) ~ "_" ~ sprintf("%g", 2020)
+series POS = ((ldiff(GDP) > 0) ? (1) : (0))
+print pv
+
+# O3, P8: a table object and exitloop
+bundle TAB = ev_table(3, 2)
+ev_tset(&TAB, 1, 1, "Variable")
+ev_tset(&TAB, 1, 2, "Mean")
+ev_tset(&TAB, 2, 1, label)
+ev_tsetnum(&TAB, 2, 2, ev_mean(GDP))
+ev_twidth(&TAB, 1, 14)
+ev_tsave(TAB, "phase1_table.csv", "csv")
+ev_tprint(TAB)
+scalar n = 0
+loop i = 1..10
+    if i > 3
+        break
+    endif
+    scalar n = n + 1
+endloop
+print n
 
