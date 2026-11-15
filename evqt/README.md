@@ -90,7 +90,11 @@ On a panel page the equation dialog adds cross-section effects (none, fixed, ran
 period fixed effects. Proc > Reshape Current Page: Stack in New Page (or
 `pagestack(page=long) x_?`) turns one-series-per-unit data into a panel page.
 
-Not yet: period random effects, EViews-specific add-ins.
+Also: valmap and sample object windows (from the workfile list), drag and drop (series onto a page
+tab copies them there, onto a group window adds them to the group), and programs run from File ask
+their @uiprompt / @uiedit / @uilist / @uiradio / @uidialog questions before they start.
+
+Not yet: EViews-specific add-ins.
 
 Known issue: Qt 6.8 on macOS can crash when accessibility automation tools drive the
 window in the background; normal mouse and keyboard use is not affected.

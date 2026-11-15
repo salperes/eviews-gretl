@@ -288,6 +288,8 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       one threshold: all coefficients differ below and above the threshold value (grid search)
   ev_breakls(spec, vars, [maxbreaks], [trim], [crit], [quiet])  -> bundle
       Bai-Perron global minimisation of the SSR (dynamic programming) for 0..maxbreaks breaks;
+  ev_bptests(spec, vars, [maxbreaks], [trim], [nrep], [level], [quiet])  -> bundle
+      Bai-Perron (1998, 2003) tests: sup F(m|0) for m = 1..M, UDmax, WDmax and sequential F(l+1|l);
   ev_midaslags(S, [K])  -> matrix
       for each observation of the current (low-frequency) page: the last K high-frequency values
   ev_midas(spec, vars, L, [poly], [deg], [quiet])  -> bundle
@@ -317,6 +319,8 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       contribution of each Cholesky shock to each variable; the rest is the base projection
   ev_sysrestests(s, [quiet])  -> bundle
       residual correlation matrix and Cholesky-orthogonalised normality test (as VAR)
+  ev_sysarch(s, [model], [quiet])  -> bundle
+      EViews system ARCH, GARCH(1,1) variance part, estimated by Gaussian ML on the residuals of the
   ev_modelfit(ms, [quiet])  -> matrix
       RMSE, MAE, MAPE and Theil U of the solution against the actual values
   ev_bvar(v, [mu1], [L1], [L2], [L3], [quiet])  -> bundle
@@ -329,18 +333,22 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       value of observation t as text: the label of a string-valued (alpha) series, else %g ("" for NA)
   ev_alpha(S)  -> series
       string-valued series from an array of texts; "" becomes missing (EViews alpha series)
+  ev_vmap(v, keys, labs)  -> string
+      EViews @map: the label of v in the value map (v itself when no key matches)
+  ev_vunmap(lab, keys, labs)  -> scalar
+      EViews @unmap: the (numeric) value whose label is lab; NA when there is none
   ev_fred(id, [agg])  -> series
       FRED (St. Louis Fed) public CSV download; observations are matched to the workfile by date and
   ev_uiprompt(msg, [kind])  -> scalar
       EViews @uiprompt in a script: print the prompt and answer OK / Yes (1)
-  ev_uiskip([what])  -> scalar
-      EViews @uiedit, @uilist, @uiradio, @uidialog in a script: keep the current values, return 0 (OK)
+  ev_uiskip([what], [target], [prompt], [choices])  -> scalar
+      EViews @uiedit, @uilist, @uiradio, @uifiledlg, @uidialog in a script: keep the current values and
   ev_factorprint(r)
       factor loadings, communalities and uniquenesses
   ev_modelcontrol(eqs, idents, vars, instrument, target, trajectory, [quiet])  -> bundle
       EViews model.control: find the instrument path for which the solution of the target
   ev_poolls(ids, spec, vars, [cx], [quiet])  -> bundle
-      pool object estimation with common coefficients: stacks y_id, x_id for each identifier
+      pool object estimation: stacks y_id, x_id for each identifier; regressors after @cxreg get
   ev_factor(names, vars, [nf], [method], [quiet])  -> bundle
       factor analysis of the correlation matrix: maximum likelihood or iterated principal factors
   ev_seasplot(x, [out])

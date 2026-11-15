@@ -500,7 +500,12 @@ class Phase3Estimators(unittest.TestCase):
         self.assertEqual(translate_line("equation e2.robustls(psi=huber) y c x", c), ['bundle e2 = ev_robustls("y c x", dataset, "huber", NA)'])
         self.assertEqual(translate_line("equation e3.glm(family=binomial, link=probit) d c x", c),
                          ['bundle e3 = ev_glm("d c x", dataset, "binomial", "probit")'])
-        self.assertEqual(translate_line("equation e4.breakls(trim=10) y c x", c), ['bundle e4 = ev_breakls("y c x", dataset, 5, 0.1, "bic")'])
+        self.assertEqual(translate_line("equation e4.breakls(trim=10) y c x", c), ['bundle e4 = ev_breakls("y c x", dataset, 5, 0.1, "seq")'])
+        self.assertEqual(translate_line("equation e4b.breakls(method=globinfo, select=lwz) y c x", c)[0][-6:], '"lwz")')
+        self.assertEqual(translate_line("equation e4c.breakls(method=glob) y c x", c)[0][-7:], '"glob")')
+        translate_line("equation e4d.ls y c x", c)
+        self.assertEqual(translate_line("e4d.multibreak(maxbreaks=3, trim=10)", c),
+                         ["bundle e4d_mb = ev_bptests(e4d.spec, dataset, 3, 0.1, 500, 0.05)"])
         self.assertEqual(translate_line("equation e5.threshold y c y(-1) @ y(-1)", c), ['bundle e5 = ev_threshold("y c y(-1)", "y(-1)", dataset, 0.15)'])
         self.assertEqual(translate_line("equation e6.enet(penalty=ridge, lfrac=0.1) y c x", c), ['bundle e6 = ev_enet("y c x", dataset, 0, 0.1)'])
         self.assertEqual(translate_line("equation e7.heckit y c x @ s c z", c), ['bundle e7 = ev_heckit("y c x @ s c z", dataset, 0)'])
@@ -582,7 +587,13 @@ call safe(gdp)
         self.assertIn("stringify(g, ev_vlab)", h)
         h, todos = translate('wfcreate u 4\n!r = @uiprompt("Go?", "YN")\n!e = @uiedit(%s, "Name (x)")\n')
         self.assertIn('scalar r = ev_uiprompt("Go?", "YN")', h)
-        self.assertIn('scalar e = ev_uiskip("edit")', h)
+        self.assertIn('scalar e = ev_uiskip("edit", "%s", "Name (x)", "")', h)
+        h, todos = translate('wfcreate u 4\n!c = @uilist(%pick, "Pick one", "a b c")\n!r = @uiradio(!k, "Choose", "x y")\n')
+        self.assertIn('ev_uiskip("list", "%pick", "Pick one", "a b c")', h)
+        self.assertIn('ev_uiskip("radio", "!k", "Choose", "x y")', h)
+        h, todos = translate('wfcreate u 4\n!r = @uidialog("Caption", "Setup", "Edit", %name, "Name", "Check", !ok2, "Logs", "List", %c, "Pick", "a b")\n')
+        self.assertIn('scalar r = (ev_uiskip("edit", "%name", "Name", "") + ev_uiskip("check", "!ok2", "Logs", "") + '
+                      'ev_uiskip("list", "%c", "Pick", "a b"))', h)
 
     def test_nested_calls(self):
         prg = """subroutine a(series x)
@@ -925,6 +936,38 @@ class Phase3LastP2(unittest.TestCase):
         out = translate_line("freeze(p1) comp.pie", c)
         self.assertEqual(out, ["list ev_pl = a b c", "ev_pie(ev_pl)"])
         self.assertEqual(translate_line("p1.save(t=png) pie", c)[-1], 'ev_pie(ev_pl, "pie.png")')
+
+
+class Phase3P3(unittest.TestCase):
+    def test_system_arch(self):
+        c = Ctx()
+        translate_line("system s1", c)
+        translate_line("s1.append dc = c(1) + c(2)*dg", c)
+        translate_line("s1.append di = c(3) + c(4)*dg", c)
+        out = translate_line("s1.arch @diagbekk c(indef) arch(1) garch(1)", c)
+        self.assertEqual(out[-1], 'bundle s1_arch = ev_sysarch(s1, "dbekk")')
+        self.assertIn('"ls"', " ".join(out))
+        self.assertEqual(translate_line("s1.arch @ccc", c)[-1], 'bundle s1_arch = ev_sysarch(s1, "ccc")')
+        with self.assertRaises(ValueError):
+            translate_line("s1.arch @diagvech arch(2)", c)
+
+    def test_pool_random_cx(self):
+        c = Ctx()
+        translate_line("pool p1 _us _uk", c)
+        self.assertEqual(translate_line("p1.ls(cx=r) y? c x? @cxreg z?", c),
+                         ['bundle p1_eq = ev_poolls("_us _uk", "y? c x? @cxreg z?", dataset, "random")'])
+        with self.assertRaises(ValueError):
+            translate_line("p1.ls y? c @perreg x?", c)
+
+    def test_valmap_any_codes(self):
+        c = Ctx()
+        translate_line("valmap vm", c)
+        translate_line('vm.append 0 "none" [1,inf) "some" na "missing"', c)
+        out = translate_line("x.map vm", c)
+        self.assertEqual(out[-1], "series x_map = ev_alpha(ev_as)")
+        self.assertIn('defarray("0", "[1,inf)", "na")', out[3])
+        out = translate_line("series k = @unmap(x_map, vm)", c)
+        self.assertIn("ev_vunmap(ev_strat(x_map, ev_t)", out[2])
 
 
 if __name__ == "__main__":

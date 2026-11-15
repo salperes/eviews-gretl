@@ -506,6 +506,55 @@ check("Innovational outlier" in gw.text.toPlainText(), "breakpoint unit root tes
 check(sw.stack.currentWidget() is sw._scroll, "series view: seasonal graph")
 
 
+# --- value maps and sample objects (windows from the workfile list)
+w.execute("valmap vmt")
+w.execute('vmt.append 0 "zero" [1,inf) "positive"')
+w.execute("sample s1 1990q1 1999q4")
+kinds = {it.data(Qt.UserRole) for it in (w.wf_window.list.item(i) for i in range(w.wf_window.list.count()))}
+check(("vmt", "valmap") in kinds and ("s1", "sample") in kinds, "workfile list shows valmap and sample objects")
+w.open_object(("vmt", "valmap"))
+vw3 = w.windows["vmt"]
+check(vw3.table.rowCount() == 2 and vw3.table.item(1, 1).text() == "positive", "valmap window lists value/label pairs")
+vw3.add_row()
+from PySide6.QtWidgets import QTableWidgetItem as _TI
+vw3.table.setItem(2, 0, _TI("na"))
+vw3.table.setItem(2, 1, _TI("missing"))
+vw3.apply()
+check(w.ctx.valmaps["vmt"].get("na") == "missing", "valmap window edits the map")
+w.open_object(("s1", "sample"))
+smw = w.windows["s1"]
+smw.edit.setText("1995q1 1999q4")
+smw.set_def()
+smw.use()
+check(w.engine.wf.sample_first == "1995:1" and w.engine.wf.sample_last == "1999:4", "sample window: set and use as current sample")
+w.execute("smpl 1960q1 2019q4")
+
+# --- program dialogs asked before running (@uiprompt, @uiedit, @uilist)
+import evprg2hansl as _tr
+_h = _tr.translate_full('wfcreate u 3\n!r = @uiprompt("Go on?", "YN")\n!e = @uiedit(%nm, "Series name")\n'
+                        '!c = @uilist(%pick, "Pick", "a b c")\n!d = @uidialog("Check", !logs, "Logs")\n')[0]
+_q, _t, _i = QMessageBox.question, QInputDialog.getText, QInputDialog.getItem
+QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+QInputDialog.getText = staticmethod(lambda *a, **k: ("gdp", True))
+QInputDialog.getItem = staticmethod(lambda *a, **k: ("b", True))
+_h2 = w.ui_answers(_h)
+QMessageBox.question, QInputDialog.getText, QInputDialog.getItem = _q, _t, _i
+check("scalar r = 1" in _h2 and 'string nm = "gdp"' in _h2 and 'string pick = "b"' in _h2 and "scalar logs = 1" in _h2,
+      "program dialogs: answers go into the script")
+
+# --- drag and drop: objects onto a group window and onto a page tab
+from evqt.app import _encode_objs, _decode_objs
+md = _encode_objs("usmacro", [("GDP", "series"), ("macro", "group")])
+check(_decode_objs(md) == ("usmacro", [("GDP", "series"), ("macro", "group")]), "drag data carries page and objects")
+w.execute("group gdd GDP")
+w.open_object(("gdd", "group"))
+w.windows["gdd"].add_members(["CONS", "INV"])
+check(w.windows["gdd"].members() == ["GDP", "CONS", "INV"], "drop series on a group window adds them")
+w.wf_window.drop_on_page("annual", "usmacro", [("CPI", "series")])
+w.select_page("annual")
+check("CPI" in w.engine.wf.series, "drop a series on a page tab copies it there")
+w.select_page("usmacro")
+
 # --- copy/paste objects and cells, printing
 wl = w.wf_window.list
 wl.clearSelection()

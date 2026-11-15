@@ -302,7 +302,8 @@ def program_vars(p: str, ctx: Ctx) -> str:
 
 
 def _ui_calls(expr: str) -> str:
-    """EViews dialogs in a script: @uiprompt answers OK/Yes, the others keep the current values."""
+    """EViews dialogs: ev_uiprompt answers OK/Yes in a script; @uiedit, @uilist, @uiradio, @uifiledlg keep
+    the current values there. The variable, prompt and choices are kept so that evqt can ask before running."""
     expr = re.sub(r"(?i)@uiprompt\s*\(", "ev_uiprompt(", expr)
     while True:
         m = re.search(r"(?i)@ui(edit|list|radio|filedlg|dialog|mlist)\s*\(", expr)
@@ -318,14 +319,59 @@ def _ui_calls(expr: str) -> str:
             elif not q and ch == ")":
                 depth -= 1
             i += 1
-        expr = expr[:m.start()] + f'ev_uiskip("{m.group(1).lower()}")' + expr[i:]
+        inner = expr[m.end():i - 1]
+        args = [a.strip() for a in re.findall(r'"[^"]*"|[^,]+', inner) if a.strip()]
+        kind = m.group(1).lower()
+        if kind == "dialog":
+            # @uidialog("Edit", %x, "prompt", "List", !y, "prompt", "a b", "Check", !z, "label", "Caption", "text" ...)
+            parts, k = [], 0
+            lit = lambda a: a if a.startswith('"') else '"' + a.replace('"', "'") + '"'
+            while k < len(args):
+                ctl = args[k].strip('"').lower()
+                if ctl in ("edit", "check") and k + 2 < len(args):
+                    parts.append(f'ev_uiskip("{ctl}", "{args[k + 1]}", {lit(args[k + 2])}, "")')
+                    k += 4 if ctl == "edit" and k + 3 < len(args) and re.fullmatch(r"\d+", args[k + 3]) else 3
+                elif ctl in ("list", "radio", "combo") and k + 3 < len(args):
+                    kk = "radio" if ctl == "radio" else "list"
+                    parts.append(f'ev_uiskip("{kk}", "{args[k + 1]}", {lit(args[k + 2])}, {lit(args[k + 3])})')
+                    k += 4
+                elif ctl in ("caption", "text", "colbreak", "setoption", "button"):
+                    k += 1 if ctl == "colbreak" else 2
+                else:
+                    k += 1
+            call = "(" + " + ".join(parts) + ")" if parts else 'ev_uiskip("dialog", "", "", "")'
+            expr = expr[:m.start()] + call + expr[i:]
+            continue
+        var = args[0] if args and re.fullmatch(r"[%!]\w+", args[0]) and kind != "dialog" else ""
+        lit = lambda a: a if a.startswith('"') else '"' + a.replace('"', "'") + '"'
+        prompt = lit(args[1]) if len(args) > 1 and kind != "dialog" else '""'
+        choices = lit(args[2]) if len(args) > 2 and kind in ("list", "radio", "mlist") else '""'
+        expr = expr[:m.start()] + f'ev_uiskip("{kind}", "{var}", {prompt}, {choices})' + expr[i:]
 
 
 _IDENT_RX = re.compile(r"(?<![@%!\w.{}])([A-Za-z_]\w*)(?!\w)(?!\s*\()")
 _EXPR_WORDS = {"and", "or", "not", "na", "c"}
 
 
+def _vm_arrays(vm: dict) -> str:
+    q = lambda xs: "defarray(" + ", ".join('"' + x.replace('"', "'") + '"' for x in xs) + ")"
+    return f"{q(list(vm))}, {q(list(vm.values()))}"
+
+
+def _map_calls(expr: str, ctx: Ctx) -> str:
+    """@map(x, vm) -> label of x; @unmap(text, vm) -> its code (EViews valmap functions)."""
+    def sub(m):
+        fn, arg, vm = m.group(1).lower(), m.group(2).strip(), translate_name(m.group(3), ctx)
+        if vm not in ctx.valmaps:
+            raise ValueError(f"@{fn}: valmap {m.group(3)} not defined")
+        a = f"EVSV{arg}EVSV" if re.fullmatch(r"[A-Za-z_]\w*", arg) else arg
+        return f"ev_v{fn}({a}, {_vm_arrays(ctx.valmaps[vm])})"
+    return re.sub(r"(?i)@(map|unmap)\s*\(\s*([^,()]+?)\s*,\s*(\w+)\s*\)", sub, expr)
+
+
 def _uses_alpha(expr: str, ctx: Ctx) -> bool:
+    if re.search(r"(?i)@(un)?map\s*\(", expr):
+        return True
     if not ctx.alphas:
         return False
     return any(translate_name(m.group(1), ctx) in ctx.alphas
@@ -335,14 +381,14 @@ def _uses_alpha(expr: str, ctx: Ctx) -> bool:
 def _obs_expr(expr: str, ctx: Ctx) -> str:
     """An expression evaluated at observation ev_t: alpha series give their text, others their value."""
     out = []
-    for lit, part in _split_strings(expr):
+    for lit, part in _split_strings(_map_calls(expr, ctx)):
         if lit:
             out.append(part)
             continue
 
         def sub(m):
             w = m.group(1)
-            if w.lower() in _EXPR_WORDS:
+            if w.lower() in _EXPR_WORDS or w.startswith(("EVSV", "EVOB")) or w in ("defarray",):
                 return w
             tn = translate_name(w, ctx)
             if tn in ctx.alphas:
@@ -755,7 +801,15 @@ def _breakls(sp, op, ctx):
     mb = op.get("maxbreaks", op.get("maxbrk", "5")) or "5"
     trim = float(op.get("trim", "15") or 15)
     trim = trim / 100 if trim > 1 else trim
-    cr = "lwz" if "lwz" in str(op.get("select", "")).lower() else "bic"
+    meth = str(op.get("method", "seqplus1")).lower()
+    if meth == "globinfo":
+        cr = "lwz" if "lwz" in str(op.get("select", op.get("info", ""))).lower() else "bic"
+    elif meth in ("seqplus1", "seqall", "globplus1"):
+        cr = "seq"
+    elif meth == "glob":
+        cr = "glob"
+    else:
+        raise ValueError(f"breakls: method={meth} not supported (seqplus1, seqall, globplus1, glob, globinfo)")
     return f'ev_breakls("{sp}", dataset, {mb}, {trim:g}, "{cr}")'
 
 
@@ -1428,6 +1482,17 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             return _system_estimate(o, meth_map[ml], ctx, opts)
         if ml == "fiml":
             return _fiml_estimate(o, ctx)
+        if ml == "arch":
+            # system ARCH: mean equations by least squares, then a GARCH(1,1) variance model by ML
+            low = (args or "").lower() + " " + (opts or "").lower()
+            model = "dbekk" if "@diagbekk" in low or "bekk" in low else ("ccc" if "@ccc" in low else "dvech")
+            m = re.search(r"arch\(\s*(\d+)", low.replace("@", " "))
+            g = re.search(r"garch\(\s*(\d+)", low)
+            if (m and m.group(1) != "1") or (g and g.group(1) != "1"):
+                raise ValueError("system ARCH: only ARCH(1) and GARCH(1) terms are supported")
+            if "tdist" in low or "ged" in low:
+                raise ValueError("system ARCH: only normal errors are supported")
+            return _system_estimate(o, "ls", ctx, None) + [f'bundle {o}_arch = ev_sysarch({o}, "{model}")']
         if ml in ("output", "results", "display", "spec"):
             return [f"ev_sysprint(&{o})"]
         if ml in ("makeresids", "makeresid"):
@@ -1469,29 +1534,39 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
     if o in ctx.valmaps:
         if ml != "append":
             raise ValueError(f"valmap method .{meth} not supported (append)")
-        toks = re.findall(r'"[^"]*"|\S+', args)
+        # keys: numbers, text, na, or intervals such as [0,10) or (5, inf]
+        toks = re.findall(r'"[^"]*"|[\[(][^\])]*[\])]|\S+', args)
         if len(toks) % 2:
             raise ValueError("valmap append: give value label pairs")
         for v, lab in zip(toks[::2], toks[1::2]):
-            ctx.valmaps[o][v] = lab.strip('"')
+            ctx.valmaps[o][re.sub(r"\s+", "", v.strip('"'))] = lab.strip('"')
         return [f"# valmap {o}: {args.strip()}"]
     if ml == "map" and translate_name(args.strip(), ctx) in ctx.valmaps:
-        vm = ctx.valmaps[translate_name(args.strip(), ctx)]
-        try:
-            keys = {int(float(k)): v for k, v in vm.items() if float(k) == int(float(k))}
-        except ValueError:
-            raise ValueError("valmap: only numeric values can be mapped here")
-        if len(keys) != len(vm) or min(keys) < 1:
-            raise ValueError("valmap: gretl value labels need positive integer codes (1, 2, ...)")
-        labs = [keys.get(i, str(i)) for i in range(1, max(keys) + 1)]
-        q = ", ".join('"' + x.replace('"', "'") + '"' for x in labs)
-        return [f"strings ev_vlab = defarray({q})", f"stringify({o}, ev_vlab)    # value labels (EViews valmap)"]
+        vname = translate_name(args.strip(), ctx)
+        vm = ctx.valmaps[vname]
+        codes = None
+        if o not in ctx.alphas:
+            try:
+                codes = {int(float(k)): v for k, v in vm.items() if float(k) == int(float(k))}
+            except ValueError:
+                codes = None
+        if codes and len(codes) == len(vm) and min(codes) >= 1:
+            labs = [codes.get(i, str(i)) for i in range(1, max(codes) + 1)]
+            q = ", ".join('"' + x.replace('"', "'") + '"' for x in labs)
+            return [f"strings ev_vlab = defarray({q})", f"stringify({o}, ev_vlab)    # value labels (EViews valmap)"]
+        # other codes (zero, negative, fractional, intervals, text): the series keeps its values and a
+        # string-valued companion series NAME_map shows the labels
+        ctx.alphas.add(f"{o}_map")
+        return [f"# {o}.map {vname}: gretl value labels need codes 1, 2, ...; labels go to {o}_map",
+                "strings ev_as = array($t2)", "loop ev_t = $t1..$t2 --quiet",
+                f"ev_as[ev_t] = ev_vmap(ev_strat({o}, ev_t), {_vm_arrays(vm)})", "endloop",
+                f"series {o}_map = ev_alpha(ev_as)"]
     if o in ctx.pools:
         if ml == "ls":
             op = _opts(opts)
-            cx = "fixed" if op.get("cx", "")[:1].lower() == "f" else "none"
-            if op.get("cx", "")[:1].lower() == "r":
-                raise ValueError("pool random effects: stack the pool with pagestack and use ls(cx=r)")
+            cx = {"f": "fixed", "r": "random"}.get(op.get("cx", "")[:1].lower(), "none")
+            if "@perreg" in args.lower():
+                raise ValueError("pool: period specific coefficients (@perreg) are not supported")
             spec = re.sub(r"\s+", " ", program_vars(args.strip(), ctx))
             spec = re.sub(r"[A-Za-z_]\w*", lambda m: m.group(0) if m.group(0).lower() == "c" else translate_name(m.group(0), ctx), spec)
             ctx.equations[o + "_eq"] = "pool"
@@ -1801,6 +1876,13 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
     if ml == "ubreak" and ctx.equations.get(o, "ls") == "ls":
         t = (opts or "15").strip() or "15"
         return [f"bundle {o}_ubreak = ev_ubreak({o}, {float(t) / 100:g})"]
+    if ml == "multibreak" and ctx.equations.get(o, "ls") in ("ls", "breakls"):
+        op = _opts(opts)
+        mb = op.get("maxbreaks", op.get("maxbrk", "5")) or "5"
+        trim = float(op.get("trim", "15") or 15)
+        size = float(op.get("size", "5") or 5)
+        return [f"bundle {o}_mb = ev_bptests({o}.spec, dataset, {mb}, {trim / 100 if trim > 1 else trim:g}, 500, "
+                f"{size / 100 if size > 1 else size:g})"]
     if ml == "varinf" and ctx.equations.get(o, "ls") == "ls":
         return [f"matrix {o}_vif = ev_vif({o})"]
     if ml in ("ranhaus", "fixedtest") and ctx.equations.get(o) == "panel":

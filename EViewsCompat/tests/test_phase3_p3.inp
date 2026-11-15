@@ -1,0 +1,88 @@
+# P3 items: Bai-Perron tests, system ARCH, pool random effects and cross-section coefficients, valmaps
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+# --- T11: global minima agree with ev_breakls; q = 1 critical values near Bai-Perron (2003)
+series dc = 100 * ldiff(CONS)
+series dg = 100 * ldiff(GDP)
+smpl 1970:1 2019:4
+bundle old = ev_breakls("dc c dg", dataset, 3, 0.15, "bic", 1)
+bundle d = ev__xspec("dc c dg", dataset, "evq")
+matrix bs = {}
+matrix dts = {}
+matrix st = ev__bpstats(d.y, d.X, ceil(0.15 * rows(d.y)), 3, &bs, &dts)
+check("segment SSR / DP agree with ev_breakls", maxc(abs(bs - old.ssr_m)), 0, 1e-8)
+nulldata 600 --preserve
+set seed 3
+series u = normal()
+bundle t = ev_bptests("u c", dataset, 5, 0.15, 600, 0.05, 1)
+check("sup F(1) 5% cv near 8.58", t.cv_supF[1], 8.58, 0.05)
+check("UDmax 5% cv near 8.88", t.cv_UDmax, 8.88, 0.06)
+check("sequential F(2|1) 5% cv near 10.13", t.cv_seqF[2], 10.13, 0.06)
+
+# --- Y5: one equation: diagonal VECH, diagonal BEKK and CCC are the same GARCH(1,1)
+open ../../data/usmacro.gdt --quiet
+series dc = 100 * ldiff(CONS)
+smpl 1970:1 2019:4
+ols dc const --quiet
+series e = $uhat
+bundle s1 = _(uhat = {e}, method = "LS")
+bundle a = ev_sysarch(s1, "dvech", 1)
+bundle b = ev_sysarch(s1, "dbekk", 1)
+bundle c = ev_sysarch(s1, "ccc", 1)
+check("dvech = dbekk (n = 1)", a.lnl, b.lnl, 1e-5)
+check("dvech = ccc (n = 1)", a.lnl, c.lnl, 1e-5)
+garch 1 1 ; e --nc --quiet
+check("close to gretl garch (start value differs)", a.lnl, $lnl, 1e-3)
+
+# --- O8: pool fixed / random effects equal gretl panel; cross-section slopes equal OLS
+nulldata 40 --preserve
+setobs 1 1980 --time-series
+set seed 9
+loop foreach i a b c d
+    series x_$i = normal()
+    series y_$i = 1 + 0.5 * x_$i + 0.8 * normal() + (i - 2.5) * 0.4
+endloop
+bundle fe = ev_poolls("_a _b _c _d", "y? c x?", dataset, "fixed", 1)
+bundle re = ev_poolls("_a _b _c _d", "y? c x?", dataset, "random", 1)
+bundle cs = ev_poolls("_a _b _c _d", "y? c @cxreg x?", dataset, "none", 1)
+matrix Ys = {y_a} | {y_b} | {y_c} | {y_d}
+matrix Xs = {x_a} | {x_b} | {x_c} | {x_d}
+nulldata 160 --preserve
+setobs 40 1:1 --stacked-time-series
+series y = Ys
+series x = Xs
+panel y const x --fixed-effects --quiet
+check("pool fixed effects slope = panel", fe.coeff[2], $coeff[2])
+check("pool fixed effects: constant s.e. = panel", fe.stderr[1], $stderr[1], 1e-5)
+panel y const x --random-effects --quiet
+check("pool random effects slope = panel (Swamy-Arora)", re.coeff[2], $coeff[2])
+check("pool random effects s.e. = panel", re.stderr[2], $stderr[2], 1e-5)
+series unit = $unit
+list XI = null
+loop k = 1..4
+    series xi_$k = x * (unit == k)
+    XI += xi_$k
+endloop
+ols y const XI --quiet
+check("cross-section specific slope = OLS with interactions", cs.coeff[3], $coeff[3])
+
+# --- W15: value maps with any codes, intervals and NA
+strings K = defarray("-1", "0", "[1,10)", "na")
+strings L = defarray("neg", "zero", "small", "missing")
+check("valmap: negative code", ev_vmap("-1", K, L) == "neg", 1)
+check("valmap: interval", ev_vmap("3.5", K, L) == "small", 1)
+check("valmap: NA", ev_vmap("", K, L) == "missing", 1)
+check("valmap: no match keeps the value", ev_vmap("12", K, L) == "12", 1)
+check("unmap", ev_vunmap("zero", K, L), 0)
+check("dialog stub returns OK", ev_uiskip("edit", "%s", "Name", ""), 0)

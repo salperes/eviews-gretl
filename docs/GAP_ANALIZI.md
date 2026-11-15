@@ -30,20 +30,20 @@ karşılaştırıldı. EViews'in kendisiyle sayısal karşılaştırma yapılmad
 
 | Alan | ✅ | 🟡 | ❌ | ⛔ | Kalem |
 |---|---|---|---|---|---|
-| W · Workfile, sayfalar, veri | 13 | 1 | 0 | 2 | 16 |
+| W · Workfile, sayfalar, veri | 14 | 0 | 0 | 2 | 16 |
 | F · İfadeler ve @-fonksiyonlar | 9 | 0 | 0 | 0 | 9 |
 | E · Denklem tahmincileri | 22 | 0 | 0 | 0 | 22 |
-| T · Denklem testleri ve görünümleri | 16 | 1 | 0 | 0 | 17 |
+| T · Denklem testleri ve görünümleri | 17 | 0 | 0 | 0 | 17 |
 | S · Seri görünümleri ve işlemleri | 16 | 0 | 0 | 0 | 16 |
 | G · Grup | 8 | 1 | 0 | 0 | 9 |
 | V · VAR / VEC | 12 | 0 | 0 | 0 | 12 |
-| Y · Sistem ve Model | 7 | 1 | 0 | 0 | 8 |
-| O · Diğer nesneler | 10 | 1 | 0 | 0 | 11 |
-| P · Programlama dili | 12 | 2 | 0 | 0 | 14 |
-| U · Arayüz (evqt) | 13 | 2 | 1 | 1 | 17 |
-| **Toplam** | **138** | **9** | **1** | **3** | **151** |
+| Y · Sistem ve Model | 8 | 0 | 0 | 0 | 8 |
+| O · Diğer nesneler | 11 | 0 | 0 | 0 | 11 |
+| P · Programlama dili | 13 | 1 | 0 | 0 | 14 |
+| U · Arayüz (evqt) | 15 | 1 | 0 | 1 | 17 |
+| **Toplam** | **145** | **3** | **0** | **3** | **151** |
 
-Kabaca kapsama: kalemlerin **%91'i tam, %6'sı kısmi**; açık P1 ve P2 kalemi yok (kalan kısmiler P3 veya önceliksiz). Kapsanan kalemler EViews
+Kabaca kapsama: kalemlerin **%96'sı tam**; açık P1, P2 kalemi yok, P3'te yalnızca U17 (canlı test) kaldı; G4 ve P14 önceliksiz. Kapsanan kalemler EViews
 programlarında en sık kullanılanlar olduğu için (ls, ARCH, VAR, sistemler, modeller,
 döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 gerçek programın
 6'sı da çevrilip çalışıyor.
@@ -68,7 +68,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | W12 | EViews `.edb` veritabanı | ⛔ | kapalı format | – | – | – |
 | W13 | Çevrimiçi veritabanları (`dbopen(type=fred)`, DBnomics) | ✅ | DBnomics ve FRED (halka açık CSV, API anahtarı gerekmez; tarih eşleştirme, yüksek frekans ortalama/toplam/ilk/son); ikisi de canlı denendi | dbnomics paketi | M | P2 |
 | W14 | Alfa (metin) seriler | ✅ | metin sabitleri ve ifadeler (@left, @upper, @str, +, başka alfa seriler, @year ...) gözlem gözlem; alfa serilerden sayılar (@len, @val, karşılaştırmalar); örneklem dışı değerler korunur | string-valued series | M | P2 |
-| W15 | Değer eşlemeleri (`valmap`) | 🟡 | valmap + x.map: pozitif tamsayı kodlar gretl değer etiketlerine (stringify) çevrilir; metin değerli ve sıfır/negatif kodlu eşlemeler yok | string-valued series | M | P3 |
+| W15 | Değer eşlemeleri (`valmap`) | ✅ | valmap: sayısal, metin, na ve aralık ([0,10)) anahtarları; 1, 2, ... kodlarında gretl değer etiketleri, diğerlerinde NAME_map metin serisi; @map ve @unmap | string-valued series | M | P3 |
 | W16 | Örnek nesneleri (`sample s1 ...`, `smpl s1`) | ✅ | sample s1 …, smpl s1, s1.set | smpl + kaydedilmiş koşul | S | P2 |
 
 ## F · İfadeler ve @-fonksiyonlar
@@ -126,7 +126,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | T8 | Eklenen/çıkarılan değişken testleri (testadd, testdrop) | ✅ | ev_testadd, ev_testdrop | add, omit | S | **P1** |
 | T9 | **CUSUM, CUSUMSQ, özyinelemeli katsayılar** | ✅ | ev_rls: CUSUM, CUSUMSQ (5% bant, KS yaklaşımı), özyinelemeli kalıntı ve katsayılar | cusum, rolling | M | **P1** |
 | T10 | Quandt-Andrews kırılma testi | ✅ | eq.ubreak: Quandt-Andrews, Andrews p-değeri | qlrtest | S | P2 |
-| T11 | Bai-Perron çoklu kırılma testi | 🟡 | ev_breakls ile global kırılma noktaları, sup-F ve bilgi kriteriyle sayı seçimi; UDmax/WDmax ve ardışık L+1 testleri yok | kendi kodu | L | P3 |
+| T11 | Bai-Perron çoklu kırılma testi | ✅ | ev_bptests: sup F(m|0), UDmax, WDmax, ardışık F(l+1|l); kritik değerler aynı regresörlerle simülasyon (q = 1'de Bai-Perron 2003 tablolarıyla uyumlu); breakls method=seqplus1/glob/globinfo, eq.multibreak | kendi kodu | L | P3 |
 | T12 | VIF, katsayı varyans ayrıştırması | ✅ | eq.varinf: VIF | vif, bkw | S | P2 |
 | T13 | Etki istatistikleri (leverage, DFFITS) | ✅ | kaldıraç, studentize kalıntı, DFFITS, COVRATIO, DFBETAS (ev_influence) | leverage | S | P3 |
 | T14 | Güven elipsi | ✅ | iki katsayının güven elipsi (ev_ellipse, grafik) | kendi kodu + plot | M | P3 |
@@ -194,7 +194,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | Y2 | Model: denklem + özdeşlik, dinamik/statik Newton çözümü | ✅ | | kendi kodu | – | – |
 | Y3 | Senaryolar, override, add factor, stokastik simülasyon | ✅ | | | – | – |
 | Y4 | Wald, kalıntılar (sistem) | ✅ | | | – | – |
-| Y5 | Sistem kalıntı testleri, sistem ARCH | 🟡 | sistem kalıntı korelasyonu ve normallik testi (ev_sysrestests); sistem ARCH yok | kendi kodu | M | P3 |
+| Y5 | Sistem kalıntı testleri, sistem ARCH | ✅ | sistem kalıntı testleri ve sistem ARCH (ev_sysarch): diagonal VECH, diagonal BEKK, CCC, GARCH(1,1), Gauss ML; ortalama denklemleri sistem tahmininden (iki adım) | kendi kodu | M | P3 |
 | Y6 | Modele VAR/sistem ekleme (`makemodel`, `m.merge var`) | ✅ | v.makemodel: VAR denklemleri model çözümünde | | M | P2 |
 | Y7 | Hedef arama / kontrol (`m.control`), çözücü seçenekleri | ✅ | m.control: araç serisi, hedef patikayı izleyecek şekilde dönem dönem (sekant) bulunur (ev_modelcontrol) | kendi kodu | M | P3 |
 | Y8 | Model çözüm değerlendirme tabloları (`m.msg`, fit istatistikleri) | ✅ | çözüm uyum istatistikleri (RMSE, MAE, MAPE, Theil) ev_modelfit | | S | P3 |
@@ -210,7 +210,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | O5 | Graph türleri: histogram, boxplot, kernel, QQ, pie, dot, seasonal | ✅ | hist, boxplot, QQ, kernel, dot, seasonal (ev_seasplot), pie (ev_pie: örneklemin her gözlemi için bir pasta, en çok 12) | gnuplot, boxplot | S | P2 |
 | O6 | State space (`sspace`, Kalman) | ✅ | doğrusal Gauss modeller ML ile (Kalman), durum sabitleri, makestates (filtre/düzleştirilmiş); bağımsız sinyal ve durum hataları | kalman | L | P2 |
 | O7 | LogL (özel olabilirlik) | ✅ | logl nesnesi → gretl mle (@logl, param / c(i) başlangıç değerleri) | mle | M | P2 |
-| O8 | Pool nesnesi (`pool`, `?` serileri ile tahmin) | 🟡 | pool ls: ortak katsayılar, sabit etkiler (ev_poolls); rastgele etkiler ve kesite özgü katsayılar yok | | L | P3 |
+| O8 | Pool nesnesi (`pool`, `?` serileri ile tahmin) | ✅ | pool ls: ortak katsayılar, sabit etkiler (sabitin s.h. dahil) ve Swamy-Arora rastgele etkiler (gretl panel ile aynı), @cxreg ile kesite özgü katsayılar; @perreg yok | | L | P3 |
 | O9 | Spool nesnesi | ✅ | spool append, save (metin dosyası; grafikler PNG), print | | M | P3 |
 | O10 | Factor nesnesi | ✅ | faktör analizi ML ve iteratif temel faktörler (ev_factor), yükler, ortaklıklar | | L | P3 |
 | O11 | svector, rowvector metotları (`@wcount` vb. ile) | ✅ | svector(n), sv(i) atama ve okuma, @wsplit | strings | S | P2 |
@@ -228,7 +228,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | P7 | Grafik/çıktı biçimlendirme satırları yok sayılır | ✅ | | | – | – |
 | P8 | `exitloop` | ✅ | → break | break | S | **P1** |
 | P9 | **Program argümanları** `%0 %1`, `exec`/`run` başka program | ✅ | `--args` ile %0 %1 …; `run`/`exec prog arg…` satır içi açılır | | S | **P1** |
-| P10 | `@uiprompt`, `@uiedit` vb. diyaloglar | 🟡 | programda diyalog açılmaz: @uiprompt OK/Evet yanıtlar, @uiedit/@uilist/@uiradio/@uidialog değerleri korur ve mesaj basar | | M | P3 |
+| P10 | `@uiprompt`, `@uiedit` vb. diyaloglar | ✅ | evqt program çalıştırmadan önce @uiprompt, @uiedit, @uilist, @uiradio, @uifiledlg ve @uidialog (Edit, Check, List, Radio) sorularını sorar ve yanıtları betiğe yazar; gretlcli'de varsayılanlar kullanılır; döngü içindeki diyalog bir kez sorulur | | M | P3 |
 | P11 | Hata yönetimi `seterr`, `@errorcount`, `setmaxerrs` | ✅ | seterr, setmaxerrs (komutlar catch altında, hata sayılır, sınırda program durur), @errorcount, clearerrs; sayaç veri açılınca sıfırlanır | catch | S | P2 |
 | P12 | `logmsg`, `statusline`, `tic/toc` | ✅ | logmsg, statusline, tic/toc, @toc | printf, $stopwatch | S | P2 |
 | P13 | Döngü içinde `return` (P5'in eksiği) | ✅ | bayrak + break zinciri ile; iç içe döngüler ve alt programlar | | M | P3 |
@@ -249,12 +249,12 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | U9 | Grafik biçimlendirme diyaloğu (eksen, renk, metin) | ✅ | grafik penceresinde Options: başlık, eksen etiketleri, aralık, log ölçek, lejant | M | P2 |
 | U10 | Table nesnesi penceresi (hücre düzenleme) | ✅ | TableWindow: Edit+/- ile hücre düzenleme, Save (csv/txt/html) | M | P1 |
 | U11 | Komut geçmişi kaydetme / komut penceresinden program kaydetme | ✅ | File > Save Command History as Program | S | P2 |
-| U12 | Nesne kopyala/yapıştır, sürükle-bırak | 🟡 | workfile penceresinde Kopyala/Yapıştır (Ctrl+C/V): aynı sayfada NAME_copy, sayfalar arası seri (frekans dönüştürmeli); hücreleri sekmeyle ayrılmış metin olarak kopyalama; sürükle-bırak yok | M | P3 |
+| U12 | Nesne kopyala/yapıştır, sürükle-bırak | ✅ | Kopyala/Yapıştır (Ctrl+C/V), hücre kopyalama; sürükle-bırak: workfile listesinden sayfa sekmesine (seri kopyalama) ve grup penceresine (üye ekleme) | M | P3 |
 | U13 | Yazdırma | ✅ | File > Print: çıktı metni, tablo ve grafik (sistem yazdırma diyaloğu, PDF dahil) | S | P3 |
-| U14 | Örneklem nesnesi, değer eşlemesi pencereleri | ❌ | W15, W16 ile | M | P3 |
+| U14 | Örneklem nesnesi, değer eşlemesi pencereleri | ✅ | valmap penceresi (değer/etiket tablosu, düzenleme) ve örneklem nesnesi penceresi (tanım, Set, Use as Current Sample); workfile listesinde görünür | M | P3 |
 | U15 | Durum çubuğu: Path / DB / WF / Sample | ✅ | | – | – |
 | U16 | EViews eklentileri (add-ins) | ⛔ | EViews'e özgü | – | – |
-| U17 | Erişilebilirlik otomasyonu altında Qt 6.8 çökmesi | 🟡 | belgelendi; Qt sürüm yükseltmesiyle tekrar denenebilir | S | P3 |
+| U17 | Erişilebilirlik otomasyonu altında Qt 6.8 çökmesi | 🟡 | PySide6 6.12 ayrı ortamda kuruldu, ekran dışı test 134/134 geçti; canlı erişilebilirlik testi açık başka bir evqt penceresi yüzünden bekliyor | S | P3 |
 
 ---
 
@@ -331,6 +331,24 @@ W14, S6, O4 ve O5 tamamlandı; toplam 138 tam, 9 kısmi, 1 yok, 3 mümkün deği
 Bu adımda bulunan hata: alfa ifadelerinde `@year`, `@trend` ve `@obsnum` gözlem yerine tüm seriyi
 veriyordu (düzeltildi). Testler: paket 413 kontrol (22 dosya), çevirici 77, evqt 126 kontrol;
 `translator/examples/phase3d.prg` dört kalemi birlikte kullanır.
+
+### Faz 3 ek 2: P3 kısmileri
+
+W15, T11, Y5, O8, P10, U12 ve U14 tamamlandı; toplam 145 tam, 3 kısmi, 0 yok, 3 mümkün değil.
+- **T11:** Bai-Perron testleri için gretl'de tablo yok. Kritik değerler denklemin kendi regresörleri
+  ve iid normal hatalarla simüle ediliyor (bu sıfır hipotezinde tam). Ardışık testte l kırılma tarihi
+  sabit tutuluyor (Bai-Perron'un varsayımı). Tek sabitli modelde değerler yayımlanmış tablolara yakın:
+  sup F(1) 8.43 (8.58), UDmax 8.58 (8.88), F(2|1) 10.05 (10.13). Kesit SSR hesabı vektörleştirildi;
+  eski döngülü sürümle aynı sonuç, yüzlerce kat hızlı.
+- **Y5:** üç model tek denklemde aynı GARCH(1,1)'e iniyor (aynı olabilirlik). gretl `garch` ile fark
+  yalnızca başlangıç varyansından (1e-4 göreli). Ortalama ve varyans EViews'teki gibi birlikte değil,
+  iki adımda tahmin ediliyor.
+- **O8:** sabit ve rastgele etkiler gretl `panel` ile birebir aynı. Önceki sürümde sabit etkili
+  modelde sabitin standart hatası NA idi; bu düzeltildi.
+- **U17:** Qt 6.12 ayrı bir sanal ortamda (~/.venvs/evqt-qt612) çalışıyor. Çökmenin canlı denemesi
+  için açık evqt pencerelerinin kapatılması gerekiyor.
+
+Testler: paket 431 kontrol (23 dosya), çevirici 80, evqt 134 kontrol (Qt 6.8 ve 6.12'de).
 
 ## Önerilen yol haritası
 

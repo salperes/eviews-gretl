@@ -88,6 +88,10 @@ simulated p-values), graph `draw`, `scale`, `datelabel`, `merge` and `pie`.
 `examples/phase3.prg`, `examples/phase3c.prg` and `examples/phase3d.prg` use them;
 `examples/phase3c_check.inp` checks results against gretl's own estimators.
 
+Also: Bai-Perron tests (`eq.multibreak`, `breakls(method=seqplus1|glob|globinfo)`), system ARCH
+(`sys.arch @diagvech|@diagbekk|@ccc`), pool random effects and `@cxreg`, valmaps with any codes
+(`@map`, `@unmap`).
+
 What is still partial or missing, item by item: [`docs/GAP_ANALIZI.md`](../docs/GAP_ANALIZI.md).
 
 ## Real programs (`real_prg/`, local testing only: the source repos have no licence)

@@ -5,7 +5,7 @@ import os
 import re
 import sys
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEvent, QMimeData, QObject, QSize, Qt
 from PySide6.QtGui import (QAction, QColor, QPalette, QFont, QFontDatabase, QIcon, QKeySequence,
                            QPainter, QPen, QPixmap, QTextCursor, QShortcut)
 from PySide6.QtWidgets import (QApplication, QComboBox, QSizePolicy, QTabBar, QSplitter, QAbstractItemView,
@@ -37,7 +37,8 @@ def _icon(kind: str) -> QIcon:
     p.setRenderHint(QPainter.Antialiasing)
     colors = {"series": "#2e7d32", "equation": "#1565c0", "group": "#6a1b9a", "var": "#ad1457",
               "vecm": "#c62828", "system": "#283593", "model": "#4e342e",
-              "scalar": "#ef6c00", "string": "#5d4037", "bundle": "#455a64", "workfile": "#00838f"}
+              "scalar": "#ef6c00", "string": "#5d4037", "bundle": "#455a64", "workfile": "#00838f",
+              "valmap": "#00695c", "sample": "#827717"}
     c = QColor(colors.get(kind, "#455a64"))
     p.setPen(QPen(c.darker(130), 1))
     p.setBrush(c.lighter(185))
@@ -47,7 +48,8 @@ def _icon(kind: str) -> QIcon:
         p.drawPolyline([(QPixmapPoint(x, y)) for x, y in ((4, 12), (7, 7), (10, 10), (14, 4))])
     else:
         glyph = {"equation": "=", "group": "G", "scalar": "#", "string": "a", "bundle": "b",
-                 "workfile": "W", "var": "V", "vecm": "V", "forecast": "F", "system": "S", "model": "M"}.get(kind, "?")
+                 "workfile": "W", "var": "V", "vecm": "V", "forecast": "F", "system": "S", "model": "M",
+                 "valmap": "m", "sample": "s"}.get(kind, "?")
         f = QFont()
         f.setBold(True)
         f.setPixelSize(12)
@@ -409,10 +411,62 @@ class SeriesWindow(ObjectWindow):
             self.main.execute(f"series {self.name}_hp = {self.name} - hpfilt({self.name}{arg})", hansl=True)
 
 
+OBJ_MIME = "application/x-evqt-objects"
+
+
+def _encode_objs(page: str, objs) -> QMimeData:
+    md = QMimeData()
+    md.setData(OBJ_MIME, ("\n".join([page] + [f"{n}\t{k}" for n, k in objs])).encode())
+    md.setText(" ".join(n for n, _ in objs))
+    return md
+
+
+def _decode_objs(md: QMimeData):
+    lines = bytes(md.data(OBJ_MIME)).decode().split("\n")
+    return lines[0], [tuple(x.split("\t")) for x in lines[1:] if "\t" in x]
+
+
+class _ObjList(QListWidget):
+    """Workfile object list whose drags carry the selected objects and their page."""
+
+    def __init__(self, wfw):
+        super().__init__()
+        self.wfw = wfw
+
+    def mimeTypes(self):
+        return [OBJ_MIME, "text/plain"]
+
+    def mimeData(self, items):
+        return _encode_objs(self.wfw.main.engine.wf.page, [it.data(Qt.UserRole) for it in items])
+
+
+class _TabDrop(QObject):
+    """Drops on a page tab copy the dragged series to that page."""
+
+    def __init__(self, wfw):
+        super().__init__(wfw)
+        self.wfw = wfw
+
+    def eventFilter(self, obj, e):
+        if e.type() in (QEvent.DragEnter, QEvent.DragMove) and e.mimeData().hasFormat(OBJ_MIME):
+            e.acceptProposedAction()
+            return True
+        if e.type() == QEvent.Drop and e.mimeData().hasFormat(OBJ_MIME):
+            i = obj.tabAt(e.position().toPoint())
+            pages = self.wfw.main.engine.wf.pages
+            if 0 <= i < len(pages):
+                src, objs = _decode_objs(e.mimeData())
+                self.wfw.drop_on_page(pages[i], src, objs)
+                e.acceptProposedAction()
+            return True
+        return False
+
+
 class GroupWindow(ObjectWindow):
     def __init__(self, main, name):
         super().__init__(main, f"Group: {name}   Workfile: {main.wf_title()}")
         self.name = name
+        self.setAcceptDrops(True)
         self.set_toolbar(_toolbar([
             ("View", [("Spreadsheet", self.spreadsheet),
                       ("Graph: Line", lambda: self.run_plot(f"gnuplot {name} --time-series --with-lines")),
@@ -453,6 +507,24 @@ class GroupWindow(ObjectWindow):
 
     def coint(self, method):
         self.run_text(f'bundle ev_cg = ev_cointeg("{" ".join(self.members())}", dataset, "{method}")')
+
+    def add_members(self, names: list[str]):
+        """Drop from the workfile window: add series to the group (EViews drag and drop)."""
+        cur = self.members()
+        new = [n for n in names if n in self.main.engine.wf.series and n not in cur]
+        if new:
+            self.main.execute(f"group {self.name} {' '.join(cur + new)}")
+            self.spreadsheet()
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat(OBJ_MIME):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        page, objs = _decode_objs(e.mimeData())
+        if page == self.main.engine.wf.page:
+            self.add_members([n for n, k in objs if k == "series"])
+            e.acceptProposedAction()
 
     def members(self) -> list[str]:
         out = self.main.engine.run(f'printf "%s\\n", varname({self.name})')
@@ -762,6 +834,77 @@ class TableWindow(ObjectWindow):
         if path:
             fmt = "html" if path.endswith(".html") else ("txt" if path.endswith(".txt") else "csv")
             self.main.engine.run(f'ev_tsave({self.name}, "{path}", "{fmt}")')
+
+
+class ValmapWindow(ObjectWindow):
+    """EViews value map: value -> label pairs (numbers, text, na or intervals such as [0,10))."""
+
+    def __init__(self, main, name):
+        super().__init__(main, f"ValMap: {name.upper()}   Workfile: {main.wf_title()}")
+        self.name = name
+        self.set_toolbar(_toolbar([("Add row", self.add_row), ("Delete row", self.delete_row),
+                                   ("Apply", self.apply), ("|", None),
+                                   ("Name", lambda: main.rename_object(name))]))
+        self.fill()
+
+    def fill(self):
+        vm = self.main.ctx.valmaps.get(self.name, {})
+        t = self.table
+        t.clear()
+        t.setColumnCount(2)
+        t.setRowCount(len(vm))
+        t.setHorizontalHeaderLabels(["Value", "Label"])
+        for i, (k, v) in enumerate(vm.items()):
+            t.setItem(i, 0, QTableWidgetItem(k))
+            t.setItem(i, 1, QTableWidgetItem(v))
+        t.horizontalHeader().setStretchLastSection(True)
+        self.stack.setCurrentWidget(t)
+
+    def add_row(self):
+        self.table.insertRow(self.table.rowCount())
+
+    def delete_row(self):
+        r = self.table.currentRow()
+        if r >= 0:
+            self.table.removeRow(r)
+
+    def apply(self):
+        """Store the edited pairs; @map / x.map use them from now on."""
+        vm = {}
+        t = self.table
+        for i in range(t.rowCount()):
+            k, v = t.item(i, 0), t.item(i, 1)
+            if k and k.text().strip():
+                vm[re.sub(r"\s+", "", k.text().strip())] = v.text() if v else ""
+        self.main.ctx.valmaps[self.name] = vm
+        self.main.log_append(f"valmap {self.name}: " + ", ".join(f"{k} = {v}" for k, v in vm.items()))
+
+
+class SampleWindow(ObjectWindow):
+    """EViews sample object: a stored sample (dates and/or an if condition)."""
+
+    def __init__(self, main, name):
+        super().__init__(main, f"Sample: {name.upper()}   Workfile: {main.wf_title()}")
+        self.name = name
+        self.edit = QLineEdit(main.ctx.samples.get(name, "@all"))
+        self.edit.setFont(MONO)
+        self.set_toolbar(_toolbar([("Set", self.set_def), ("Use as Current Sample", self.use), ("|", None),
+                                   ("Name", lambda: main.rename_object(name))]))
+        self.lay.insertWidget(1, self.edit)
+        self.run_text_plain()
+
+    def run_text_plain(self):
+        self.text.setPlainText(f"Sample object {self.name.upper()}\n\n  {self.main.ctx.samples.get(self.name, '@all')}\n\n"
+                               "Edit the definition (e.g. 1990q1 2019q4 if x > 0) and press Set; "
+                               "Use as Current Sample runs smpl " + self.name + ".")
+        self.stack.setCurrentWidget(self.text)
+
+    def set_def(self):
+        self.main.execute(f"{self.name}.set {self.edit.text().strip()}")
+        self.run_text_plain()
+
+    def use(self):
+        self.main.execute(f"smpl {self.name}")
 
 
 class VarWindow(ObjectWindow):
@@ -1264,7 +1407,9 @@ class WorkfileWindow(QWidget):
             il.addWidget(l)
         info.setObjectName("wfinfo")
         lay.addWidget(info)
-        self.list = QListWidget()
+        self.list = _ObjList(self)
+        self.list.setDragEnabled(True)
+        self.list.setDragDropMode(QAbstractItemView.DragOnly)
         self.list.setViewMode(QListView.ListMode)
         self.list.setFlow(QListView.TopToBottom)
         self.list.setWrapping(True)
@@ -1289,6 +1434,9 @@ class WorkfileWindow(QWidget):
         self.tabs.tabBarClicked.connect(self._tab_clicked)
         self.tabs.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tabs.customContextMenuRequested.connect(self._tab_menu)
+        self.tabs.setAcceptDrops(True)
+        self._tabdrop = _TabDrop(self)
+        self.tabs.installEventFilter(self._tabdrop)
         lay.addWidget(self.tabs)
 
     def populate(self):
@@ -1300,7 +1448,8 @@ class WorkfileWindow(QWidget):
                 if wf.kinds.get(b) in ("equation", "var", "vecm", "system", "model")
                 and wf.obj_page.get(b, wf.page) == wf.page]
         items = [(n, "series") for n in wf.series] + [(n, "group") for n in wf.lists] \
-            + objs + [(n, "scalar") for n in wf.scalars] + [(n, "string") for n in wf.strings]
+            + objs + [(n, "scalar") for n in wf.scalars] + [(n, "string") for n in wf.strings] \
+            + [(n, "valmap") for n in self.main.ctx.valmaps] + [(n, "sample") for n in self.main.ctx.samples]
         for name, kind in sorted(items, key=lambda x: x[0].lower()):
             label = name.lower()
             if self.details and kind == "scalar":
@@ -1415,6 +1564,21 @@ class WorkfileWindow(QWidget):
                 m.engine.run(f"{decl} {new} = {name}", check=True)
                 if decl == "bundle":
                     m.engine.wf.obj_page[new] = wf.page
+        except GretlError as e:
+            m.error(str(e))
+        m.refresh()
+
+    def drop_on_page(self, page: str, src_page: str, objs):
+        """Series dragged onto a page tab are copied there (frequency conversion as in copy)."""
+        if page == src_page:
+            return
+        m = self.main
+        try:
+            for name, kind in objs:
+                if kind == "series":
+                    m.engine.copy_between(src_page, name, page, name)
+                else:
+                    m.log_append(f"  {name}: only series are copied to another page")
         except GretlError as e:
             m.error(str(e))
         m.refresh()
@@ -2062,6 +2226,10 @@ class MainWindow(QMainWindow):
             self.add_window(name, ModelWindow(self, name), (680, 560), "model")
         elif kind == "table":
             self.add_window(name, TableWindow(self, name), (560, 380), "table")
+        elif kind == "valmap":
+            self.add_window(name, ValmapWindow(self, name), (420, 340), "valmap")
+        elif kind == "sample":
+            self.add_window(name, SampleWindow(self, name), (480, 200), "sample")
         elif kind == "scalar":
             self.statusBar().showMessage(f"{name} = {self.engine.wf.scalars.get(name)}")
         elif kind == "string":
@@ -2117,7 +2285,12 @@ class MainWindow(QMainWindow):
     def delete_object(self, name, ask=True):
         if ask and QMessageBox.question(self, "Delete", f"Delete {name}?") != QMessageBox.Yes:
             return
-        self.execute(f"delete {name}", hansl=True)
+        held = next((d for d in (self.ctx.valmaps, self.ctx.samples) if name in d), None)
+        if held is not None:
+            held.pop(name)             # valmaps and sample objects live in the translator state
+            self.refresh()
+        else:
+            self.execute(f"delete {name}", hansl=True)
         w = self.windows.pop(name, None)
         if w is not None:
             try:
@@ -2128,6 +2301,11 @@ class MainWindow(QMainWindow):
     def rename_object(self, name):
         new, ok = QInputDialog.getText(self, "Object Name", "Name to identify object:", text=name)
         if ok and new.strip() and new.strip() != name:
+            held = next((d for d in (self.ctx.valmaps, self.ctx.samples) if name in d), None)
+            if held is not None:
+                held[new.strip()] = held.pop(name)
+                self.refresh()
+                return
             self.execute(f"rename {name} {new.strip()}", hansl=True)
 
     # -- file -------------------------------------------------------------
@@ -2224,6 +2402,65 @@ class MainWindow(QMainWindow):
         self.show_workfile()
         return True
 
+    def ui_answers(self, hansl: str) -> str:
+        """EViews @uiprompt, @uiedit, @uilist, @uiradio, @uifiledlg: ask now, before the program runs,
+        and put the answers into the script (a dialog inside a loop is asked once)."""
+        out = []
+        for ln in hansl.split("\n"):
+            ind = re.match(r"\s*", ln).group(0)
+            pre = []
+            while True:
+                m = re.search(r'ev_uiprompt\("((?:[^"\\]|\\.)*)"(?:,\s*"(\w*)")?\)', ln)
+                if m:
+                    msg, typ = m.group(1), (m.group(2) or "O").upper()
+                    if typ in ("YN", "YNC"):
+                        btn = QMessageBox.Yes | QMessageBox.No | (QMessageBox.Cancel if typ == "YNC" else QMessageBox.NoButton)
+                        r = QMessageBox.question(self, "Program", msg, btn)
+                        val = 1 if r == QMessageBox.Yes else (0 if r == QMessageBox.No else -1)
+                    elif typ == "OC":
+                        r = QMessageBox.question(self, "Program", msg, QMessageBox.Ok | QMessageBox.Cancel)
+                        val = 1 if r == QMessageBox.Ok else -1
+                    else:
+                        QMessageBox.information(self, "Program", msg)
+                        val = 1
+                    ln = ln[:m.start()] + str(val) + ln[m.end():]
+                    continue
+                m = re.search(r'ev_uiskip\("(\w+)", "([%!]?)(\w*)", "([^"]*)", "([^"]*)"\)', ln)
+                if not m:
+                    break
+                kind, sig, var, prompt, choices = m.groups()
+                val, ans = 0, None
+                if kind == "edit" and var:
+                    txt, ok = QInputDialog.getText(self, "Program", prompt or f"Value of {sig}{var}:")
+                    ans, val = (txt, 0) if ok else (None, -1)
+                elif kind in ("list", "radio") and var:
+                    items = choices.split()
+                    txt, ok = QInputDialog.getItem(self, "Program", prompt or "Choose:", items, 0, False)
+                    if ok:
+                        ans = str(items.index(txt) + 1) if (sig == "!" or kind == "radio") else txt
+                    else:
+                        val = -1
+                elif kind == "check" and var:
+                    r = QMessageBox.question(self, "Program", prompt or f"{sig}{var}?", QMessageBox.Yes | QMessageBox.No)
+                    ans = "1" if r == QMessageBox.Yes else "0"
+                    sig = "!"
+                elif kind == "filedlg" and var:
+                    f, _ = QFileDialog.getOpenFileName(self, prompt or "Select a file", os.path.expanduser("~"))
+                    ans, val = (f, 0) if f else (None, -1)
+                else:
+                    self.log_append(f"  (dialog {kind} not shown: current values kept)")
+                if ans is not None:
+                    if sig == "!" or kind == "radio":
+                        try:
+                            pre.append(f"{ind}scalar {var} = {float(ans):g}")
+                        except ValueError:
+                            self.log_append(f"  {sig}{var}: '{ans}' is not a number, kept")
+                    else:
+                        pre.append(f'{ind}string {var} = "{ans.replace(chr(34), chr(39))}"')
+                ln = ln[:m.start()] + str(val) + ln[m.end():]
+            out += pre + [ln]
+        return "\n".join(out)
+
     def run_program_dialog(self):
         path, _ = QFileDialog.getOpenFileName(self, "Run EViews program", os.path.expanduser("~"), "EViews programs (*.prg)")
         if path:
@@ -2232,6 +2469,7 @@ class MainWindow(QMainWindow):
     def run_program(self, path: str):
         with open(path, encoding="utf-8", errors="replace") as f:
             hansl, todos, ignored = tr.translate_full(f.read(), plot_files=True)
+        hansl = self.ui_answers(hansl)
         tmp = self.engine.tmpdir
         hansl = re.sub(r'"(plot\d+\.png)"', lambda m: f'"{os.path.join(tmp, "prg_" + m.group(1))}"', hansl)
         # in an interactive session gretl asks before replacing data: clear it first

@@ -26,7 +26,7 @@ smpl 1970:1 2019:4
 bundle EROB = ev_robustls("DC c DG", dataset, "bisquare", NA)
 bundle ESTEP = ev_stepls("DC c @ DG FFR DG(-1) DC(-1)", dataset, "fwd", 0.05, 0.1)
 bundle EGLM = ev_glm("DC c DG", dataset, "normal", null)
-bundle EBRK = ev_breakls("DC c", dataset, 3, 0.15, "bic")
+bundle EBRK = ev_breakls("DC c", dataset, 3, 0.15, "seq")
 bundle ETH = ev_threshold("DC c DC(-1)", "DC(-1)", dataset, 0.15)
 bundle ESW = ev_switchreg("DG c", dataset)
 
