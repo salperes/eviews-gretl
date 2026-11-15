@@ -479,6 +479,24 @@ check(ew.stack.currentWidget() is ew._scroll, "equation view: confidence ellipse
 vw2.var_view("bundle ev_hd = ev_varhist(vtest)")
 check("Historical decomposition" in vw2.text.toPlainText(), "VAR view: historical decomposition")
 
+
+# --- Phase 3 objects: Bayesian VAR, VEC restrictions, factor analysis, seasonal graph
+w.execute("smpl 1970q1 2019q4")
+w.execute("var vbt.bvar(prior=lit) 1 2 dlog(cons) dlog(gdp) @ c")
+check(w.engine.wf.kinds.get("vbt") == "var", "Bayesian VAR is a VAR object")
+w.open_object(("vbt", "var"))
+check("Bayesian VAR Estimates" in w.windows["vbt"].text.toPlainText(), "Bayesian VAR window")
+w.execute("smpl 1960q1 2019q4")
+w.execute("var vect.ec(c, 1) 1 2 log(cons) log(gdp)")
+w.open_object(("vect", "vecm"))
+QInputDialog.getText = staticmethod(lambda *a, **k: ("B(1,1)=1, B(1,2)=-1", True))
+w.windows["vect"].vec_restrict()
+check("LR test for binding restrictions" in w.windows["vect"].text.toPlainText(), "VEC window: cointegration restrictions")
+gw.run_text('bundle ev_fa = ev_factor("GDP CONS INV", dataset, 1, "ml")')
+check("Factor Analysis" in gw.text.toPlainText(), "group view: factor analysis")
+sw.run_plot_cmd('ev_seasplot(GDP, "@PNG")')
+check(sw.stack.currentWidget() is sw._scroll, "series view: seasonal graph")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
 if failures:

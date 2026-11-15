@@ -266,6 +266,7 @@ class SeriesWindow(ObjectWindow):
                       ("Graph: Kernel Density", lambda: self.run_plot_cmd(f"ev_kdplot({name}, \"@PNG\")")),
                       ("Graph: Quantile-Quantile (Normal)", lambda: self.run_plot_cmd(f"qqplot {name} --output=\"@PNG\"")),
                       ("Graph: Boxplot", lambda: self.run_plot_cmd(f"boxplot {name} --output=\"@PNG\"")),
+                      ("Graph: Seasonal (mean by season)", lambda: self.run_plot_cmd(f"ev_seasplot({name}, \"@PNG\")")),
                       ("Variance Ratio Test", lambda: self.run_text(f"matrix ev_vr = ev_vratio({name})")),
                       ("Spectrum (periodogram)", lambda: self.run_plot_cmd(f"matrix ev_sp = ev_spectrum({name}, 0, \"@PNG\")")),
                       ("-", None),
@@ -398,7 +399,8 @@ class GroupWindow(ObjectWindow):
                       ("Tests of Equality (means, medians, variances)", lambda: self.run_text(f'bundle ev_te = ev_testequal("{" ".join(self.members())}", dataset)')),
                       ("Cross Correlation (first two series)", lambda: self.run_text(f"matrix ev_xc = ev_xcorr({self.members()[0]}, {self.members()[1]}, 12)")),
                       ("N-Way Tabulation", lambda: self.run_text(f"xtab {' '.join(self.members())}")),
-                      ("Principal Components", lambda: self.run_text(f'bundle ev_pc = ev_pcomp("{" ".join(self.members())}", dataset)'))]),
+                      ("Principal Components", lambda: self.run_text(f'bundle ev_pc = ev_pcomp("{" ".join(self.members())}", dataset)')),
+                      ("Factor Analysis...", self.factor)]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
             ("Name", lambda: main.rename_object(name)),
@@ -407,6 +409,14 @@ class GroupWindow(ObjectWindow):
             ("Sample", main.sample_dialog),
         ]))
         self.spreadsheet()
+
+    def factor(self):
+        meth, nf = QComboBox(), QSpinBox()
+        meth.addItems(["Maximum likelihood", "Iterated principal factors"])
+        nf.setRange(1, max(1, len(self.members()) - 1))
+        if _form_dialog(self, "Factor Specification", [("Method:", meth), ("Number of factors:", nf)]):
+            m = "ml" if meth.currentIndex() == 0 else "pf"
+            self.run_text(f'bundle ev_fa = ev_factor("{" ".join(self.members())}", dataset, {nf.value()}, "{m}")')
 
     def cause(self):
         k, ok = QInputDialog.getInt(self, "Lag Specification", "Lags to include:", 2, 1, 24)
@@ -731,6 +741,7 @@ class VarWindow(ObjectWindow):
         super().__init__(main, f"Var: {name.upper()}   Workfile: {main.wf_title()}")
         self.name = name
         self.vec = main.engine.wf.kinds.get(name) == "vecm"
+        self.bvar = "".join(main.engine.run(f'printf "%d\\n", inbundle({name}, "bvar")')).strip() not in ("", "0")
         self.set_toolbar(_toolbar([
             ("View", [("Estimation Output", self.output),
                       ("Lag Structure: Granger Causality / Block Exogeneity Tests", self.granger),
@@ -746,7 +757,8 @@ class VarWindow(ObjectWindow):
                       ("Historical Decomposition", lambda: self.var_view(f"bundle ev_hd = ev_varhist({name})"))]),
             ("Proc", [("Make Residuals", self.make_resids),
                       ("Forecast...", self.var_forecast),
-                      ("Estimate Structural Factorization...", self.svar)]),
+                      ("Estimate Structural Factorization...", self.svar),
+                      ("Cointegration Restrictions (VEC)...", self.vec_restrict)]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
             ("Name", lambda: main.rename_object(name)),
@@ -759,7 +771,29 @@ class VarWindow(ObjectWindow):
         self.output()
 
     def output(self):
-        self.run_text(f"ev_vecprint(&{self.name})" if self.vec else f"ev_varprint(&{self.name})")
+        if self.bvar:
+            self.run_text(f"ev_bvarprint(&{self.name})")
+        else:
+            self.run_text(f"ev_vecprint(&{self.name})" if self.vec else f"ev_varprint(&{self.name})")
+
+    def vec_restrict(self):
+        """EViews VEC restrictions: B(i,j) on the cointegrating vectors, A(i,j) on the adjustments."""
+        if not self.vec:
+            self.main.error("Restrictions are set on vector error correction models.")
+            return
+        txt, ok = QInputDialog.getText(self, "VEC Restrictions", "Restrictions (e.g. B(1,1)=1, B(1,2)=-1 or A(2,1)=0):")
+        if not (ok and txt.strip()):
+            return
+        m = self.main
+        try:
+            cmds = tr.translate_line(m.fix_case(f"{self.name}.append(coint) {txt.strip()}"), m.ctx)
+        except ValueError as e:
+            m.error(str(e))
+            return
+        if not any(c.strip() and not c.startswith("#") for c in cmds):
+            m.error("Estimate the VEC in this session first (Estimate button), then set restrictions.")
+            return
+        self.run_text("\n".join(cmds))
 
     def var_view(self, cmd):
         if self.vec:
@@ -2362,7 +2396,7 @@ class MainWindow(QMainWindow):
         wf = self.engine.wf
         smp = QLineEdit(f"{wf.sample_first} {wf.sample_last}")
         vtype = QComboBox()
-        vtype.addItems(["Unrestricted VAR", "Vector Error Correction"])
+        vtype.addItems(["Unrestricted VAR", "Vector Error Correction", "Bayesian VAR (Litterman prior)"])
         vtype.setCurrentIndex(1 if vec else 0)
         trend = QComboBox()
         trend.addItems(["a: no intercept or trend", "b: intercept (no trend) in CE",
@@ -2383,6 +2417,7 @@ class MainWindow(QMainWindow):
         if not d or not e_endo.toPlainText().split():
             return
         is_vec = vtype.currentIndex() == 1
+        is_bvar = vtype.currentIndex() == 2
         if name is None:
             k = 1
             while f"var{k:02d}" in wf.bundles:
@@ -2400,6 +2435,8 @@ class MainWindow(QMainWindow):
             if exo_rest:
                 s += " @ " + " ".join(exo_rest)
             self.execute(f"var {name}.ec({trend.currentText()[0]}, {rank.text().strip() or 1}) {s}")
+        elif is_bvar:
+            self.execute(f"var {name}.bvar(prior=lit, l1=0.1, l2=0.99, l3=1) {s}")
         else:
             self.execute(f"var {name}.ls {s}")
         if name in self.engine.wf.bundles:

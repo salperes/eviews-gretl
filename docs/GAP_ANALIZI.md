@@ -32,16 +32,16 @@ karşılaştırıldı. EViews'in kendisiyle sayısal karşılaştırma yapılmad
 |---|---|---|---|---|---|
 | W · Workfile, sayfalar, veri | 10 | 3 | 1 | 2 | 16 |
 | F · İfadeler ve @-fonksiyonlar | 9 | 0 | 0 | 0 | 9 |
-| E · Denklem tahmincileri | 11 | 4 | 7 | 0 | 22 |
-| T · Denklem testleri ve görünümleri | 13 | 0 | 4 | 0 | 17 |
-| S · Seri görünümleri ve işlemleri | 10 | 3 | 3 | 0 | 16 |
-| G · Grup | 6 | 1 | 2 | 0 | 9 |
-| V · VAR / VEC | 9 | 1 | 2 | 0 | 12 |
-| Y · Sistem ve Model | 5 | 0 | 3 | 0 | 8 |
-| O · Diğer nesneler | 5 | 3 | 3 | 0 | 11 |
+| E · Denklem tahmincileri | 22 | 0 | 0 | 0 | 22 |
+| T · Denklem testleri ve görünümleri | 16 | 1 | 0 | 0 | 17 |
+| S · Seri görünümleri ve işlemleri | 15 | 1 | 0 | 0 | 16 |
+| G · Grup | 8 | 1 | 0 | 0 | 9 |
+| V · VAR / VEC | 12 | 0 | 0 | 0 | 12 |
+| Y · Sistem ve Model | 7 | 1 | 0 | 0 | 8 |
+| O · Diğer nesneler | 8 | 3 | 0 | 0 | 11 |
 | P · Programlama dili | 10 | 2 | 2 | 0 | 14 |
 | U · Arayüz (evqt) | 11 | 2 | 3 | 1 | 17 |
-| **Toplam** | **99** | **19** | **30** | **3** | **151** |
+| **Toplam** | **128** | **14** | **6** | **3** | **151** |
 
 Kabaca kapsama: kalemlerin **%66'sı tam, %13'ü kısmi**; açık P1 kalemi 0, açık P2 kalemi 14. Kapsanan kalemler EViews
 programlarında en sık kullanılanlar olduğu için (ls, ARCH, VAR, sistemler, modeller,
@@ -91,25 +91,25 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 |---|---|---|---|---|---|---|
 | E1 | LS (doğrusal, açık c(i) NLS, ARMA hataları), cov=white/hac | ✅ | | ols, nls, arima | – | – |
 | E2 | ARCH ailesi: GARCH/TARCH/EGARCH, ARCH-M, thrsh | ✅ | | gig + kendi ML | – | – |
-| E3 | ARCH hata dağılımı t / GED, PARCH, component ARCH | 🟡 | t ve GED dağılımı var; PARCH ve component ARCH yok | gig (t, GED) | M | P2 |
+| E3 | ARCH hata dağılımı t / GED, PARCH, component ARCH | ✅ | t ve GED; PARCH ve component ARCH (ev_garchx, ML) | gig (t, GED) | M | P2 |
 | E4 | Panel LS: pooled, FE, RE, dönem FE | ✅ | | panel | – | – |
-| E5 | Dönem RE, iki yönlü RE | ❌ | | panel --random-effects (sınırlı) | M | P3 |
+| E5 | Dönem RE, iki yönlü RE | ✅ | dengeli panelde Swamy-Arora dönem ve iki yönlü RE (ev_panelre2); tek yönlü gretl RE ile aynı | panel --random-effects (sınırlı) | M | P3 |
 | E6 | **TSLS** (tek denklem, `eq.tsls y c x @ z`) | ✅ | ev_tsls: J-istatistiği, enstrüman rankı | tsls | S | **P1** |
 | E7 | **GMM** tek denklem, LIML | ✅ | LIML (ev_tsls), tek denklem GMM (beyaz/HAC ağırlık) | gmm, tsls --liml | M | P2 |
 | E8 | **BINARY** logit/probit (+ marjinal etkiler, beklenti-tahmin tablosu) | ✅ | ev_binary: logit/probit, McFadden R², LR; d=x (extreme value) yok | logit, probit | M | **P1** |
 | E9 | ORDERED (sıralı logit/probit) | ✅ | ev_mlreg: sıralı logit/probit | logit/probit (ordered) | S | P2 |
-| E10 | CENSORED (Tobit), TRUNCATED | 🟡 | Tobit var; truncated (kesik) regresyon yok | tobit, intreg | S | P2 |
+| E10 | CENSORED (Tobit), TRUNCATED | ✅ | Tobit ve kesik regresyon (ev_truncreg, sol/sağ kesme) | tobit, intreg | S | P2 |
 | E11 | COUNT (Poisson, negatif binom) | ✅ | Poisson, negatif binom | poisson, negbin | S | P2 |
-| E12 | HECKIT seçim modeli | ❌ | | heckit | S | P3 |
+| E12 | HECKIT seçim modeli | ✅ | Heckman iki adım ve ML (ev_heckit, heckit paketi) | heckit | S | P3 |
 | E13 | QREG kantil regresyon | ✅ | kantil regresyon, pseudo R² | quantreg | S | P2 |
-| E14 | ROBUSTLS, STEPLS | ❌ | | lad, omit --auto | M | P3 |
+| E14 | ROBUSTLS, STEPLS | ✅ | ROBUSTLS (M tahmini, Huber/bisquare) ve STEPLS (ileri/geri, p değeri) | lad, omit --auto | M | P3 |
 | E15 | **ARDL** (+ sınır testi, uzun dönem katsayılar, ECM) | ✅ | ev_ardl: AIC/SIC/HQ ile gecikme seçimi, uzun dönem katsayılar, PSS sınır F testi (case III asimptotik kritik değerler, k ≤ 5) | ols + kendi kodu | M | **P1** |
-| E16 | COINTREG: FMOLS, DOLS, CCR | 🟡 | FMOLS ve DOLS var; CCR yok | kendi kodu (DOLS kolay) | M | P2 |
-| E17 | BREAKLS (Bai-Perron kırılmalı LS), THRESHOLD, SWITCHREG | ❌ | | kendi kodu | L | P3 |
-| E18 | MIDAS | ❌ | | midasreg | M | P3 |
-| E19 | GLM | ❌ | | kendi kodu | M | P3 |
-| E20 | ENET / Lasso / Ridge | ❌ | | regls | M | P3 |
-| E21 | Panel TSLS, dinamik panel GMM (Arellano-Bond) | 🟡 | Arellano-Bond (dpanel) var; panel TSLS yok | tsls (panel), dpanel | M | P2 |
+| E16 | COINTREG: FMOLS, DOLS, CCR | ✅ | FMOLS, DOLS ve CCR | kendi kodu (DOLS kolay) | M | P2 |
+| E17 | BREAKLS (Bai-Perron kırılmalı LS), THRESHOLD, SWITCHREG | ✅ | Bai-Perron global LS kırılmaları (bilgi kriteri), THRESHOLD, Markov SWITCHREG | kendi kodu | L | P3 |
+| E18 | MIDAS | ✅ | MIDAS: Almon/PDL, beta, step, U-MIDAS (ev_midas) | midasreg | M | P3 |
+| E19 | GLM | ✅ | GLM: normal, Poisson, binomial, gamma aileleri (IRLS); gretl poisson/logit ile aynı | kendi kodu | M | P3 |
+| E20 | ENET / Lasso / Ridge | ✅ | lasso, ridge, elastic net (regls), çapraz doğrulamalı ceza | regls | M | P3 |
+| E21 | Panel TSLS, dinamik panel GMM (Arellano-Bond) | ✅ | Arellano-Bond (dpanel) ve panel TSLS (sabit etkili 2SLS, ivpanel) | tsls (panel), dpanel | M | P2 |
 | E22 | Ağırlıklı LS (`ls(w=...)`) | ✅ | ls(w=, wtype=istdev/ivar/stdev/var) | wls | S | P2 |
 
 ## T · Denklem testleri ve görünümleri
@@ -126,12 +126,12 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | T8 | Eklenen/çıkarılan değişken testleri (testadd, testdrop) | ✅ | ev_testadd, ev_testdrop | add, omit | S | **P1** |
 | T9 | **CUSUM, CUSUMSQ, özyinelemeli katsayılar** | ✅ | ev_rls: CUSUM, CUSUMSQ (5% bant, KS yaklaşımı), özyinelemeli kalıntı ve katsayılar | cusum, rolling | M | **P1** |
 | T10 | Quandt-Andrews kırılma testi | ✅ | eq.ubreak: Quandt-Andrews, Andrews p-değeri | qlrtest | S | P2 |
-| T11 | Bai-Perron çoklu kırılma testi | ❌ | | kendi kodu | L | P3 |
+| T11 | Bai-Perron çoklu kırılma testi | 🟡 | ev_breakls ile global kırılma noktaları, sup-F ve bilgi kriteriyle sayı seçimi; UDmax/WDmax ve ardışık L+1 testleri yok | kendi kodu | L | P3 |
 | T12 | VIF, katsayı varyans ayrıştırması | ✅ | eq.varinf: VIF | vif, bkw | S | P2 |
-| T13 | Etki istatistikleri (leverage, DFFITS) | ❌ | | leverage | S | P3 |
-| T14 | Güven elipsi | ❌ | | kendi kodu + plot | M | P3 |
+| T13 | Etki istatistikleri (leverage, DFFITS) | ✅ | kaldıraç, studentize kalıntı, DFFITS, COVRATIO, DFBETAS (ev_influence) | leverage | S | P3 |
+| T14 | Güven elipsi | ✅ | iki katsayının güven elipsi (ev_ellipse, grafik) | kendi kodu + plot | M | P3 |
 | T15 | Panel: Hausman testi, gereksiz sabit etki testi | ✅ | Hausman (kovaryans farkı formülü) ve gereksiz sabit etki F/χ² | panel çıktısı ($hausman) | S | P2 |
-| T16 | Katsayı kovaryans matrisi, gradyanlar görünümü | ❌ | | $vcv | S | P3 |
+| T16 | Katsayı kovaryans matrisi, gradyanlar görünümü | ✅ | katsayı kovaryans tablosu (ev_covprint) ve gradyanlar (ev_gradients) | $vcv | S | P3 |
 | T17 | Temsiller görünümü (eq.representations) | ✅ | spec/eqtext | | – | – |
 
 ## S · Seri görünümleri ve işlemleri
@@ -144,15 +144,15 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | S4 | **Phillips-Perron** | ✅ | ev_pp: Bartlett, Newey-West otomatik bant, MacKinnon p-değerleri | kendi kodu | M | **P1** |
 | S5 | DF-GLS / ERS / Ng-Perron | ✅ | DF-GLS (gretl), ERS P_T ve Ng-Perron (kritik değerler: ERS 1996 / NP 2001) | adf --gls | S | P2 |
 | S6 | Kırılmalı birim kök (Zivot-Andrews vb.) | 🟡 | Zivot-Andrews (a/b/c) var; EViews'in diğer kırılmalı birim kök seçenekleri yok | kendi kodu | M | P2 |
-| S7 | Panel birim kök: Breitung, Hadri, Fisher-ADF/PP | 🟡 | Fisher-ADF/PP, Choi, Hadri var; Breitung yok | adf (Choi zaten basıyor), kendi kodu | M | P2 |
+| S7 | Panel birim kök: Breitung, Hadri, Fisher-ADF/PP | ✅ | Fisher-ADF/PP, Choi, Hadri ve Breitung | adf (Choi zaten basıyor), kendi kodu | M | P2 |
 | S8 | HP filtresi | ✅ | | hpfilt | – | – |
 | S9 | Bant geçiren filtreler BK, CF | ✅ | BK (gretl bkfilt), CF asimetrik tam örneklem | bkfilt, kendi kodu (CF) | S | P2 |
 | S10 | **Mevsimsel düzeltme** X-13 / TRAMO-SEATS, `seas` (hareketli ortalama) | ✅ | `seas(m/a)` (hareketli ortalama) ve `x13` (gretl `deseas`; x13as repoda gömülü, `tools/setup_x13.sh` kurar; save=d10/d11; d12/d13 yok); TRAMO-SEATS programı kurulu değil |a)`) var; X-13/TRAMO-SEATS için x13as programı gerekir (gretl macOS paketinde yok) | x13a (gretl ile gelir) | M | **P1** |
-| S11 | Üstel düzeltme / ETS (`smooth`, `ets`) | 🟡 | üstel düzeltme (s d n a m) var; ETS durum-uzay modeli yok | kendi kodu | M | P2 |
+| S11 | Üstel düzeltme / ETS (`smooth`, `ets`) | ✅ | üstel düzeltme (s d n a m) ve ETS (ANN AAN AAdN ANA AAA, AIC ile seçim) | kendi kodu | M | P2 |
 | S12 | Ara değer doldurma (`ipolate`) | ✅ | ipolate(type=lin/log) | kendi kodu | S | P2 |
-| S13 | Eşitlik testleri, tek yönlü tablolama | ❌ | | difftest, freq | S | P3 |
-| S14 | Varyans oranı, BDS testi | ❌ | | kendi kodu | M | P3 |
-| S15 | Spektral analiz | ❌ | | pergm | S | P3 |
+| S13 | Eşitlik testleri, tek yönlü tablolama | ✅ | ortalama, medyan, varyans eşitlik testleri (ev_testequal); tek yönlü tablolama freq | difftest, freq | S | P3 |
+| S14 | Varyans oranı, BDS testi | ✅ | Lo-MacKinlay varyans oranı (ev_vratio) ve BDS (bds paketi) | kendi kodu | M | P3 |
+| S15 | Spektral analiz | ✅ | periodogram ve Bartlett pencereli spektrum (ev_spectrum) | pergm | S | P3 |
 | S16 | `x.genr`/`x.resample`/`x.distplot` (kernel, QQ) | ✅ | kernel yoğunluk, QQ, kutu grafiği | kdensity, qqplot | S | P2 |
 
 ## G · Grup
@@ -166,8 +166,8 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | G5 | Granger nedensellik (grup görünümü) | ✅ | g.cause: ikili Granger testleri | var + omit | S | P2 |
 | G6 | **Engle-Granger, Phillips-Ouliaris** eşbütünleşme | ✅ | ev_cointeg: Engle-Granger (SIC gecikme), Phillips-Ouliaris; z-istatistiği için p-değeri yok | coint | S | **P1** |
 | G7 | Temel bileşenler, faktör analizi | ✅ | g.pcomp: temel bileşenler, skorlar | pca | M | P2 |
-| G8 | Çapraz korelogram | ❌ | | xcorrgm | S | P3 |
-| G9 | N yönlü tablolama, panel/ortak çizimler | ❌ | | xtab | S | P3 |
+| G8 | Çapraz korelogram | ✅ | gecikme ve öncül sütunlu çapraz korelogram (ev_xcorr) | xcorrgm | S | P3 |
+| G9 | N yönlü tablolama, panel/ortak çizimler | ✅ | N yönlü tablolama (xtab) | xtab | S | P3 |
 
 ## V · VAR / VEC
 
@@ -178,13 +178,13 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | V3 | Granger/blok dışsallık, gecikme uzunluğu kriterleri | ✅ | | | – | – |
 | V4 | Yapısal VAR: A-B, uzun dönem, metin kısıtları | ✅ | | kendi ML | – | – |
 | V5 | VAR kalıntıları serileri | ✅ | | | – | – |
-| V6 | Kısıtlı VEC (`v.ec(restrict)` beta/alpha kısıtları) | 🟡 | beta kısıtları B(i,j) var; alfa kısıtları A(i,j) yok | vecm + restrict | M | P2 |
+| V6 | Kısıtlı VEC (`v.ec(restrict)` beta/alpha kısıtları) | ✅ | beta kısıtları B(i,j) (ev_vecrestrict) ve rank 1 için alfa kısıtları A(i,1) (gretl restrict); append(coint) tahminden önce veya sonra | vecm + restrict | M | P2 |
 | V7 | IRF güven bantları, birikimli/genelleştirilmiş IRF seçenekleri | ✅ | Cholesky/genelleştirilmiş, birikimli, bootstrap bantlar | irf --bootstrap | M | P2 |
 | V8 | **VAR kalıntı testleri**: LM otokorelasyon, normallik, White | ✅ | LM otokorelasyon, Cholesky normallik, White ortak testi | modtest (VAR) | S | **P1** |
 | V9 | **AR kökleri** tablosu/grafiği (kararlılık) | ✅ | ev_varroots | $compan | S | **P1** |
 | V10 | VAR tahmini (`v.forecast`, `v.makemodel`) | ✅ | ev_varfcast: dinamik/statik, MA tabanlı S.E.; `makemodel` hâlâ yok | fcast (VAR) | M | **P1** |
-| V11 | Tarihsel ayrıştırma | ❌ | | kendi kodu | M | P3 |
-| V12 | Bayesçi VAR | ❌ | | BVAR paketi | L | P3 |
+| V11 | Tarihsel ayrıştırma | ✅ | tarihsel ayrıştırma (ev_varhist); taban = dinamik VAR tahmini | kendi kodu | M | P3 |
+| V12 | Bayesçi VAR | ✅ | Litterman/Minnesota önsel BVAR (ev_bvar); gevşek önselde OLS ile aynı; diğer önseller yok | BVAR paketi | L | P3 |
 
 ## Y · Sistem ve Model
 
@@ -194,10 +194,10 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | Y2 | Model: denklem + özdeşlik, dinamik/statik Newton çözümü | ✅ | | kendi kodu | – | – |
 | Y3 | Senaryolar, override, add factor, stokastik simülasyon | ✅ | | | – | – |
 | Y4 | Wald, kalıntılar (sistem) | ✅ | | | – | – |
-| Y5 | Sistem kalıntı testleri, sistem ARCH | ❌ | | kendi kodu | M | P3 |
+| Y5 | Sistem kalıntı testleri, sistem ARCH | 🟡 | sistem kalıntı korelasyonu ve normallik testi (ev_sysrestests); sistem ARCH yok | kendi kodu | M | P3 |
 | Y6 | Modele VAR/sistem ekleme (`makemodel`, `m.merge var`) | ✅ | v.makemodel: VAR denklemleri model çözümünde | | M | P2 |
-| Y7 | Hedef arama / kontrol (`m.control`), çözücü seçenekleri | ❌ | | kendi kodu | M | P3 |
-| Y8 | Model çözüm değerlendirme tabloları (`m.msg`, fit istatistikleri) | ❌ | | | S | P3 |
+| Y7 | Hedef arama / kontrol (`m.control`), çözücü seçenekleri | ✅ | m.control: araç serisi, hedef patikayı izleyecek şekilde dönem dönem (sekant) bulunur (ev_modelcontrol) | kendi kodu | M | P3 |
+| Y8 | Model çözüm değerlendirme tabloları (`m.msg`, fit istatistikleri) | ✅ | çözüm uyum istatistikleri (RMSE, MAE, MAPE, Theil) ev_modelfit | | S | P3 |
 
 ## O · Diğer nesneler
 
@@ -206,13 +206,13 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | O1 | Matris/vektör/sym/coef, skaler, string | ✅ | | | – | – |
 | O2 | Text nesnesi | ✅ | yalnız SVAR kısıtları için | | – | – |
 | O3 | **Table nesnesi**: `freeze` tabloya, `setcell`, `setwidth`, `t(i,j)`, csv/rtf/html kaydı | ✅ | ev_table: `table(r,c)`, `t(i,j)=`, setcell, setwidth, save(csv/txt/html), show; biçimlendirme komutları yok sayılır | outfile, matrix | M | **P1** |
-| O4 | Graph nesnesi biçimlendirme (`addtext`, `axis`, `setelem`) ve `save(t=png/pdf)` | 🟡 | başlık, eksen aralığı/log, çizgi rengi/kalınlık/desen, lejant; diğer biçimlendirme yok sayılır | gnuplot seçenekleri | M | P2 |
-| O5 | Graph türleri: histogram, boxplot, kernel, QQ, pie, dot, seasonal | 🟡 | hist, boxplot, QQ, kernel, dot; pie ve mevsimsel grafik yok | gnuplot, boxplot | S | P2 |
-| O6 | State space (`sspace`, Kalman) | 🟡 | doğrusal Gauss modeller ML ile (Kalman); makestates/forecast ve durum sabitleri yok | kalman | L | P2 |
+| O4 | Graph nesnesi biçimlendirme (`addtext`, `axis`, `setelem`) ve `save(t=png/pdf)` | 🟡 | başlık, eksen, çizgi biçimi, lejant, name(n) lejant metni, ızgara; diğer biçimlendirme yok sayılır | gnuplot seçenekleri | M | P2 |
+| O5 | Graph türleri: histogram, boxplot, kernel, QQ, pie, dot, seasonal | 🟡 | hist, boxplot, QQ, kernel, dot, seasonal (ev_seasplot); pie yok | gnuplot, boxplot | S | P2 |
+| O6 | State space (`sspace`, Kalman) | ✅ | doğrusal Gauss modeller ML ile (Kalman), durum sabitleri, makestates (filtre/düzleştirilmiş); bağımsız sinyal ve durum hataları | kalman | L | P2 |
 | O7 | LogL (özel olabilirlik) | ✅ | logl nesnesi → gretl mle (@logl, param / c(i) başlangıç değerleri) | mle | M | P2 |
-| O8 | Pool nesnesi (`pool`, `?` serileri ile tahmin) | ❌ | pagestack ile kısmen dolaşılabilir | | L | P3 |
-| O9 | Spool nesnesi | ❌ | | | M | P3 |
-| O10 | Factor nesnesi | ❌ | | | L | P3 |
+| O8 | Pool nesnesi (`pool`, `?` serileri ile tahmin) | 🟡 | pool ls: ortak katsayılar, sabit etkiler (ev_poolls); rastgele etkiler ve kesite özgü katsayılar yok | | L | P3 |
+| O9 | Spool nesnesi | ✅ | spool append, save (metin dosyası; grafikler PNG), print | | M | P3 |
+| O10 | Factor nesnesi | ✅ | faktör analizi ML ve iteratif temel faktörler (ev_factor), yükler, ortaklıklar | | L | P3 |
 | O11 | svector, rowvector metotları (`@wcount` vb. ile) | ✅ | svector(n), sv(i) atama ve okuma, @wsplit | strings | S | P2 |
 
 ## P · Programlama dili

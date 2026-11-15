@@ -8703,6 +8703,45 @@ end function
 # Phase 3 objects: Bayesian VAR, model control, pool, factor, seasonal graph
 # -------------------------------------------------------------------
 
+function void ev_bvarprint (bundle *b "Result of ev_bvar")
+    # Bayesian VAR coefficient table (posterior means, s.d. in parentheses)
+    printf "\nBayesian VAR Estimates\n%s\nSample: %s\nIncluded observations: %d\n\n", b.prior, b.sample, rows(b.sys.Y)
+    printf "%-20s", ""
+    loop i = 1..b.n
+        printf "%16s", b.ylab[i]
+    endloop
+    printf "\n"
+    loop r = 1..rows(b.coeff)
+        printf "%-20s", b.clab[r]
+        loop i = 1..b.n
+            printf "%16.6f", b.coeff[r, i]
+        endloop
+        printf "\n%-20s", ""
+        loop i = 1..b.n
+            printf "%16s", sprintf("(%.6f)", b.se[r, i])
+        endloop
+        printf "\n"
+    endloop
+end function
+
+function void ev_factorprint (bundle *r "Result of ev_factor")
+    # factor loadings, communalities and uniquenesses
+    printf "\nFactor Analysis\nMethod: %s\nNumber of factors: %d\nIncluded observations: %d\n\n", \
+      r.method == "ml" ? "Maximum Likelihood" : "Iterated Principal Factors", r.nf, r.n
+    printf "%-14s", "Variable"
+    loop j = 1..r.nf
+        printf "%12s", sprintf("F%d", j)
+    endloop
+    printf "%14s%14s\n", "Communality", "Uniqueness"
+    loop i = 1..nelem(r.names)
+        printf "%-14s", toupper(r.names[i])
+        loop j = 1..r.nf
+            printf "%12.6f", r.loadings[i, j]
+        endloop
+        printf "%14.6f%14.6f\n", 1 - r.uniqueness[i], r.uniqueness[i]
+    endloop
+end function
+
 function bundle ev_bvar (bundle v "ev_varest result (provides data, lags, deterministic terms)",
                          scalar mu1[0] "Prior mean of the own first lag",
                          scalar L1[0.1] "Overall tightness", scalar L2[0.99] "Cross-variable tightness",
@@ -8793,23 +8832,7 @@ function bundle ev_bvar (bundle v "ev_varest result (provides data, lags, determ
     b.se = se
     b.prior = sprintf("Litterman/Minnesota prior: mu1 = %g, L1 = %g, L2 = %g, L3 = %g", mu1, L1, L2, L3)
     if !quiet
-        printf "\nBayesian VAR Estimates\n%s\nSample: %s\nIncluded observations: %d\n\n", b.prior, v.sample, T
-        printf "%-20s", ""
-        loop i = 1..n
-            printf "%16s", v.ylab[i]
-        endloop
-        printf "\n"
-        loop r = 1..rows(B)
-            printf "%-20s", v.clab[r]
-            loop i = 1..n
-                printf "%16.6f", B[r, i]
-            endloop
-            printf "\n%-20s", ""
-            loop i = 1..n
-                printf "%16s", sprintf("(%.6f)", se[r, i])
-            endloop
-            printf "\n"
-        endloop
+        ev_bvarprint(&b)
     endif
     return b
 end function
@@ -9036,21 +9059,9 @@ function bundle ev_factor (string names "Series, e.g. x1 x2 x3 x4", list vars "S
     r.method = m
     r.names = tok
     r.n = n
+    r.nf = nf
     if !quiet
-        printf "\nFactor Analysis\nMethod: %s\nNumber of factors: %d\nIncluded observations: %d\n\n", \
-          m == "ml" ? "Maximum Likelihood" : "Iterated Principal Factors", nf, n
-        printf "%-14s", "Variable"
-        loop j = 1..nf
-            printf "%12s", sprintf("F%d", j)
-        endloop
-        printf "%14s%14s\n", "Communality", "Uniqueness"
-        loop i = 1..p
-            printf "%-14s", toupper(tok[i])
-            loop j = 1..nf
-                printf "%12.6f", Lm[i, j]
-            endloop
-            printf "%14.6f%14.6f\n", 1 - psi[i], psi[i]
-        endloop
+        ev_factorprint(&r)
     endif
     return r
 end function

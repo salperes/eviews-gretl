@@ -11,6 +11,10 @@ end function
 ols DC const DG --quiet
 check("logl: slope = OLS", LL1.coeff[2], $coeff[2], 1e-5)
 check("logl: sigma = sqrt(SSR/T)", LL1.coeff[3], sqrt($ess / $T), 1e-4)
-arima 0 1 1 ; LY --nc --quiet
-check("sspace local level: likelihood = ARIMA(0,1,1)", SS1.lnl, $lnl, 1e-5)
+# independent signal and state errors (EViews default). Log GDP has a positive MA(1) in
+# differences, which a local level cannot produce: the signal variance goes to zero and the
+# model is a random walk, so its likelihood is that of ARIMA(0,1,0)
+arima 0 1 0 ; LY --nc --quiet
+check("sspace local level: likelihood = random walk (boundary)", SS1.lnl, $lnl, 1e-4)
+check("sspace local level: signal variance at the boundary", exp(SS1.coeff[1]) < 1e-6, 1)
 # the formatted graph (ml_objects_graph.png) is checked by looking at it

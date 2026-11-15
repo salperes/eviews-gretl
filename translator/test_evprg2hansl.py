@@ -792,5 +792,66 @@ class Program(unittest.TestCase):
         self.assertIn("# TODO(EViews line 1", out)
 
 
+class Phase3Objects(unittest.TestCase):
+    def test_vec_restrictions(self):
+        c = Ctx()
+        translate_line("var ve.ec(c, 1) 1 2 lc lgd", c)
+        out = translate_line("ve.append(coint) B(1,1)=1, B(1,2)=-1", c)
+        self.assertEqual(out[-1], 'bundle ve = ev_vecrestrict(ve, "B(1,1)=1, B(1,2)=-1", dataset)')
+        c = Ctx()
+        translate_line("var ve.ec(c, 1) 1 2 lc lgd", c)
+        out = translate_line("ve.append(coint) B(1,1)=1, A(1,1)=0", c)
+        self.assertIn("vecm 3 1 lc lgd --silent --uc", out)
+        self.assertIn("    b[1]=1", out)
+        self.assertIn("    a[1]=0", out)
+        c = Ctx()
+        translate_line("var ve.ec(c, 2) 1 2 x y z", c)
+        with self.assertRaises(ValueError):
+            translate_line("ve.append(coint) A(1,1)=0", c)
+
+    def test_bvar_factor_pool(self):
+        c = Ctx()
+        out = translate_line("var vb.bvar(prior=lit, l1=0.2) 1 2 dc dg @ c", c)
+        self.assertEqual(out[-1], "bundle vb = ev_bvar(vb, 0, 0.2, 0.99, 1)")
+        self.assertEqual(translate_line("factor f1.ml(n=2) a b c d", c),
+                         ['bundle f1 = ev_factor("a b c d", dataset, 2, "ml")'])
+        translate_line("pool p1 _us _uk", c)
+        self.assertEqual(translate_line("p1.ls(cx=f) y? c x?", c),
+                         ['bundle p1_eq = ev_poolls("_us _uk", "y? c x?", dataset, "fixed")'])
+        translate_line("spool sp", c)
+        translate_line("sp.append vb f1", c)
+        self.assertEqual(translate_line("sp.save out", c),
+                         ['outfile "out.txt" --quiet', "    ev_bvarprint(&vb)", "    ev_factorprint(&f1)", "end outfile"])
+
+    def test_control_and_graphs(self):
+        c = Ctx()
+        translate_line("equation eqd.ls dc c dc(-1) ffr", c)
+        translate_line("model mc", c)
+        translate_line("mc.merge eqd", c)
+        out = translate_line("mc.control ffr dc dc_target", c)
+        self.assertIn('bundle mc_ctl = ev_modelcontrol(ev_mb, ev_mi, dataset, "ffr", 1, "dc_target")', out)
+        with self.assertRaises(ValueError):
+            translate_line("mc.control ffr zz dc_target", c)
+        translate_line("group gl a b", c)
+        translate_line("freeze(gp) gl.line", c)
+        translate_line('gp.name(1) "first"', c)
+        self.assertEqual(translate_line("gp.options grid", c), ["# graph gp: set grid"])
+        out = translate_line("gp.save(t=png) g", c)
+        self.assertIn('setinfo a --graph-name="first"', out)
+        self.assertEqual(translate_line("x.seasplot", c), ["ev_seasplot(x)"])
+
+    def test_sspace_constant_states(self):
+        c = Ctx()
+        for l in ["sspace ss", "ss.append @signal y = sv1", "ss.append @state sv1 = c(1) + sv1(-1) + [var = exp(c(2))]",
+                  "ss.append @param c(1) 0 c(2) -1"]:
+            translate_line(l, c)
+        out = "\n".join(translate_line("ss.ml", c))
+        self.assertIn("T[1, 2] = (c[1])", out)
+        self.assertIn("kb.inistate = zeros(1, 1) | 1", out)
+        out = translate_line("ss.makestates(t=smooth) *_sm", c)
+        self.assertIn("ksmooth(&ev_kb)", out)
+        self.assertEqual(out[-1], "series sv1_sm = ev_kb.state[, 1]")
+
+
 if __name__ == "__main__":
     unittest.main()

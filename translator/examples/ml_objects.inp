@@ -56,7 +56,8 @@ function matrices ev_ssm_SS1 (const matrix c)
 end function
 function scalar ev_ssll_SS1 (const matrix c, const matrix Y)
     matrices M = ev_ssm_SS1(c)
-    bundle kb = ksetup(Y .- M[5], M[1], M[2], M[3], M[4])
+    bundle kb = ksetup(Y .- M[5], M[1]', M[2], M[3])
+    kb.obsvar = M[4]
     kb.diffuse = 1
     scalar err = kfilter(&kb)
     if err
@@ -79,6 +80,7 @@ scalar ev_ll = BFGSmax(&ev_cc, "ev_ssll_SS1(ev_cc, ev_ssY)")
 set bfgs_richardson off
 matrix ev_H = numhess(ev_cc, "ev_ssll_SS1(ev_cc, ev_ssY)")
 matrix ev_cv = -inv(ev_H)
+matrix ev_ccfull_SS1 = ev_cc
 matrix ev_ix = {1, 2}
 ev_cc = ev_cc[ev_ix]
 ev_cv = ev_cv[ev_ix, ev_ix]

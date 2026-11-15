@@ -1,0 +1,24 @@
+# Runs the translated phase3c program and checks it against gretl's own estimators
+# (translate with --plot-files first when running in gretlcli)
+set verbose off
+run phase3c.inp
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+# random walk with drift as a state space with a state constant = ARIMA(0,1,0) with constant
+# (the diffuse initial level uses up the first observation)
+smpl 1970:2 2019:4
+arima 0 1 0 ; LGD --quiet
+check("sspace drift: likelihood = ARIMA(0,1,0)", SS1.lnl, $lnl, 1e-6)
+check("sspace drift: drift = ARIMA constant", SS1.coeff[1], $coeff[1], 1e-4)
+# model control: with the instrument path, the solved target equals the trajectory
+smpl 2015:1 2019:4
+matrix sol = MC_ctl.solution.sol
+check("control: solved DC hits the target", maxc(abs(sol[, 1] .- 0.0071)), 0, 1e-8)
+# restricted VEC: weak exogeneity of consumption, LR p-value in (0, 1)
+check("restricted VEC: LR p-value defined", VE2.lr_restr_p > 0 && VE2.lr_restr_p < 1, 1)
+check("restricted VEC: alpha(1) = 0", abs(VE2.alpha[1]), 0, 1e-8)

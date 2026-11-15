@@ -83,6 +83,7 @@ class Ctx:
     graph_cmds: dict = field(default_factory=dict) # graph name -> commands that draw it
     graph_opts: dict = field(default_factory=dict) # graph name -> gnuplot settings
     vec_restr: dict = field(default_factory=dict)  # VEC name -> restriction text (append(coint))
+    vec_info: dict = field(default_factory=dict)   # VEC name -> (spec, case, rank) once estimated
     pools: dict = field(default_factory=dict)      # pool name -> identifiers
     spools: dict = field(default_factory=dict)     # spool name -> object names
     graph_names: dict = field(default_factory=dict)  # graph -> {element: legend text}
@@ -1030,32 +1031,41 @@ def _vec_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     m = re.fullmatch(r'bundle (\S+) = ev_varest\("([^"]*)", dataset, 0, "([^"]*)"\)', last)
     out[-1] = f'bundle {m.group(1)} = ev_vecm("{m.group(2)}", dataset, "{case}", {rank}, 0, "{m.group(3)}")'
     v = m.group(1)
+    ctx.vec_info[v.lower()] = (spec, case, rank)
     restr = ctx.vec_restr.get(v.lower())
     if restr:
-        if re.search(r"(?i)\bA\s*\(", restr):
-            # adjustment restrictions: gretl restrict on a VEC estimated at the top level (rank 1)
-            if rank != "1":
-                raise ValueError("restrictions on A() are supported for rank 1 only")
-            endo = ctx.var_endo.get(v, [])
-            lags = [int(x) for x in re.findall(r"\d+", spec.split("@")[0])[:2]]
-            order = (lags[1] if len(lags) > 1 else 1) + 1
-            opt = {"a": "--nc", "b": "--rc", "c": "--uc", "d": "--crt", "e": "--ct"}[case]
-            lines = []
-            for part in re.split(r",(?![^()]*\))", restr):
-                part = part.strip()
-                if not part:
-                    continue
-                part = re.sub(r"(?i)\bB\s*\(\s*1\s*,\s*(\d+)\s*\)", r"b[\1]", part)
-                part = re.sub(r"(?i)\bA\s*\(\s*(\d+)\s*,\s*1\s*\)", r"a[\1]", part)
-                if re.search(r"(?i)[AB]\s*\(", part):
-                    raise ValueError("VEC restriction not understood: " + part)
-                lines.append("    " + part)
-            out += [f"vecm {order} 1 {' '.join(endo)} --silent {opt}", "restrict --full --silent"] + lines + [
-                "end restrict", f"{v}.beta = $jbeta", f"{v}.alpha = $jalpha",
-                f"{v}.lr_restr = $test", f"{v}.lr_restr_p = $pvalue",
-                f'printf "Restricted VEC: LR test of the restrictions = %g, Prob. = %.4f\\n", {v}.lr_restr, {v}.lr_restr_p']
-        else:
-            out.append(f'bundle {v} = ev_vecrestrict({v}, "{restr}", dataset)')
+        out += _vec_restrict(v, restr, ctx)
+    return out
+
+
+def _vec_restrict(v: str, restr: str, ctx: Ctx) -> list[str]:
+    """Restrictions B(1,j) / A(i,1) on an estimated VEC (append(coint) text)."""
+    spec, case, rank = ctx.vec_info[v.lower()]
+    out: list[str] = []
+    if re.search(r"(?i)\bA\s*\(", restr):
+        # adjustment restrictions: gretl restrict on a VEC estimated at the top level (rank 1)
+        if rank != "1":
+            raise ValueError("restrictions on A() are supported for rank 1 only")
+        endo = ctx.var_endo.get(v, [])
+        lags = [int(x) for x in re.findall(r"\d+", spec.split("@")[0])[:2]]
+        order = (lags[1] if len(lags) > 1 else 1) + 1
+        opt = {"a": "--nc", "b": "--rc", "c": "--uc", "d": "--crt", "e": "--ct"}[case]
+        lines = []
+        for part in re.split(r",(?![^()]*\))", restr):
+            part = part.strip()
+            if not part:
+                continue
+            part = re.sub(r"(?i)\bB\s*\(\s*1\s*,\s*(\d+)\s*\)", r"b[\1]", part)
+            part = re.sub(r"(?i)\bA\s*\(\s*(\d+)\s*,\s*1\s*\)", r"a[\1]", part)
+            if re.search(r"(?i)[AB]\s*\(", part):
+                raise ValueError("VEC restriction not understood: " + part)
+            lines.append("    " + part)
+        out += [f"vecm {order} 1 {' '.join(endo)} --silent {opt}", "restrict --full --silent"] + lines + [
+            "end restrict", f"{v}.beta = $jbeta", f"{v}.alpha = $jalpha",
+            f"{v}.lr_restr = $test", f"{v}.lr_restr_p = $pvalue",
+            f'printf "Restricted VEC: LR test of the restrictions = %g, Prob. = %.4f\\n", {v}.lr_restr, {v}.lr_restr_p']
+    else:
+        out.append(f'bundle {v} = ev_vecrestrict({v}, "{restr}", dataset)')
     return out
 
 
@@ -1397,6 +1407,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             if op.get("cx", "")[:1].lower() == "r":
                 raise ValueError("pool random effects: stack the pool with pagestack and use ls(cx=r)")
             spec = re.sub(r"\s+", " ", program_vars(args.strip(), ctx))
+            spec = re.sub(r"[A-Za-z_]\w*", lambda m: m.group(0) if m.group(0).lower() == "c" else translate_name(m.group(0), ctx), spec)
             ctx.equations[o + "_eq"] = "pool"
             return [f'bundle {o}_eq = ev_poolls("{" ".join(ctx.pools[o])}", "{spec}", dataset, "{cx}")']
         raise ValueError(f"pool method .{meth} not supported (ls)")
@@ -1420,7 +1431,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
                     kind = ctx.equations.get(obj)
                     pr = {"vecm": "ev_vecprint", "var": "ev_varprint", "panel": "ev_panelprint", "garch": "ev_garchprint",
                           "binary": "ev_binaryprint", "ardl": "ev_ardlprint", "mlreg": "ev_mlprint",
-                          "system": "ev_sysprint"}.get(kind, "ev_print" if kind in ("ls", "tsls") else "ev_coefprint")
+                          "system": "ev_sysprint", "bvar": "ev_bvarprint", "factor": "ev_factorprint"}.get(kind, "ev_print" if kind in ("ls", "tsls") else "ev_coefprint")
                     inner.append(f"{pr}(&{obj})" if kind else f"print {obj}")
             if ml == "save":
                 return [f'outfile "{f}" --quiet'] + ["    " + x for x in inner] + ["end outfile"]
@@ -1450,7 +1461,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             kind = _opts(opts).get("t", "pred").lower()
             pat = args.strip() or "*"
             out = [f"matrices ev_M = ev_ssm_{o}(ev_ccfull_{o})",
-                   "bundle ev_kb = ksetup(ev_ssY .- ev_M[5], ev_M[1], ev_M[2], ev_M[3], ev_M[4])"]
+                   "bundle ev_kb = ksetup(ev_ssY .- ev_M[5], ev_M[1]', ev_M[2], ev_M[3])", "ev_kb.obsvar = ev_M[4]"]
             out += (["ev_kb.inistate = zeros(rows(ev_M[2]) - 1, 1) | 1",
                      "ev_kb.inivar = (I(rows(ev_M[2]) - 1) * 1e7) ** 1 ~ zeros(rows(ev_M[2]) - 1, 1) | zeros(1, rows(ev_M[2]))"]
                     if ctx.sspaces.get(o + "#const") else ["ev_kb.diffuse = 1"])
@@ -1507,7 +1518,10 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             return [f"bundles ev_mb = defarray({', '.join(md['eqs'])})" if md["eqs"] else "bundles ev_mb = array(0)",
                     f"strings ev_mi = defarray({q(ids)})" if ids else "strings ev_mi = array(0)",
                     f'bundle {o}_ctl = ev_modelcontrol(ev_mb, ev_mi, dataset, "{inst}", {k}, "{traj}")',
-                    f"series {inst} = ev__toseries({o}_ctl.instrument, {o}_ctl.tobs)"]
+                    f"matrix ev_to = {o}_ctl.tobs", f"matrix ev_tx = {o}_ctl.instrument",
+                    "loop ev_i = 1..rows(ev_to)",
+                    "    scalar ev_t = ev_to[ev_i]", f"    {inst}[ev_t] = ev_tx[ev_i]",
+                    "endloop"]
         if ml == "scenario":
             nm = args.strip().strip('"')
             if nm.lower().startswith("base"):
@@ -1760,6 +1774,8 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             return _var_call(obj, opts, args, ctx)
         if ml == "append" and (opts or "").strip().lower() == "coint":
             ctx.vec_restr[o.lower()] = args.strip()
+            if o.lower() in ctx.vec_info:   # already estimated: re-estimate under the restrictions now
+                return [f"# VEC {o}: restrictions {args.strip()}"] + _vec_restrict(o, args.strip(), ctx)
             return [f"# VEC {o}: restrictions {args.strip()}"]
         if ctx.equations.get(o) == "var":
             if ml == "white":
@@ -2036,7 +2052,7 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         toks = rest.split()
         if len(toks) < 2:
             raise ValueError("pool: give a name and the cross-section identifiers")
-        ctx.pools[translate_name(toks[0], ctx)] = toks[1:]
+        ctx.pools[translate_name(toks[0], ctx)] = [translate_name(t, ctx) for t in toks[1:]]
         return [f"# pool {toks[0]}: {' '.join(toks[1:])}"]
     if word == "spool":
         name = translate_name(rest.split()[0], ctx) if rest.strip() else "spool01"
@@ -2096,6 +2112,7 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             g = lambda k, d: op.get(k, d) or d
             out.append(f"{nm} = ev_bvar({nm}, {g('mu1', '0')}, {g('l1', '0.1')}, {g('l2', '0.99')}, {g('l3', '1')})")
             out[-1] = "bundle " + out[-1]
+            ctx.equations[nm] = "bvar"
             return out
         m = re.fullmatch(r"var\s+([\w{}!%$]+)\.ec(?:\(([^)]*)\))?\s+(.+)", s, flags=re.IGNORECASE)
         if m:
@@ -2586,7 +2603,7 @@ def _graph_method(g: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> lis
             if not c.startswith("gnuplot"):
                 out.append(c)
                 continue
-            mems = c.split("--")[0].split()[1:]
+            mems = [x for m_ in c.split("--")[0].split()[1:] for x in ctx.groups.get(m_, [m_])]
             for k, txt in names.items():
                 if 1 <= k <= len(mems):
                     out.append(f'setinfo {mems[k - 1]} --graph-name="{txt}"')
@@ -2718,7 +2735,7 @@ def _sspace_ml(o: str, ctx: Ctx) -> list[str]:
     body += ["    return defarray(Z, T, Q, R, a)", "end function",
              f"function scalar ev_ssll_{o} (const matrix c, const matrix Y)",
              f"    matrices M = {fn}(c)",
-             "    bundle kb = ksetup(Y .- M[5], M[1], M[2], M[3], M[4])"] + (
+             "    bundle kb = ksetup(Y .- M[5], M[1]', M[2], M[3])", "    kb.obsvar = M[4]"] + (
             [f"    kb.inistate = zeros({rr - 1}, 1) | 1", f"    kb.inivar = (I({rr - 1}) * 1e7) ** 1 ~ zeros({rr - 1}, 1) | zeros(1, {rr})"]
             if has_const else ["    kb.diffuse = 1"]) + [
              "    scalar err = kfilter(&kb)",

@@ -1,0 +1,153 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: Phase 3 (C) of the gap analysis (docs/GAP_ANALIZI.md)
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+smpl full
+smpl 1960:1 2019:4
+series LC = log(CONS)
+series LGD = log(GDP)
+series LI = log(INV)
+series DC = ldiff(CONS)
+series DG = ldiff(GDP)
+
+# V6: VEC with restrictions on the cointegrating vector and the adjustment
+bundle VE = ev_vecm("1 2 LC LGD", dataset, "c", 1, 0, "lc lgd")
+# VEC VE: restrictions B(1,1)=1, B(1,2)=-1
+bundle VE = ev_vecrestrict(VE, "B(1,1)=1, B(1,2)=-1", dataset)
+bundle VE2 = ev_vecm("1 2 LC LGD", dataset, "c", 1, 0, "lc lgd")
+# VEC VE2: restrictions B(1,1)=1, A(1,1)=0
+vecm 3 1 LC LGD --silent --uc
+restrict --full --silent
+    b[1]=1
+    a[1]=0
+end restrict
+VE2.beta = $jbeta
+VE2.alpha = $jalpha
+VE2.lr_restr = $test
+VE2.lr_restr_p = $pvalue
+printf "Restricted VEC: LR test of the restrictions = %g, Prob. = %.4f\n", VE2.lr_restr, VE2.lr_restr_p
+
+# V12: Bayesian VAR, Litterman prior
+smpl full
+smpl 1970:1 2019:4
+bundle VB = ev_varest("1 2 DC DG @ c", dataset, 0, "dc dg")
+bundle VB = ev_bvar(VB, 0, 0.1, 0.99, 1)
+
+# O10: factor analysis
+bundle F1 = ev_factor("DC DG LI", dataset, 1, "ml")
+
+# O9: spool of output
+# spool SP
+# spool SP: vb f1
+outfile "sp_out.txt" --quiet
+        ev_bvarprint(&VB)
+        ev_factorprint(&F1)
+end outfile
+
+# O4, O5: graph legend names, grid, seasonal graph
+list GL = LC LGD
+gnuplot GL --time-series --with-lines --output=display
+# graph gp: legend 1 = log consumption
+# graph gp: set grid
+setinfo LC --graph-name="log consumption"
+gnuplot GL --time-series --with-lines --output="phase3c_lines.png" { set grid; }
+ev_seasplot(DC)
+
+# O6: state space with a constant in the state equation (random walk with drift)
+# sspace object SS1 declared
+# sspace SS1: @signal lgd = sv1
+# sspace SS1: @state sv1 = c(1) + sv1(-1) + [var = exp(c(2))]
+# sspace SS1: @param c(1) 0.008 c(2) -9
+function matrices ev_ssm_SS1 (const matrix c)
+    matrix Z = zeros(1, 2)
+    matrix T = zeros(2, 2)
+    matrix Q = zeros(2, 2)
+    matrix R = zeros(1, 1)
+    matrix a = zeros(1, 1)
+    T[2, 2] = 1
+    Z[1, 1] = 0 + (1)
+    a[1] = 0
+    R[1, 1] = 0
+    T[1, 1] = 0 + (+ 1)
+    Q[1, 1] = exp(c[2])
+    T[1, 2] = (c[1])
+    return defarray(Z, T, Q, R, a)
+end function
+function scalar ev_ssll_SS1 (const matrix c, const matrix Y)
+    matrices M = ev_ssm_SS1(c)
+    bundle kb = ksetup(Y .- M[5], M[1]', M[2], M[3])
+    kb.obsvar = M[4]
+    kb.inistate = zeros(1, 1) | 1
+    kb.inivar = (I(1) * 1e7) ** 1 ~ zeros(1, 1) | zeros(1, 2)
+    scalar err = kfilter(&kb)
+    if err
+            return -1e100
+    endif
+    # log likelihood without the diffuse initial observations (as for exact ML / ARIMA)
+    matrix lt = kb.llt
+    scalar ll = sumc(lt[2:])
+    return ok(ll) ? ll : -1e100
+end function
+list ev_ssL = LGD
+matrix ev_ssY = {ev_ssL}
+scalar ev_nT = rows(ev_ssY)
+matrix ev_cc = zeros(2, 1)
+ev_cc[1] = 0.008
+ev_cc[2] = -9
+set max_verbose off
+set bfgs_richardson on    # more accurate numerical gradients
+scalar ev_ll = BFGSmax(&ev_cc, "ev_ssll_SS1(ev_cc, ev_ssY)")
+set bfgs_richardson off
+matrix ev_H = numhess(ev_cc, "ev_ssll_SS1(ev_cc, ev_ssY)")
+matrix ev_cv = -inv(ev_H)
+matrix ev_ccfull_SS1 = ev_cc
+matrix ev_ix = {1, 2}
+ev_cc = ev_cc[ev_ix]
+ev_cv = ev_cv[ev_ix, ev_ix]
+bundle SS1 = _(kind = "Maximum likelihood (BFGS, Kalman filter)", method = "Maximum likelihood (BFGS, Kalman filter)", depvar = "LGD", coeff = ev_cc, vcv = ev_cv, stderr = sqrt(diag(ev_cv)), labels = defarray("C(1)", "C(2)"), k = rows(ev_cc), T = ev_nT, lnl = ev_ll)
+SS1.tstat = SS1.coeff ./ SS1.stderr
+SS1.pval = 2 * cnorm(-abs(SS1.tstat))
+ev_coefprint(&SS1)
+printf "Log likelihood %.6f\n", SS1.lnl
+matrices ev_M = ev_ssm_SS1(ev_ccfull_SS1)
+bundle ev_kb = ksetup(ev_ssY .- ev_M[5], ev_M[1]', ev_M[2], ev_M[3])
+ev_kb.obsvar = ev_M[4]
+ev_kb.inistate = zeros(rows(ev_M[2]) - 1, 1) | 1
+ev_kb.inivar = (I(rows(ev_M[2]) - 1) * 1e7) ** 1 ~ zeros(rows(ev_M[2]) - 1, 1) | zeros(1, rows(ev_M[2]))
+kfilter(&ev_kb)
+ksmooth(&ev_kb)
+series SV1_SM = ev_kb.state[, 1]
+
+# Y7: model control: the FFR path that makes consumption growth hit a target
+smpl full
+smpl 1980:1 2019:4
+bundle EQD = ev_ls("DC c DC(-1) FFR", dataset)
+# model MC declared
+# model MC: merge eqd
+series DC_TARGET = 0.0071
+smpl full
+smpl 2015:1 2019:4
+bundles ev_mb = defarray(EQD)
+strings ev_mi = array(0)
+bundle MC_ctl = ev_modelcontrol(ev_mb, ev_mi, dataset, "FFR", 1, "DC_TARGET")
+matrix ev_to = MC_ctl.tobs
+matrix ev_tx = MC_ctl.instrument
+loop ev_i = 1..rows(ev_to)
+        scalar ev_t = ev_to[ev_i]
+        FFR[ev_t] = ev_tx[ev_i]
+endloop
+
+# O8: pool regression with fixed cross-section effects
+smpl full
+smpl 1970:1 2019:4
+series Y_US = DC
+series Y_UK = DG
+series X_US = DG(-1)
+series X_UK = DC(-1)
+# pool p1: _us _uk
+bundle P1_eq = ev_poolls("_US _UK", "Y? c X?", dataset, "fixed")
+
