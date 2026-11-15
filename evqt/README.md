@@ -96,8 +96,9 @@ their @uiprompt / @uiedit / @uilist / @uiradio / @uidialog questions before they
 
 Not yet: EViews-specific add-ins.
 
-Known issue: Qt 6.8 on macOS can crash when accessibility automation tools drive the
-window in the background; normal mouse and keyboard use is not affected.
+Qt version: use PySide6 6.12 or newer (PySide6-Essentials is enough; Addons are not needed). Qt 6.8.1
+crashed in its macOS plugin (SIGSEGV in libqcocoa) when accessibility tools wrote into the command
+window; the same sequence runs without problems on 6.12.
 
 ## Tests
 ```bash
@@ -105,6 +106,12 @@ cd ~/Desktop/eviews-gretl/evqt
 QT_QPA_PLATFORM=offscreen ~/.venvs/eviews-gretl/bin/python tests/smoke_gui.py /tmp/evqt-shots
 ```
 
-## Known issue
-macOS accessibility tools that set a text field's whole value at once can crash
-Qt 6.8.1 (seen once while automating the command window). Normal typing is fine.
+## Qt 6.8 crash (fixed by upgrading)
+With Qt 6.8.1, macOS accessibility tools writing into the command window crashed the app
+(reproduced: SIGSEGV in libqcocoa while releasing accessibility objects). With PySide6 6.12.0
+the same steps, and about 25 more including opening equation and graph windows, run normally.
+Upgrade an existing environment with:
+
+    pip uninstall -y PySide6-Addons
+    pip install "PySide6-Essentials==6.12.0" "shiboken6==6.12.0"
+    pip install --no-deps "PySide6==6.12.0"

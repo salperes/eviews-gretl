@@ -40,10 +40,10 @@ karşılaştırıldı. EViews'in kendisiyle sayısal karşılaştırma yapılmad
 | Y · Sistem ve Model | 8 | 0 | 0 | 0 | 8 |
 | O · Diğer nesneler | 11 | 0 | 0 | 0 | 11 |
 | P · Programlama dili | 13 | 1 | 0 | 0 | 14 |
-| U · Arayüz (evqt) | 15 | 1 | 0 | 1 | 17 |
-| **Toplam** | **145** | **3** | **0** | **3** | **151** |
+| U · Arayüz (evqt) | 16 | 0 | 0 | 1 | 17 |
+| **Toplam** | **146** | **2** | **0** | **3** | **151** |
 
-Kabaca kapsama: kalemlerin **%96'sı tam**; açık P1, P2 kalemi yok, P3'te yalnızca U17 (canlı test) kaldı; G4 ve P14 önceliksiz. Kapsanan kalemler EViews
+Kabaca kapsama: kalemlerin **%97'si tam**; açık P1, P2, P3 kalemi yok; kısmi kalan G4 ve P14 önceliksiz. Kapsanan kalemler EViews
 programlarında en sık kullanılanlar olduğu için (ls, ARCH, VAR, sistemler, modeller,
 döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 gerçek programın
 6'sı da çevrilip çalışıyor.
@@ -254,7 +254,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | U14 | Örneklem nesnesi, değer eşlemesi pencereleri | ✅ | valmap penceresi (değer/etiket tablosu, düzenleme) ve örneklem nesnesi penceresi (tanım, Set, Use as Current Sample); workfile listesinde görünür | M | P3 |
 | U15 | Durum çubuğu: Path / DB / WF / Sample | ✅ | | – | – |
 | U16 | EViews eklentileri (add-ins) | ⛔ | EViews'e özgü | – | – |
-| U17 | Erişilebilirlik otomasyonu altında Qt 6.8 çökmesi | 🟡 | PySide6 6.12 ayrı ortamda kuruldu, ekran dışı test 134/134 geçti; canlı erişilebilirlik testi açık başka bir evqt penceresi yüzünden bekliyor | S | P3 |
+| U17 | Erişilebilirlik otomasyonu altında Qt 6.8 çökmesi | ✅ | Qt 6.8.1 çökmesi canlı olarak yeniden üretildi (SIGSEGV, libqcocoa); PySide6 6.12.0 ile aynı adımlar ve fazlası sorunsuz; ana ortam 6.12'ye yükseltildi | S | P3 |
 
 ---
 
@@ -345,8 +345,8 @@ W15, T11, Y5, O8, P10, U12 ve U14 tamamlandı; toplam 145 tam, 3 kısmi, 0 yok, 
   iki adımda tahmin ediliyor.
 - **O8:** sabit ve rastgele etkiler gretl `panel` ile birebir aynı. Önceki sürümde sabit etkili
   modelde sabitin standart hatası NA idi; bu düzeltildi.
-- **U17:** Qt 6.12 ayrı bir sanal ortamda (~/.venvs/evqt-qt612) çalışıyor. Çökmenin canlı denemesi
-  için açık evqt pencerelerinin kapatılması gerekiyor.
+- **U17:** Qt 6.8.1 çökmesi canlı yeniden üretildi (komut penceresine erişilebilirlik yazımı, SIGSEGV).
+  PySide6 6.12.0 aynı adımlarda ve 25 kadar ek işlemde çökmedi; ana ortam 6.12'ye yükseltildi.
 
 Testler: paket 431 kontrol (23 dosya), çevirici 80, evqt 134 kontrol (Qt 6.8 ve 6.12'de).
 
