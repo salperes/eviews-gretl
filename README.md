@@ -54,11 +54,16 @@ programlarını gretl betiğine çevirir; `evqt` EViews düzeninde bir masaüst�
 
 ## Optional: Census X-13ARIMA-SEATS
 
-`x.x13` (and evqt's Seasonal Adjustment: Census X-13) use gretl's `deseas()`, which needs the
-`x13as` program. The gretl project publishes a build for Apple Silicon at
-<https://sourceforge.net/projects/gretl/files/x13as/> (`x13as-mac-arm64.tar.gz`, with `bin/` and
-`lib/`). Unpack it, e.g. to `~/.local/x13as`, and set the path in `~/.gretl2rc`:
+`x.x13` (and evqt's *Seasonal Adjustment: Census X-13*) use gretl's `deseas()`, which needs the
+`x13as` program. A build for Apple Silicon Macs is bundled in
+[`third_party/x13as`](third_party/x13as) (public domain program, GCC run-time libraries; see its
+README for origin, checksums and licences). Install it once:
 
+```bash
+tools/setup_x13.sh
 ```
-x12a = /Users/<you>/.local/x13as/bin/x13as
-```
+
+The script checks the files, copies them to `~/.local/x13as`, tests that the program starts and
+sets `x12a = ~/.local/x13as/bin/x13as` in `~/.gretl2rc` (keeping a backup). `tools/setup_x13.sh
+--check` shows the current setting. On other systems, install a Census Bureau build and set
+`x12a` yourself.
