@@ -466,6 +466,23 @@ class GretlEngine:
         self._read_range()
         self.refresh()
 
+    def copy_between(self, src_page: str, src: str, dst_page: str, dst: str, method: str = ""):
+        """EViews copy(c=...) page\\series [page\\]name: frequency conversion between pages."""
+        for pg in (src_page, dst_page):
+            if pg not in self.wf.pages:
+                raise GretlError(f"no page called {pg}")
+        cur = self.wf.page
+        marg = f', "{method}"' if method else ""
+        self._save_page()
+        self.run(f'clear --dataset\nopen "{self._page_file(src_page)}" --quiet --preserve\n'
+                 f"matrix ev_cv = ev_pagecol({src})", check=True)
+        self.run(f'clear --dataset\nopen "{self._page_file(dst_page)}" --quiet --preserve\n'
+                 f"series {dst} = ev_freqconv(ev_cv{marg})", check=True)
+        if dst_page != cur:
+            self.run(f'smpl full\nstore "{self._page_file(dst_page)}"\n'
+                     f'clear --dataset\nopen "{self._page_file(cur)}" --quiet --preserve', check=True)
+        self._enter_page(cur)
+
     def stack_page(self, name: str, patterns: list[str]):
         """EViews pagestack: pool series x_? (one per unit) become one series of a new panel page."""
         if name in self.wf.pages:

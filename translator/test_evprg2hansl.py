@@ -338,7 +338,7 @@ class Phase1Data(unittest.TestCase):
         self.assertIn("matrix ev_cv = ev_pagecol(gdp)", out)
         self.assertIn('series gdpa = ev_freqconv(ev_cv, "s")', out)
         with self.assertRaises(ValueError):
-            translate_line(r"copy(c=q) page1\gdp gdpq", c)
+            translate_line(r"copy(c=z) page1\gdp gdpq", c)
 
 
 class Phase2Estimators(unittest.TestCase):
@@ -418,6 +418,41 @@ class Phase2Series(unittest.TestCase):
         self.assertEqual(translate_line("x.uroot(hadri)", c), ['bundle x_pur = ev_panelur(x, "hadri", 0, 1)'])
         with self.assertRaises(ValueError):
             translate_line("x.uroot(breit)", c)
+
+
+class Phase2Data(unittest.TestCase):
+    def test_data_language(self):
+        c = Ctx()
+        self.assertEqual(translate_line("pagestruct(freq=q, start=1990q1)", c)[0], "setobs 4 1990:1 --time-series")
+        self.assertEqual(translate_line("pagecontract if x > 0", c)[1], "smpl x > 0 --restrict --permanent")
+        self.assertEqual(translate_line('alpha region = "north"', c), ["series region = 1", 'stringify(region, defarray("north"))'])
+        self.assertEqual(translate_line("sample s1 1990q1 2000q4 if y > 0", c)[0][:1], "#")
+        self.assertEqual(translate_line("smpl s1", c), ["smpl full", "smpl 1990:1 2000:4", "smpl y > 0 --restrict"])
+        self.assertEqual(translate_line("svector(3) sv", c), ["strings sv = array(3)"])
+        self.assertEqual(translate_line('sv(2) = "b"', c), ['sv[2] = "b"'])
+        self.assertEqual(translate_line("%x = sv(2)", c), ["string x = sv[2]"])
+        self.assertEqual(translate_line("tic", c), ["set stopwatch"])
+        self.assertEqual(translate_line('logmsg "step 1"', c), ['printf "%s\\n", "step 1"'])
+        self.assertEqual(translate_line('seterr "bad input"', c), ['errorif(1, "bad input")'])
+        self.assertEqual(translate_line("group g log(x) y d(z)", c),
+                         ["series g_g1 = log(x)", 'setinfo g_g1 --description="LOG(X)"', "series g_g3 = diff(z)",
+                          'setinfo g_g3 --description="D(Z)"', "list g = g_g1 y g_g3"])
+        self.assertEqual(translate_line('wfopen(type=excel, sheet="Data", range=B3) "f.xlsx"', c)[0],
+                         'open "f.xlsx" --sheet="Data" --coloffset=1 --rowoffset=2')
+        c2 = Ctx()
+        with self.assertRaises(Ignored):
+            translate_line("dbopen(type=dbnomics)", c2)
+        self.assertEqual(translate_line("fetch AMECO/ZUTN/EA19.1.0.0.0.ZUTN", c2),
+                         ['series ea19_1_0_0_0_zutn = dbnomics_fetch("AMECO/ZUTN/EA19.1.0.0.0.ZUTN")'])
+
+    def test_functions(self):
+        c = Ctx()
+        self.assertEqual(translate_expr('@dateadd(@dateval("2020-01-31"), 1, "mm")', c),
+                         'ev_dateadd(ev_dateval("2020-01-31"), 1, "mm")')
+        self.assertEqual(translate_expr("@cov(x, y) + @cor(x, y)", c), "ev_covp(x, y) + corr(x, y)")
+        self.assertEqual(translate_expr("@nas(x)", c), "sum(missing(x))")
+        self.assertEqual(translate_expr('@wfind("a b c", "b")', c), 'ev_wfind("a b c", "b")')
+        self.assertEqual(translate_expr("@toc", c), "$stopwatch")
 
 
 class Structure(unittest.TestCase):

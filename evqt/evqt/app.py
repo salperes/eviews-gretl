@@ -1597,6 +1597,15 @@ class MainWindow(QMainWindow):
                 self.engine.set_panel(m.group(1), m.group(2))
                 self.ctx.panel = (m.group(1), m.group(2))
                 self._panel_page = self.engine.wf.page
+            elif cmd == "copy" and "\\" in " ".join(rest):
+                toks = rest
+                sp, sn = toks[0].split("\\", 1) if "\\" in toks[0] else (self.engine.wf.page, toks[0])
+                if len(toks) > 1:
+                    dp, dn = toks[1].split("\\", 1) if "\\" in toks[1] else (self.engine.wf.page, toks[1])
+                else:
+                    dp, dn = self.engine.wf.page, sn
+                m = tr._opts(opts).get("c", "").lower()[:1]
+                self.engine.copy_between(sp, self.fix_case(sn), dp, dn, m)
             elif cmd == "pagestack":
                 op = dict((k.lower(), v.strip().strip('"'))
                           for k, v in re.findall(r'(\w+)\s*=\s*("[^"]*"|[^,]+)', opts))

@@ -1,0 +1,59 @@
+# Phase 2 data and language helpers
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+# --- W7 quadratic / cubic frequency conversion (quarterly -> monthly)
+nulldata 12
+setobs 4 2015:1 --time-series
+set seed 5
+series q = 100 + cum(normal())
+matrix Q = ev_pagecol(q)
+nulldata 36 --preserve
+setobs 12 2015:01 --time-series
+series mq = ev_freqconv(Q, "q")
+series mt = ev_freqconv(Q, "t")
+series mc = ev_freqconv(Q, "c")
+check("quadratic match average: mean of 2016Q2 months = quarter", (mq[16] + mq[17] + mq[18]) / 3, Q[6, 2], 1e-8)
+check("quadratic match sum: sum of 2017Q4 months = quarter", mt[34] + mt[35] + mt[36], Q[12, 2], 1e-8)
+check("cubic match last: last month of 2016Q3 = quarter", mc[21], Q[7, 2], 1e-8)
+# --- F6 dates
+scalar d = ev_dateval("2020-01-31")
+check("@dateadd one month clamps the day (2020-02-29)", ev_datestr(ev_dateadd(d, 1, "mm")) == "2020-02-29", 1)
+check("@dateadd 2 years", ev_datestr(ev_dateadd(d, 2, "yy")) == "2022-01-31", 1)
+check("@datediff in days", ev_datediff(ev_dateval("2020-03-01"), ev_dateval("2020-02-01"), "dd"), 29)
+check("@datediff in months", ev_datediff(ev_dateval("2021-03-15"), ev_dateval("2020-01-10"), "mm"), 14)
+check("@makedate(2019, yyyy)", ev_makedate(2019, "yyyy"), ev_dateval("2019-01-01"))
+check("@makedate(201903, yyyymm)", ev_makedate(201903, "yyyymm"), ev_dateval("2019-03-01"))
+# --- F5 word lists
+string wl = "gdp cons inv gdp"
+check("@wfind", ev_wfind(wl, "INV"), 3)
+check("@wdrop", ev_wdrop(wl, "gdp") == "cons inv", 1)
+check("@wkeep", ev_wkeep(wl, "inv cons") == "cons inv", 1)
+check("@wunique", ev_wunique(wl) == "gdp cons inv", 1)
+check("@wreplace", ev_wreplace(wl, "cons", "c") == "gdp c inv gdp", 1)
+check("@wsort", ev_wsort("b c a") == "a b c", 1)
+# --- F7 statistics
+nulldata 50
+set seed 9
+series x = normal()
+series y = x + normal()
+check("@cov is the population covariance", ev_covp(x, y), cov(x, y) * 49 / 50)
+series z = 1 + 0.01 * obs
+series cp = ev_cumprod(z)
+check("@cumprod", cp[3], 1.01 * 1.02 * 1.03, 1e-12)
+series cm = ev_cummax(x)
+check("@cummax", cm[50], max(x))
+series gx = x
+gx[1] = NA
+gx[50] = NA
+check("@ifirst", ev_ifirst(gx), 2)
+check("@ilast", ev_ilast(gx), 49)

@@ -446,6 +446,12 @@ check("lgdp2_cyc" in w.engine.wf.series, "series proc: CF frequency filter")
 w.windows["gcoint"].run_text('bundle ev_pc = ev_pcomp("lcons lgdp", dataset)')
 check("Principal Components" in w.windows["gcoint"].text.toPlainText(), "group view: principal components")
 
+# --- copy with frequency conversion between pages (annual page from the quarterly one)
+w.execute("pageselect annual")
+w.execute("copy(c=a) usmacro\\gdp gdp_avg")
+check("gdp_avg" in w.engine.wf.series and w.engine.wf.page == "annual", "copy(c=a) quarterly -> annual page")
+w.execute("pageselect usmacro")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
 if failures:

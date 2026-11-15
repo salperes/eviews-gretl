@@ -61,3 +61,26 @@ dg.smooth(s) dg_sm
 dg.qqplot
 group gpc dc dg
 gpc.pcomp pc1
+
+' W6-W16, F5-F9, O11, P11, P12, G4: data and language features
+pagecreate(page=monthly) m 2015m1 2019m12
+copy(c=q) usmacro\cpi cpi_q
+copy(c=c) usmacro\cpi cpi_c
+pageselect usmacro
+smpl @all
+%w = @wsort("inv gdp cons")
+scalar pos = @wfind(%w, "gdp")
+scalar d1 = @dateadd(@dateval("2020-01-31"), 1, "mm")
+%s1 = @datestr(d1)
+scalar first_ffr = @ifirst(ffr)
+svector(2) sv
+sv(1) = "alpha"
+sv(2) = @upper(sv(1))
+group gx log(gdp) ffr
+sample s8 1980q1 1989q4
+smpl s8
+tic
+scalar mffr = @mean(ffr)
+toc
+logmsg "phase 2 data section done"
+show pos %s1 mffr

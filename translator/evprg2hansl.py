@@ -74,6 +74,9 @@ class Ctx:
     panel: tuple | None = None                      # (unit id, time) after pagestruct
     tables: set = field(default_factory=set)        # table objects (EViewsCompat bundles)
     page_panel: dict = field(default_factory=dict)  # page -> (unit id, time) of panel pages
+    samples: dict = field(default_factory=dict)     # sample objects: name -> smpl arguments
+    svectors: set = field(default_factory=set)      # string vectors
+    need_dbnomics: bool = False
     args_used: set = field(default_factory=set)     # program arguments %0 %1 ...
 
 
@@ -123,6 +126,8 @@ KEYWORD_MAP = [
     (r"@date(?!\w|\s*\()", "ev_date()"),
     (r"@day", "$obsmicro"),
     (r"@weekday", "((weekday($obsmajor, $obsminor, $obsmicro) + 6) % 7 + 1)"),
+    (r"@obsid", "obs"),
+    (r"@toc", "$stopwatch"),
     (r"nrnd(?!\s*\()", "normal()"),
     (r"rnd(?!\s*\()", "uniform()"),
     (r"na\b", "NA"),
@@ -151,6 +156,11 @@ MATRIX_FUNCS = [
     ("@lower", "tolower"), ("@trim", "strstrip"), ("@ltrim", "strstrip"), ("@rtrim", "strstrip"),
     ("@replace", "strsub"), ("@val", "atof"), ("@dateval", "ev_dateval"), ("@datestr", "ev_datestr"),
     ("@isna", "missing"),
+    ("@dateadd", "ev_dateadd"), ("@datediff", "ev_datediff"), ("@makedate", "ev_makedate"),
+    ("@wfind", "ev_wfind"), ("@wdrop", "ev_wdrop"), ("@wkeep", "ev_wkeep"), ("@wunique", "ev_wunique"),
+    ("@wreplace", "ev_wreplace"), ("@wsort", "ev_wsort"), ("@wsplit", "strsplit"),
+    ("@cor", "corr"), ("@cov", "ev_covp"), ("@quantile", "quantile"), ("@ranks", "ranking"),
+    ("@cumprod", "ev_cumprod"), ("@cummax", "ev_cummax"), ("@ifirst", "ev_ifirst"), ("@ilast", "ev_ilast"),
 ]
 _MFUNC_RES = [(re.compile(re.escape(a) + r"\s*\(", re.IGNORECASE), b + "(") for a, b in MATRIX_FUNCS]
 
@@ -202,10 +212,11 @@ def _matrix_funcs(p: str) -> str:
         "@nan": lambda a: f"(ok({a[0]}) ? ({a[0]}) : ({a[1]}))",
         "@inlist": lambda a: _inlist(a[0], a[1]),
         "@str": lambda a: f'sprintf("%g", {a[0]})', "@wcount": lambda a: f"nelem(strsplit({a[0]}))",
+        "@nas": lambda a: f"sum(missing({a[0]}))", "@cummin": lambda a: f"ev_cummax({a[0]}, 1)",
     }
     rx = re.compile(r"(@kronecker|@emult|@ediv|@convert|@columnextract|@rowextract|@subextract|@ctdist|@dtdist|@qtdist"
                     r"|@cchisq|@dchisq|@qchisq|@cfdist|@dfdist|@qfdist|@rnorm|@runif|@rchisq|@rtdist|@recode|@iif"
-                    r"|@nan|@inlist|@str|@wcount)\s*(?=\()", re.IGNORECASE)
+                    r"|@nan|@inlist|@str|@wcount|@nas|@cummin)\s*(?=\()", re.IGNORECASE)
     while True:
         m = rx.search(p)
         if not m:
@@ -283,6 +294,8 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
             out.append(part)
             continue
         p = program_vars(part, ctx)
+        p = re.sub(r"(?i)@wfname(?!\w)", f'"{ctx.page.upper()}"', p)
+        p = re.sub(r"(?i)@pagename(?!\w)", f'"{ctx.page.upper()}"', p)
         if re.search(r"@first|@last|@obsrange", p, re.IGNORECASE):
             ctx.need_N = True
         for rx, dst in _FUNC_RES:
@@ -298,8 +311,8 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
             res = f"ev_resid({eq})" if ctx.equations.get(eq) in ("ls", "panel", "tsls", "binary", "ardl", "mlreg", "cointreg") \
                 else apply_case(f"{eq}_resid", ctx)
             p = re.sub(r"(?<![A-Za-z0-9_])resid(?![A-Za-z0-9_])", res, p, flags=re.IGNORECASE)
-        # matrix element m(i,j) -> m[i,j]
-        for mt in ctx.matrices:
+        # matrix element m(i,j) -> m[i,j] (string vectors too)
+        for mt in list(ctx.matrices) + list(ctx.svectors):
             p = re.sub(rf"(?<![A-Za-z0-9_.$]){re.escape(mt)}\s*\(\s*([^()]+)\)", rf"{mt}[\1]", p,
                        flags=re.IGNORECASE)
         # group element g(i) -> g[i]
@@ -883,6 +896,25 @@ def _vec_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     return out
 
 
+def _split_ws(text: str) -> list[str]:
+    """Split at spaces outside parentheses: log(x) d(y, 4) z -> ["log(x)", "d(y, 4)", "z"]."""
+    out, depth, cur = [], 0, ""
+    for ch in text.strip():
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch.isspace() and depth == 0:
+            if cur:
+                out.append(cur)
+            cur = ""
+            continue
+        cur += ch
+    if cur:
+        out.append(cur)
+    return out
+
+
 def _split_terms(rhs: str) -> list[str]:
     """Split a right-hand side at top-level + and - (keeping the sign)."""
     terms, depth, cur = [], 0, ""
@@ -1195,6 +1227,9 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return [f"ev_svar(&{o}, {translate_name(a, ctx)}, {translate_name(b, ctx)})"]
     if o in ctx.tables:
         return _table_method(o, ml, opts, args, ctx)
+    if o in ctx.samples and ml == "set":
+        ctx.samples[o] = args.strip() or "@all"
+        return [f"# sample object {o}: {ctx.samples[o]}"]
     if o in ctx.texts and ml == "append":
         ctx.texts[o].append(args.strip())
         return [f"# text {o}: {args.strip()}"]
@@ -1512,10 +1547,23 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         raise Ignored(word)
 
     # --- databases: EViews .edb -> gretl .bin
+    if word in ("dbopen", "db", "dbcreate") and _opts(cmd_opts).get("type", "").lower() == "dbnomics":
+        ctx.default_db = "dbnomics"
+        raise Ignored("default database is now DBnomics (online)")
     if word in ("dbopen", "db", "dbcreate"):
         name = re.sub(r"\.edb$", "", rest.split()[0].strip('"'), flags=re.IGNORECASE)
         ctx.default_db = name
         raise Ignored(f"default database is now {name}.bin")
+    if word == "fetch" and (_opts(cmd_opts).get("d", "").lower() == "dbnomics" or
+                            (ctx.default_db == "dbnomics" and "d" not in _opts(cmd_opts))):
+        ctx.need_dbnomics = True
+        out = []
+        for code in rest.split():
+            code = code.strip('"')
+            nm = re.sub(r"\W+", "_", code.split("/")[-1]).strip("_").lower()
+            nm = "s_" + nm if nm[:1].isdigit() else nm
+            out.append(f'series {nm} = dbnomics_fetch("{code}")')
+        return out
     if word in ("store", "fetch"):
         op = _opts(cmd_opts)
         db = re.sub(r"\.edb$", "", op.get("d", "") or (ctx.default_db or ""), flags=re.IGNORECASE)
@@ -1569,6 +1617,63 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         return ["string ev_pagedir = $dotdir", f'catch remove("@ev_pagedir/{new}.gdtb")',
                 f'# page {old} renamed to {new}: next pageselect uses the new name']
 
+    if word == "pagestruct" and _opts(cmd_opts).get("freq"):
+        op = _opts(cmd_opts)
+        fq = {"a": 1, "q": 4, "m": 12, "w": 52, "d": 5, "d5": 5, "d7": 7, "u": 1}.get(op["freq"].lower())
+        st = translate_date(op.get("start", "1")) or op.get("start", "1")
+        if not fq:
+            raise ValueError(f"pagestruct freq={op['freq']} not supported")
+        if op["freq"].lower() == "u":
+            return ["setobs 1 1 --cross-section", "scalar ev_N = $nobs"]
+        return [f"setobs {fq} {st} --time-series", "scalar ev_N = $nobs"]
+    if word == "pagecontract":
+        cond = re.sub(r"(?i)^if\s+", "", rest.strip())
+        if not cond:
+            raise ValueError("pagecontract: give a condition (if ...)")
+        return ["smpl full", f"smpl {translate_expr(cond, ctx, condition=True)} --restrict --permanent",
+                "scalar ev_N = $nobs"]
+    if word == "pageappend":
+        f = rest.split('"')[1] if rest.startswith('"') else rest.split()[0]
+        return [f'append "{f}"', "scalar ev_N = $nobs"]
+    if word == "alpha":
+        name, _, expr = rest.partition("=")
+        name = translate_name(name, ctx)
+        e = expr.strip()
+        if not e:
+            return [f"series {name} = NA    # alpha series (string-valued)"]
+        if re.fullmatch(r'"[^"]*"', e):
+            return [f"series {name} = 1", f"stringify({name}, defarray({e}))"]
+        raise ValueError("alpha series from expressions are not supported (only text constants)")
+    if word == "sample":
+        toks = rest.split(None, 1)
+        if not toks:
+            raise ValueError("sample: give a name")
+        ctx.samples[toks[0].lower()] = toks[1] if len(toks) > 1 else "@all"
+        return [f"# sample object {toks[0]}: {ctx.samples[toks[0].lower()]}"]
+    if word == "smpl" and rest.strip().lower() in ctx.samples:
+        return translate_smpl(ctx.samples[rest.strip().lower()], ctx)
+    if word == "svector":
+        m = re.fullmatch(r"(?i)svector\s*(?:\(\s*([^()]+?)\s*\))?\s+(\w+)\s*(?:=\s*(.+))?", s)
+        if not m:
+            raise ValueError("svector: use svector(n) name")
+        n, name, expr = m.groups()
+        name = translate_name(name, ctx)
+        ctx.svectors.add(name)
+        if expr:
+            return [f"strings {name} = {translate_expr(expr, ctx)}"]
+        return [f"strings {name} = array({translate_expr(n or '1', ctx)})"]
+    if word in ("logmsg", "statusline"):
+        txt = rest.strip()
+        return [f'printf "%s\\n", {_string_plus(translate_expr(txt, ctx)) if _is_string_expr(txt, ctx) else chr(34) + txt + chr(34)}']
+    if word == "tic":
+        return ["set stopwatch"]
+    if word == "toc":
+        return ['printf "Elapsed time: %g seconds\\n", $stopwatch']
+    if word == "seterr":
+        txt = rest.strip()
+        return [f"errorif(1, {txt if txt.startswith(chr(34)) else chr(34) + txt + chr(34)})"]
+    if word in ("setmaxerrs", "logmode", "logsave", "logclear"):
+        raise Ignored(word)
     if word == "pagestruct":
         # pagestruct id @date(t) -> panel: unit and time variables
         m = re.fullmatch(r"(?i)pagestruct(?:\([^)]*\))?\s+(\w+)\s+@date(?:var)?\s*\(\s*(\w+)\s*\)", s)
@@ -1660,7 +1765,17 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         f = re.sub(r"\s.*$", "", rest.strip()) if not rest.startswith('"') else rest.split('"')[1]
         ctx.page = re.sub(r"\.\w+$", "", re.split(r"[\\/]", f)[-1]).lower() or "page1"
         ctx.pages = {ctx.page}
-        return [f'open "{f}"', "scalar ev_N = $nobs"]
+        op = {}
+        for k, v in re.findall(r'(\w+)\s*=\s*("[^"]*"|[^,]+)', cmd_opts or ""):
+            op[k.lower()] = v.strip().strip('"')
+        extra = ""
+        if op.get("sheet"):
+            extra += f' --sheet="{op["sheet"]}"'
+        if op.get("range"):
+            m = re.match(r"(?:[^!]*!)?\$?([A-Za-z]+)\$?(\d+)", op["range"])
+            if m:
+                extra += f" --coloffset={int(_col_number(m.group(1))) - 1} --rowoffset={int(m.group(2)) - 1}"
+        return [f'open "{f}"{extra}', "scalar ev_N = $nobs"]
     if word == "read":
         f = rest.split('"')[1] if rest.startswith('"') else rest.split()[0]
         # EViews read adds series to the current workfile, like gretl append
@@ -1736,12 +1851,20 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         ctx.scalars.add(name)
         return [f"scalar {name} = {translate_expr(expr, ctx) if expr else 'NA'}"]
     if word == "group":
-        toks = rest.split()
+        toks = _split_ws(rest)
         name = translate_name(toks[0], ctx)
-        members = [translate_name(t, ctx) for t in toks[1:]]
+        members, pre = [], []
+        for k, t in enumerate(toks[1:], 1):
+            if re.fullmatch(r"[\w{}!%$]+", t):
+                members.append(translate_name(t, ctx))
+            else:
+                # an expression: a helper series (a snapshot: EViews re-evaluates it when the data change)
+                h = f"{name}_g{k}"
+                pre += [f"series {h} = {translate_expr(t, ctx)}", f'setinfo {h} --description="{t.upper()}"']
+                members.append(h)
         ctx.groups[name] = members
         ctx.group_page[name] = ctx.page
-        return [f"list {name} = {' '.join(members)}"]
+        return pre + [f"list {name} = {' '.join(members)}"]
     if word == "delete":
         return [f"catch delete {translate_name(n, ctx)}" for n in rest.split()]
     if word in ("show", "print"):
@@ -1821,6 +1944,8 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             if len(ij) != 2:
                 raise ValueError("table cells need two indices: t(i, j)")
             return [_table_set(translate_name(name, ctx), ij[0], ij[1], expr, ctx)]
+        if elem is not None and translate_name(name, ctx) in ctx.svectors:
+            return [f"{translate_name(name, ctx)}[{translate_expr(elem, ctx)}] = {_string_plus(translate_expr(expr, ctx))}"]
         if elem is not None and translate_name(name, ctx) in ctx.matrices:
             v = "NA" if expr.strip().lower() == "na" else translate_expr(expr, ctx)
             return [f"{translate_name(name, ctx)}[{translate_expr(elem, ctx)}] = {v}"]
@@ -1938,7 +2063,7 @@ def _table_method(t: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> lis
     raise ValueError(f"table method .{ml} not supported")
 
 
-_COPY_METHODS = {"a": "a", "s": "s", "f": "f", "l": "l", "x": "x", "n": "n", "r": "r", "d": "d", "i": "i"}
+_COPY_METHODS = {k: k for k in "asflxnrditqc"}
 
 
 def _copy(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
@@ -1962,7 +2087,7 @@ def _copy(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
     op = _opts(cmd_opts)
     meth = op.get("c", "").lower()[:1]
     if meth and meth not in _COPY_METHODS:
-        raise ValueError(f"copy(c={op.get('c')}): quadratic/cubic conversions are not supported (use a, s, f, l, x, n, r, d, i)")
+        raise ValueError(f"copy(c={op.get('c')}): conversion not supported (a s f l x n; r d i q t c)")
     if sp == ctx.page and dp == ctx.page:
         # objects within the page
         if sn in ctx.equations:
@@ -2234,6 +2359,8 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False, base
         head.append("scalar ev_N = $nobs    # size of the workfile (EViews @last)")
     if ctx.need_pages:
         head.append("# workfile pages are kept as .gdtb files in gretl's dot directory (ev_pagedir)")
+    if ctx.need_dbnomics:
+        head.append("include dbnomics.gfn    # online DBnomics database (needs internet access)")
     if ctx.args_used or args:
         head.append("# program arguments (EViews %0, %1, ...)")
         for k in range(max(list(ctx.args_used) + [len(args or []) - 1]) + 1):

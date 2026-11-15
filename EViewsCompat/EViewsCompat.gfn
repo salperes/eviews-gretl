@@ -4989,7 +4989,7 @@ return {d} ~ {x}
 <description>ev_pagecol() of the source series</description>
   </param>
   <param name="method" type="string" optional="true">
-<description>a s f l x n (high to low); r d i (low to high)</description>
+<description>a s f l x n (high to low); r d i q t c (low to high)</description>
   </param>
  </params>
 <code># convert to the frequency of the current page, as EViews copy(c=...)
@@ -5029,14 +5029,76 @@ if src_len &lt; tgt_len
     endif
   endloop
 else
-  errorif(!instring(&quot; r d i &quot;, &quot; &quot; ~ m ~ &quot; &quot;), &quot;low to high frequency: c=r (constant), d (divide) or i (linear)&quot;)
+  errorif(!instring(&quot; r d i q t c &quot;, &quot; &quot; ~ m ~ &quot; &quot;), &quot;low to high frequency: c=r, d, i, q (quadratic match average), t (quadratic match sum) or c (cubic match last)&quot;)
   # the source period that contains each target date
   matrix j = zeros(T, 1)
   loop t = 1..T
     matrix in = (S[, 1] .&lt;= D[t]) .* (Sn .&gt; D[t])
     j[t] = sumc(in) &gt; 0 ? imaxc(in) : 0
   endloop
-  if m == &quot;i&quot;
+  if m == &quot;q&quot; || m == &quot;t&quot; || m == &quot;c&quot;
+    # high-frequency periods per source period, and the position of each target in its period
+    scalar mm = round(src_len / tgt_len)
+    matrix pos = zeros(T, 1)
+    loop t = 1..T
+      if j[t] &gt; 0
+        pos[t] = sumc(j[1:t] .= j[t])
+      endif
+    endloop
+    # (a first source period cut by the page start is counted back from its end below)
+    errorif(ns &lt; 3, &quot;Quadratic and cubic conversions need at least 3 source observations&quot;)
+    matrix Y = S[, 2]
+    if m == &quot;c&quot;
+      # natural cubic spline through the last high-frequency position of each source period
+      matrix xk = seq(1, ns)' * mm
+      matrix h = xk[2:ns] - xk[1:ns-1]
+      matrix A = zeros(ns, ns)
+      matrix rhs = zeros(ns, 1)
+      A[1, 1] = 1
+      A[ns, ns] = 1
+      loop i = 2..ns - 1
+        A[i, i - 1] = h[i - 1]
+        A[i, i] = 2 * (h[i - 1] + h[i])
+        A[i, i + 1] = h[i]
+        rhs[i] = 6 * ((Y[i + 1] - Y[i]) / h[i] - (Y[i] - Y[i - 1]) / h[i - 1])
+      endloop
+      matrix M2 = inv(A) * rhs
+      loop t = 1..T
+        if j[t] &gt; 0
+          scalar k = j[t]
+          scalar x = (k - 1) * mm + pos[t] + (mm - sumc(j .= k)) * (k == 1)
+          scalar i = max(1, min(ns - 1, floor((x - xk[1]) / mm) + 1))
+          if x &lt; xk[1]
+            i = 1
+          endif
+          scalar hh = xk[i + 1] - xk[i]
+          scalar a1 = (xk[i + 1] - x) / hh
+          scalar b1 = (x - xk[i]) / hh
+          r[t] = a1 * Y[i] + b1 * Y[i + 1] + ((a1^3 - a1) * M2[i] + (b1^3 - b1) * M2[i + 1]) * hh^2 / 6
+        endif
+      endloop
+    else
+      # quadratic through each source period and its neighbours, matching their averages (or sums)
+      loop t = 1..T
+        if j[t] &gt; 0
+          scalar k = j[t]
+          scalar k0 = k == 1 ? 1 : (k == ns ? ns - 2 : k - 1)
+          k0 = max(1, k0)
+          matrix Am = zeros(3, 3)
+          matrix bv = zeros(3, 1)
+          loop q = 1..3
+            scalar pq = k0 + q - 1
+            matrix sj = (pq - 1) * mm + seq(1, mm)'
+            Am[q,] = {1, meanc(sj), meanc(sj.^2)}
+            bv[q] = m == &quot;q&quot; ? Y[pq] : Y[pq] / mm
+          endloop
+          matrix cf = inv(Am) * bv
+          scalar x = (k - 1) * mm + pos[t] + (mm - sumc(j .= k)) * (k == 1)
+          r[t] = cf[1] + cf[2] * x + cf[3] * x^2
+        endif
+      endloop
+    endif
+  elif m == &quot;i&quot;
     # linear interpolation, matching the source value in the last period of each source period
     matrix xs = {}
     matrix ys = {}
@@ -6885,6 +6947,287 @@ string o = exists(out) ? out : &quot;display&quot;
 gnuplot 2 1 --matrix=K --with-lines --output=&quot;@o&quot;
 </code>
 </gretl-function>
+<gretl-function name="ev_dateadd" type="scalar">
+ <params count="3">
+  <param name="d" type="scalar">
+<description>EViews date number</description>
+  </param>
+  <param name="n" type="scalar"/>
+  <param name="unit" type="string" optional="true">
+<description>dd, ww, mm, qq or yy</description>
+  </param>
+ </params>
+<code>string u = exists(unit) ? tolower(unit) : &quot;dd&quot;
+if u == &quot;dd&quot;
+  return d + n
+elif u == &quot;ww&quot;
+  return d + 7 * n
+endif
+matrix ymd = ev__ymd(d)
+scalar months = u == &quot;mm&quot; ? n : (u == &quot;qq&quot; ? 3 * n : (u == &quot;yy&quot; ? 12 * n : NA))
+errorif(!ok(months), &quot;unit must be dd, ww, mm, qq or yy&quot;)
+scalar tot = ymd[1] * 12 + ymd[2] - 1 + months
+scalar y = floor(tot / 12)
+scalar m = tot - 12 * y + 1
+scalar dd = ymd[3]
+# clamp the day to the length of the target month
+scalar ml = monthlen(m, y, 7)
+return epochday(y, m, min(dd, ml)) - 1
+</code>
+</gretl-function>
+<gretl-function name="ev_datediff" type="scalar">
+ <params count="3">
+  <param name="d1" type="scalar">
+<description>EViews date number</description>
+  </param>
+  <param name="d2" type="scalar"/>
+  <param name="unit" type="string" optional="true">
+<description>dd, ww, mm, qq or yy</description>
+  </param>
+ </params>
+<code># d1 - d2 in whole units
+string u = exists(unit) ? tolower(unit) : &quot;dd&quot;
+if u == &quot;dd&quot;
+  return d1 - d2
+elif u == &quot;ww&quot;
+  return floor((d1 - d2) / 7)
+endif
+matrix a = ev__ymd(d1)
+matrix b = ev__ymd(d2)
+scalar months = (a[1] - b[1]) * 12 + a[2] - b[2]
+if u == &quot;mm&quot;
+  return months
+elif u == &quot;qq&quot;
+  return floor(months / 3)
+elif u == &quot;yy&quot;
+  return a[1] - b[1]
+endif
+errorif(1, &quot;unit must be dd, ww, mm, qq or yy&quot;)
+return NA
+</code>
+</gretl-function>
+<gretl-function name="ev_makedate" type="scalar">
+ <params count="2">
+  <param name="v" type="scalar"/>
+  <param name="fmt" type="string">
+<description>yyyy, yyyymm, yyyymmdd, yyyy.mm or mm.dd</description>
+  </param>
+ </params>
+<code>string f = tolower(fmt)
+if f == &quot;yyyy&quot;
+  return epochday(v, 1, 1) - 1
+elif f == &quot;yyyymm&quot;
+  return epochday(floor(v / 100), v % 100, 1) - 1
+elif f == &quot;yyyymmdd&quot;
+  return epochday(floor(v / 10000), floor(v / 100) % 100, v % 100) - 1
+elif f == &quot;yyyy.mm&quot;
+  return epochday(floor(v), round(100 * (v - floor(v))), 1) - 1
+endif
+errorif(1, &quot;format must be yyyy, yyyymm, yyyymmdd or yyyy.mm&quot;)
+return NA
+</code>
+</gretl-function>
+<gretl-function name="ev_wfind" type="scalar">
+ <params count="2">
+  <param name="s" type="string">
+<description>Word list</description>
+  </param>
+  <param name="w" type="string">
+<description>Word</description>
+  </param>
+ </params>
+<code># position of a word in a space-separated list (0 if absent), case-insensitive
+strings t = strsplit(s)
+loop i = 1..nelem(t)
+  if toupper(t[i]) == toupper(w)
+    return i
+  endif
+endloop
+return 0
+</code>
+</gretl-function>
+<gretl-function name="ev_wdrop" type="string">
+ <params count="2">
+  <param name="s" type="string">
+<description>Word list</description>
+  </param>
+  <param name="drop" type="string">
+<description>Words to drop</description>
+  </param>
+ </params>
+<code>strings t = strsplit(s)
+string out = &quot;&quot;
+loop i = 1..nelem(t)
+  if !ev_wfind(drop, t[i])
+    out ~= (out == &quot;&quot; ? &quot;&quot; : &quot; &quot;) ~ t[i]
+  endif
+endloop
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_wkeep" type="string">
+ <params count="2">
+  <param name="s" type="string">
+<description>Word list</description>
+  </param>
+  <param name="keep" type="string">
+<description>Words to keep</description>
+  </param>
+ </params>
+<code>strings t = strsplit(s)
+string out = &quot;&quot;
+loop i = 1..nelem(t)
+  if ev_wfind(keep, t[i])
+    out ~= (out == &quot;&quot; ? &quot;&quot; : &quot; &quot;) ~ t[i]
+  endif
+endloop
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_wunique" type="string">
+ <params count="1">
+  <param name="s" type="string">
+<description>Word list</description>
+  </param>
+ </params>
+<code>strings t = strsplit(s)
+string out = &quot;&quot;
+loop i = 1..nelem(t)
+  if !ev_wfind(out, t[i])
+    out ~= (out == &quot;&quot; ? &quot;&quot; : &quot; &quot;) ~ t[i]
+  endif
+endloop
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_wreplace" type="string">
+ <params count="3">
+  <param name="s" type="string">
+<description>Word list</description>
+  </param>
+  <param name="src" type="string">
+<description>Word</description>
+  </param>
+  <param name="dst" type="string">
+<description>Replacement</description>
+  </param>
+ </params>
+<code>strings t = strsplit(s)
+string out = &quot;&quot;
+loop i = 1..nelem(t)
+  string w = toupper(t[i]) == toupper(src) ? dst : t[i]
+  out ~= (out == &quot;&quot; ? &quot;&quot; : &quot; &quot;) ~ w
+endloop
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_wsort" type="string">
+ <params count="2">
+  <param name="s" type="string">
+<description>Word list</description>
+  </param>
+  <param name="desc" type="bool" default="0"/>
+ </params>
+<code>strings t = strsplit(s)
+scalar n = nelem(t)
+# insertion sort, case-insensitive
+loop i = 2..n
+  string key = t[i]
+  scalar j = i - 1
+  loop while j &gt;= 1
+    scalar cmpv = strncmp(toupper(t[j]), toupper(key))
+    if (desc &amp;&amp; cmpv &lt; 0) || (!desc &amp;&amp; cmpv &gt; 0)
+      t[j + 1] = t[j]
+      j--
+    else
+      break
+    endif
+  endloop
+  t[j + 1] = key
+endloop
+string out = &quot;&quot;
+loop i = 1..n
+  out ~= (out == &quot;&quot; ? &quot;&quot; : &quot; &quot;) ~ t[i]
+endloop
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_covp" type="scalar">
+ <params count="2">
+  <param name="x" type="series"/>
+  <param name="y" type="series"/>
+ </params>
+<code># EViews @cov: population covariance (divides by n)
+smpl ok(x) &amp;&amp; ok(y) --restrict
+return cov(x, y) * ($nobs - 1) / $nobs
+</code>
+</gretl-function>
+<gretl-function name="ev_cumprod" type="series">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code>set skip_missing off
+matrix v = {x}
+matrix r = v
+loop t = 2..rows(v)
+  r[t] = r[t - 1] * v[t]
+endloop
+series out = r
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_cummax" type="series">
+ <params count="2">
+  <param name="x" type="series"/>
+  <param name="mn" type="bool" default="0">
+<description>Cumulative minimum instead</description>
+  </param>
+ </params>
+<code>set skip_missing off
+matrix v = {x}
+matrix r = v
+loop t = 2..rows(v)
+  if ok(r[t - 1]) &amp;&amp; ok(v[t])
+    r[t] = mn ? min(r[t - 1], v[t]) : max(r[t - 1], v[t])
+  elif ok(r[t - 1])
+    r[t] = r[t - 1]
+  endif
+endloop
+series out = r
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_ifirst" type="scalar">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code># observation number of the first non-missing value (EViews @ifirst)
+set skip_missing off
+matrix v = {x}
+loop t = 1..rows(v)
+  if ok(v[t])
+    return $t1 + t - 1
+  endif
+endloop
+return NA
+</code>
+</gretl-function>
+<gretl-function name="ev_ilast" type="scalar">
+ <params count="1">
+  <param name="x" type="series"/>
+ </params>
+<code>set skip_missing off
+matrix v = {x}
+scalar n = rows(v)
+loop i = 1..n                 # hansl loops only count upwards
+  scalar t = n - i + 1
+  if ok(v[t])
+    return $t1 + t - 1
+  endif
+endloop
+return NA
+</code>
+</gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
  <params count="5">
   <param name="spec" type="string">
@@ -8186,6 +8529,18 @@ else
   endloop
 endif
 return F
+</code>
+</gretl-function>
+<gretl-function name="ev__ymd" type="matrix" private="1">
+ <params count="1">
+  <param name="d" type="scalar">
+<description>EViews date number</description>
+  </param>
+ </params>
+<code>scalar iso = isodate(d + 1)                 # epoch day = EViews date number + 1
+scalar y = floor(iso / 10000)
+scalar m = floor(iso / 100) - 100 * y
+return {y, m, iso - 10000 * y - 100 * m}
 </code>
 </gretl-function>
 <sample-script>
