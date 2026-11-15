@@ -1,0 +1,47 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: explicit equations, ARMA, systems and VEC models
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+smpl full
+smpl 1985:1 2015:4
+bundle EQ_NLS = ev_ls("CONS = C(1)*GDP^C(2)", dataset)
+bundle EQ_ARMA = ev_ls("dlog(GDP) c dlog(CONS) AR(1) MA(1)", dataset)
+bundle EQ_G = ev_ls("dlog(CONS) c dlog(CONS(-1)) dlog(GDP)", dataset)
+smpl full
+smpl 2016:1 2019:4
+bundle EQ_G_fc = ev_forecast(EQ_G, dataset, 1, 0, 1)
+series CONS_F = ev_fcast_series(EQ_G_fc, EQ_G_fc.level)
+series CONS_SE = ev_fcast_se(EQ_G_fc, EQ_G_fc.level)
+bundle EQ_G_fc = ev_forecast(EQ_G, dataset, 1, 1, 0)
+series DCONS_F = ev_fcast_series(EQ_G_fc, EQ_G_fc.level)
+bundle EQ_ARMA_fc = ev_forecast(EQ_ARMA, dataset, 1, 1, 1)
+series GDP_F = ev_fcast_series(EQ_ARMA_fc, EQ_ARMA_fc.level)
+
+smpl full
+smpl 1985:1 2019:4
+# system SYS1 declared
+# system SYS1: dlog(cons) = c(1) + c(2)*dlog(gdp)
+# system SYS1: dlog(inv) = c(3) + c(2)*dlog(gdp) + c(4)*ffr
+# system SYS1: inst ffr(-1) dlog(gdp(-1)) dlog(cons(-1)) ffr
+strings ev_sd = defarray("dlog(CONS)", "dlog(INV)")
+strings ev_sx = defarray("c dlog(GDP)", "c dlog(GDP) FFR")
+strings ev_sc = defarray("1 2", "3 2 4")
+strings ev_st = defarray("DLOG(CONS)=C(1)+C(2)*DLOG(GDP)", "DLOG(INV)=C(3)+C(2)*DLOG(GDP)+C(4)*FFR")
+bundle SYS1 = ev_system(ev_sd, ev_sx, ev_sc, dataset, "3sls", "FFR(-1) dlog(GDP(-1)) dlog(CONS(-1)) FFR", 1, ev_st)
+SYS1.name = "SYS1"
+ev_sysprint(&SYS1)
+bundle SYS1_wald = ev_wald(SYS1, "c(2)=1")
+
+smpl full
+smpl 1960:1 2019:4
+series LC = log(CONS)
+series LG = log(GDP)
+list G = LC LG
+ev_coint("LC LG", dataset, "c", 2)
+bundle V1 = ev_vecm("1 2 LC LG", dataset, "c", 1, 0, "lc lg")
+ev_varirfplot(V1, 8, "plot01.png")
+

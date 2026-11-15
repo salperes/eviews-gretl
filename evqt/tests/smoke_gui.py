@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
-from evqt.app import STYLE, light_palette, EquationWindow, GroupWindow, MainWindow, SeriesWindow  # noqa: E402
+from evqt.app import STYLE, light_palette, SystemWindow, EquationWindow, GroupWindow, MainWindow, SeriesWindow  # noqa: E402
 
 DATA = os.path.join(os.path.dirname(__file__), "..", "..", "data", "usmacro.gdt")
 out = sys.argv[1] if len(sys.argv) > 1 else "."
@@ -18,6 +18,8 @@ os.makedirs(out, exist_ok=True)
 errors = []
 failures = []
 QMessageBox.warning = lambda *a, **k: errors.append(a[2] if len(a) > 2 else a)
+QMessageBox.question = lambda *a, **k: QMessageBox.Discard     # no modal prompts in the test
+QMessageBox.information = lambda *a, **k: None
 
 app = QApplication([])
 app.setStyle("Fusion")
@@ -57,7 +59,8 @@ check("macro" in wf.lists, "group creates a list")
 check("eq_cons" in wf.bundles, "equation object created")
 check("eq_untitled1" in wf.bundles, "bare ls creates an untitled equation")
 check(isinstance(w.windows.get("eq_untitled1"), EquationWindow), "bare ls opens an equation window")
-check(abs(float(wf.scalars.get("r2", "nan")) - 0.4066216899) < 1e-6, "scalar from equation member")
+r2_eq = float("".join(w.engine.run('printf "%.10g\\n", eq_cons.rsq')))
+check(abs(float(wf.scalars.get("r2", "nan")) - r2_eq) < 1e-5, "scalar from equation member")
 
 eqw = w.windows["eq_untitled1"]
 txt = eqw.text.toPlainText()
@@ -65,7 +68,7 @@ check("Dependent Variable: DLOG(INV)" in txt and "HAC standard errors" in txt, "
 
 w.open_object(("eq_cons", "equation"))
 eqc = w.windows["eq_cons"]
-check("Included observations: 139" in eqc.text.toPlainText(), "eq_cons uses 139 obs (pre-sample lag used)")
+check("Included observations: 140" in eqc.text.toPlainText(), "eq_cons uses 140 obs (dlog of a lag uses pre-sample data)")
 eqc.afr()
 check(eqc.stack.currentWidget() is eqc._scroll and not eqc.image.original().isNull(), "Actual/Fitted/Residual graph")
 eqc.diag()
@@ -147,6 +150,70 @@ check("GDP" in w.engine.wf.series and w.engine.wf.nobs_full == 30, "Fetch brings
 w.execute("pageselect usmacro")
 check(w.engine.wf.page == "usmacro" and "CONS" in w.engine.wf.series, "pageselect returns to the quarterly page")
 check("v1" in w.engine.wf.bundles and w.engine.wf.sample_first == "1985:1", "objects and sample kept per page")
+w.open_object(("eq_cons", "equation"))
+eqc = w.windows["eq_cons"]
+w.open_object(("GDP", "series"))
+sw = w.windows["GDP"]
+w.open_object(("macro", "group"))
+gw = w.windows["macro"]
+w.open_object(("v1", "var"))
+vw = w.windows["v1"]
+
+# --- forecast of a transformed dependent, in levels and as the expression
+w.execute("smpl 1985q1 2015q4")
+w.execute("equation eqg.ls dlog(cons) c dlog(cons(-1)) dlog(gdp)")
+w.execute("smpl 2016q1 2019q4")
+dep, base = w.engine.dep_info("eqg")
+check(dep == "DLOG(CONS)" and base == "CONS", "forecast dialog offers CONS and DLOG(CONS)")
+text, png = w.engine.forecast("eqg", "consf", "", True, True)
+check("Forecast: CONSF" in text, "level forecast of CONS from a dlog equation")
+vals = w.engine.series_values(["consf", "CONS"])[1]
+check(abs(float(vals[0][1]) / float(vals[0][2]) - 1) < 0.02, "level forecast is close to actual CONS at the first step")
+text, png = w.engine.forecast("eqg", "dconsf", "", True, False)
+check("Forecast: DLOG(CONS)F" in text, "forecast of the expression itself")
+
+# --- explicit equation and ARMA through the command window
+w.execute("smpl 1985q1 2015q4")
+w.execute("equation eqn.ls cons = c(1)*gdp^c(2)")
+check(w.engine.wf.kinds.get("eqn") == "equation", "explicit c(i) equation estimated (NLS)")
+w.open_object(("eqn", "equation"))
+check("Gauss-Newton" in w.windows["eqn"].text.toPlainText(), "NLS output in the equation window")
+w.execute("equation eqa.ls dlog(gdp) c dlog(cons) ar(1) ma(1)")
+w.open_object(("eqa", "equation"))
+check("Inverted AR Roots" in w.windows["eqa"].text.toPlainText(), "ARMA output with inverted roots")
+
+# --- system window
+w.execute("smpl 1985q1 2019q4")
+w.new_system.__func__
+sysw = SystemWindow(w, "sys1")
+w.add_window("sys1", sysw, (700, 500), "system")
+sysw.spec.setPlainText("dlog(cons) = c(1) + c(2)*dlog(gdp)\ndlog(inv) = c(3) + c(2)*dlog(gdp) + c(4)*ffr")
+from PySide6.QtWidgets import QInputDialog
+QInputDialog.getItem = staticmethod(lambda *a, **k: ("Seemingly Unrelated Regression", True))
+sysw.estimate()
+check(w.engine.wf.kinds.get("sys1") == "system", "System window estimates a SUR system")
+check("Seemingly Unrelated Regression" in sysw.text.toPlainText() and "C(4)" in sysw.text.toPlainText(),
+      "system output with shared coefficient (4 coefficients)")
+
+# --- VEC through the VAR dialog path (command) and its views
+w.execute("smpl 1960q1 2019q4")
+w.execute("series lc = log(cons)")
+w.execute("series lg = log(gdp)")
+w.execute("var vec1.ec(c, 1) 1 2 lc lg")
+check(w.engine.wf.kinds.get("vec1") == "vecm", "VEC object")
+w.open_object(("vec1", "vecm"))
+check("Vector Error Correction Estimates" in w.windows["vec1"].text.toPlainText(), "VEC window output")
+
+# --- save with unsaved-change tracking, and fetch from a data file
+check(w.engine.wf.dirty, "workfile marked as changed")
+outp = os.path.join(w.engine.tmpdir, "saved.gdt")
+written = w.engine.save(outp)
+check(os.path.exists(outp) and not w.engine.wf.dirty, "Save writes the workfile and clears the change mark")
+check(any(x.endswith("_annual.gdt") for x in written), "other pages saved next to it")
+w.execute("pageselect annual")
+w.fetch_dialog(os.path.abspath(DATA), choose=["INV"])
+check("INV" in w.engine.wf.series, "Fetch from a .gdt data file (not a database)")
+w.execute("pageselect usmacro")
 w.open_object(("eq_cons", "equation"))
 eqc = w.windows["eq_cons"]
 w.open_object(("GDP", "series"))

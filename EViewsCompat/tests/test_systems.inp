@@ -1,0 +1,115 @@
+# ev_system and ev_vecm checked against gretl's system and vecm
+set verbose off
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-48s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+series di = ldiff(INV)
+series ffr1 = FFR(-1)
+series dg1 = dg(-1)
+series dc1 = dc(-1)
+smpl 1985:1 2019:4
+
+strings deps = defarray("dlog(CONS)", "dlog(INV)")
+strings xs = defarray("c dlog(GDP)", "c dlog(GDP) FFR")
+strings cn = defarray("1 2", "3 4 5")
+
+# --- 1. LS and SUR
+loop foreach m ls sur
+    bundle s_$m = ev_system(deps, xs, cn, dataset, "$m", null, 1)
+endloop
+sys_ols <- system
+  equation dc const dg
+  equation di const dg FFR
+end system
+estimate sys_ols method=ols --quiet
+matrix C = $coeff
+matrix S = $stderr
+check("system LS c(4)", s_ls.coeff[4], C[4])
+check("system LS se c(5)", s_ls.stderr[5], S[5])
+sys_sur <- system
+  equation dc const dg
+  equation di const dg FFR
+end system
+estimate sys_sur method=sur --quiet
+C = $coeff
+S = $stderr
+check("SUR c(2)", s_sur.coeff[2], C[2])
+check("SUR c(4)", s_sur.coeff[4], C[4])
+check("SUR se c(4)", s_sur.stderr[4], S[4])
+check("SUR determinant", s_sur.detS, det($sigma))
+
+# --- 2. TSLS and 3SLS with instruments
+string inst = "FFR(-1) dlog(GDP(-1)) dlog(CONS(-1)) FFR"    # exogenous regressors are instruments too, as in EViews
+bundle s_2 = ev_system(deps, xs, cn, dataset, "tsls", inst, 1)
+bundle s_3 = ev_system(deps, xs, cn, dataset, "3sls", inst, 1)
+sys_2 <- system
+  equation dc const dg
+  equation di const dg FFR
+  instr const ffr1 dg1 dc1 FFR
+end system
+estimate sys_2 method=tsls --quiet
+C = $coeff
+S = $stderr
+check("TSLS c(2)", s_2.coeff[2], C[2])
+check("TSLS se c(2)", s_2.stderr[2], S[2])
+sys_3 <- system
+  equation dc const dg
+  equation di const dg FFR
+  instr const ffr1 dg1 dc1 FFR
+end system
+estimate sys_3 method=3sls --quiet
+C = $coeff
+S = $stderr
+check("3SLS c(4)", s_3.coeff[4], C[4])
+check("3SLS se c(4)", s_3.stderr[4], S[4])
+
+# --- 3. shared coefficient across equations (c(2) in both)
+bundle s_r = ev_system(deps, xs, defarray("1 2", "3 2 4"), dataset, "sur", null)
+sys_r <- system
+  equation dc const dg
+  equation di const dg FFR
+end system
+restrict sys_r
+  b[1,2] - b[2,2] = 0
+end restrict
+estimate sys_r method=sur --quiet
+C = $coeff
+S = $stderr
+check("restricted SUR shared c(2)", s_r.coeff[2], C[2], 1e-4)
+check("restricted SUR c(4)", s_r.coeff[4], C[5], 1e-4)
+check("restricted SUR has 4 coefficients", s_r.k, 4)
+bundle w = ev_wald(s_sur, "c(2)=c(4)", 1)
+check("Wald on a system runs", ok(w.F), 1)
+
+# --- 4. VEC model
+series lc = log(CONS)
+series lg = log(GDP)
+smpl 1960:1 2019:4
+bundle v = ev_vecm("1 2 lc lg", dataset, "c", 1, 0, "log(cons) log(gdp)")
+vecm 3 1 lc lg --silent
+matrix C = $coeff
+check("VEC coefficient d_lc_1 eq1", v.coeff[2,1], C[2,1])
+check("VEC EC1 eq2 (alpha)", v.coeff[6,2], C[6,2])
+check("VEC beta[2]", v.beta[2], $jbeta[2])
+check("VEC labels", v.clab[6] == "CointEq1", 1)
+set horizon 8
+matrix r = irf(2, 1)
+matrix R = ev_varirf(v, 8, 1)
+check("VEC impulse response through the VAR views", R[5, 2], r[5])
+bundle v2 = ev_vecm("1 1 lc lg @ FFR", dataset, "e", 1, 1)
+vecm 2 1 lc lg ; FFR --ct --silent
+check("VEC case e with exogenous: trend coefficient", v2.coeff[5,1], $coeff[5,1])
+bundle v3 = ev_vecm("1 1 lc lg", dataset, "b", 1, 1)
+vecm 2 1 lc lg --rc --silent
+check("VEC case b (restricted constant): beta const", v3.beta[3], $jbeta[3])
+ev_coint("lc lg", dataset, "c", 2)

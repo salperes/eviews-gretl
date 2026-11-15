@@ -14,11 +14,11 @@ smpl 1985:1 2015:4
 bundle EQ_FFR = ev_ls("FFR c FFR(-1) dlog(GDP)", dataset)
 smpl full
 smpl 2016:1 2019:4
-bundle EQ_FFR_fc = ev_forecast(EQ_FFR, dataset, 1, 0)
-series FFR_DYN = ev_fcast_series(EQ_FFR_fc)
-series FFR_SE = ev_fcast_se(EQ_FFR_fc)
-bundle EQ_FFR_fc = ev_forecast(EQ_FFR, dataset, 0, 1)
-series FFR_STAT = ev_fcast_series(EQ_FFR_fc)
+bundle EQ_FFR_fc = ev_forecast(EQ_FFR, dataset, 1, 0, 1)
+series FFR_DYN = ev_fcast_series(EQ_FFR_fc, EQ_FFR_fc.level)
+series FFR_SE = ev_fcast_se(EQ_FFR_fc, EQ_FFR_fc.level)
+bundle EQ_FFR_fc = ev_forecast(EQ_FFR, dataset, 0, 1, 1)
+series FFR_STAT = ev_fcast_series(EQ_FFR_fc, EQ_FFR_fc.level)
 
 # --- VAR with lags 1-2
 smpl full

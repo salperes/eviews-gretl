@@ -118,7 +118,7 @@ class RealPrograms(unittest.TestCase):
         c = Ctx()
         translate_line("equation eq1.ls f10 c t10", c)
         self.assertEqual(translate_line("eq1.fit f10_fit", c),
-                         ["bundle eq1_fc = ev_forecast(eq1, dataset, 0, 1)", "series f10_fit = ev_fcast_series(eq1_fc)"])
+                         ["bundle eq1_fc = ev_forecast(eq1, dataset, 0, 1, 1)", "series f10_fit = ev_fcast_series(eq1_fc, eq1_fc.level)"])
         self.assertEqual(translate_line("eq1.makeresid r1", c), ["series r1 = ev_resid(eq1)"])
         self.assertEqual(translate_line("genr u = resid", c), ["series u = ev_resid(eq1)"])
         with self.assertRaises(Ignored):
@@ -177,10 +177,11 @@ class NewFeatures(unittest.TestCase):
         c = Ctx()
         translate_line("equation eq1.ls y c y(-1) x", c)
         self.assertEqual(translate_line("eq1.forecast yf yf_se", c),
-                         ["bundle eq1_fc = ev_forecast(eq1, dataset, 1, 1)",
-                          "series yf = ev_fcast_series(eq1_fc)", "series yf_se = ev_fcast_se(eq1_fc)"])
-        out = translate_line("eq1.forecast(s, e, g) yf", c)
-        self.assertEqual(out[0], "bundle eq1_fc = ev_forecast(eq1, dataset, 0, 0)")
+                         ["bundle eq1_fc = ev_forecast(eq1, dataset, 1, 1, 1)",
+                          "series yf = ev_fcast_series(eq1_fc, eq1_fc.level)",
+                          "series yf_se = ev_fcast_se(eq1_fc, eq1_fc.level)"])
+        out = translate_line("eq1.forecast(s, e, g, d) yf", c)
+        self.assertEqual(out[0], "bundle eq1_fc = ev_forecast(eq1, dataset, 0, 0, 0)")
         self.assertEqual(out[-1], "ev_fplot(&eq1_fc)")
 
     def test_var(self):
@@ -220,6 +221,40 @@ class NewFeatures(unittest.TestCase):
                                'open "@ev_pagedir/quarterly.gdtb" --quiet --preserve', "scalar ev_N = $nobs",
                                "list g1 = a b"])
         self.assertTrue(c.need_pages)
+
+
+class Estimators(unittest.TestCase):
+    def test_explicit_and_arma_pass_through(self):
+        self.assertEqual(tl("equation e.ls y = c(1) + c(2)*x"), ['bundle e = ev_ls("y = c(1) + c(2)*x", dataset)'])
+        self.assertEqual(tl("ls y c x ar(1) ma(1)"), ['bundle eq_untitled1 = ev_ls("y c x ar(1) ma(1)", dataset)'])
+
+    def test_system(self):
+        c = Ctx()
+        translate_line("system s1", c)
+        translate_line("s1.append dlog(cons) = c(1) + c(2)*dlog(gdp)", c)
+        translate_line("s1.append dlog(inv) = c(3) + c(2)*dlog(gdp) - c(4)*ffr", c)
+        translate_line("s1.append inst ffr(-1) dlog(gdp(-1))", c)
+        out = translate_line("s1.3sls", c)
+        self.assertEqual(out[0], 'strings ev_sd = defarray("dlog(cons)", "dlog(inv)")')
+        self.assertEqual(out[1], 'strings ev_sx = defarray("c dlog(gdp)", "c dlog(gdp) (-(ffr))")')
+        self.assertEqual(out[2], 'strings ev_sc = defarray("1 2", "3 2 4")')
+        self.assertEqual(out[4], 'bundle s1 = ev_system(ev_sd, ev_sx, ev_sc, dataset, "3sls", "ffr(-1) dlog(gdp(-1))", 1, ev_st)')
+        self.assertEqual(translate_line("s1.makeresids r1 r2", c)[1], "series r2 = ev_sysresid(s1, 2)")
+        with self.assertRaises(ValueError):
+            c2 = Ctx()
+            translate_line("system s2", c2)
+            translate_line("s2.append y = c(1)*exp(c(2)*x)", c2)
+            translate_line("s2.sur", c2)
+
+    def test_vec_and_coint(self):
+        c = Ctx()
+        out = translate_line("var v1.ec(d, 2) 1 3 lc lg ly", c)
+        self.assertEqual(out, ['bundle v1 = ev_vecm("1 3 lc lg ly", dataset, "d", 2, 0, "lc lg ly")'])
+        self.assertEqual(translate_line("v1.impulse(6)", c), ["ev_varirfplot(v1, 6)"])
+        self.assertEqual(translate_line("v1.output", c), ["ev_vecprint(&v1)"])
+        self.assertEqual(translate_line("v1.coint(c, 4)", c), ['ev_coint("lc lg ly", dataset, "c", 4)'])
+        translate_line("group g lc lg", c)
+        self.assertEqual(translate_line("g.coint(b, 2)", c), ['ev_coint("lc lg", dataset, "b", 2)'])
 
 
 class Program(unittest.TestCase):

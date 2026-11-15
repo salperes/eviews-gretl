@@ -33,25 +33,30 @@ of iCloud-synced folders on purpose.
 - File: open gdt/csv/xlsx/dta/wf1..., save as .gdt, run EViews programs.
 - Freeze saves the current view to a file (txt, csv or png).
 
-- Forecast button: forecast name, S.E. series, dynamic/static, forecast sample;
-  opens a window with the forecast and +/- 2 S.E. bands and the evaluation table
-  (RMSE, MAE, MAPE, Theil, bias/variance/covariance proportions).
-- VAR objects: Quick > Estimate VAR (or `var v1.ls 1 2 y1 y2 @ c x`); output with
-  coefficient, (s.e.), [t]; Granger / block exogeneity tests; lag length criteria;
-  impulse responses (grid of graphs); variance decomposition; residual graphs and series.
-- Fetch / Store: gretl databases (`.bin`). Store writes the selected series (whole range);
-  Fetch lists a database and imports the chosen series, converting frequency by averaging.
-- Workfile pages: tabs at the bottom of the workfile window, New Page (annual, quarterly,
-  monthly, daily, undated, or a copy), right-click to rename or delete;
-  `pagecreate`/`pageselect`/`pagedelete` in the command window. Each page keeps its own
-  sample, groups, equations and VARs.
-- Edit+/- in series and group spreadsheets: edited cells are written straight to gretl
-  (the data file on disk changes only when you save).
+- Forecast button: series to forecast (for dlog(Y), d(Y), log(Y) equations: Y itself, as in
+  EViews, or the expression), forecast and S.E. names, dynamic/static, forecast sample;
+  graph with +/- 2 S.E. bands and the evaluation table (RMSE, MAE, MAPE, Theil, proportions).
+  Dynamic forecasts recompute every regressor that uses the forecast series; their S.E.
+  follow the lags of the dependent variable (and the ARMA terms).
+- Equations: `y c x`, explicit `y = c(1) + c(2)*x^c(3)` (NLS), ARMA terms `ar(1) ma(1)`
+  (regression with ARMA errors, exact ML, with inverted roots).
+- VAR and VEC objects: Quick > Estimate VAR (type, lags, trend case, rank) or
+  `var v1.ls ...` / `var v1.ec(c, 1) ...`; output with coefficient, (s.e.), [t]; Granger
+  tests; lag length criteria; Johansen cointegration test; impulse responses; variance
+  decomposition; residual graphs and series.
+- Systems: Quick > Estimate System, or `system s1` + `s1.append ...` + `s1.sur`; equations
+  linear in c(i), shared coefficients across equations, `inst` lines; LS, SUR, 2SLS, 3SLS.
+- Fetch / Store: gretl databases (`.bin`); Fetch also reads any data file gretl opens
+  (`.wf1`, `.gdt`, `.csv`, `.xlsx`, `.dta` ...). EViews `.edb` databases use a closed format
+  and cannot be read: save the series to a `.wf1` workfile in EViews and fetch from that.
+- Workfile pages: tabs at the bottom of the workfile window, New Page (any frequency or a
+  copy), right-click to rename or delete; each page keeps its sample, groups and objects.
+- Edit+/- in series and group spreadsheets.
+- Unsaved changes: `*` in the titles; Save (Cmd+S) writes the current page to its .gdt
+  and other pages next to it as `<name>_<page>.gdt`; closing or opening another file asks first.
 
-Not yet: the explicit `y=c(1)+c(2)*x` form, ARMA terms, system objects (SUR, 2SLS
-systems), VEC models, structural VAR restrictions, EViews `.edb` databases (gretl
-`.bin` databases are used instead). Dynamic forecasts use lags of a plain dependent
-variable only, and their S.E. is the one-step formula.
+Not yet: FIML/GMM systems, structural VAR restrictions, models (simultaneous solution of
+several objects), `@`-functions beyond those listed in the package help.
 
 ## Tests
 ```bash

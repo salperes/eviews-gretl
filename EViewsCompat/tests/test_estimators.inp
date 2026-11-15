@@ -1,0 +1,110 @@
+# Forecasts of transformed dependents, explicit (NLS) equations and ARMA terms,
+# checked against gretl's ols/fcast, nls and arima/fcast
+set verbose off
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-48s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+
+# --- 1. dynamic forecast of a transformed dependent: dlog(CONS)
+smpl 1985:1 2015:4
+bundle e1 = ev_ls("dlog(CONS) c dlog(CONS(-1)) dlog(GDP)", dataset, null, 1)
+ols dc const dc(-1) dg --quiet
+fcast 2016:1 2019:4 nat_d --dynamic --quiet
+fcast 2016:1 2019:4 nat_s --static --quiet
+smpl 2016:1 2019:4
+bundle f1 = ev_forecast(e1, dataset, 1, 1)
+bundle f1s = ev_forecast(e1, dataset, 0, 1)
+series my_d = ev_fcast_series(f1)
+series my_s = ev_fcast_series(f1s)
+check("dynamic dlog(CONS) forecast 2016:3", my_d[2016:3], nat_d[2016:3])
+check("dynamic dlog(CONS) forecast 2019:4", my_d[2019:4], nat_d[2019:4])
+check("static dlog(CONS) forecast 2018:1", my_s[2018:1], nat_s[2018:1])
+# level forecast of CONS: previous level times exp(forecast growth)
+series my_lev = ev_fcast_series(f1, 1)
+scalar lv = CONS[2015:4]
+loop t = 2016:1..2019:4
+    lv = lv * exp(nat_d[t])
+endloop
+check("dynamic level forecast of CONS, 2019:4", my_lev[2019:4], lv)
+check("static level forecast of CONS, 2017:1", ev_fcast_series(f1s, 1)[2017:1], CONS[2016:4] * exp(nat_s[2017:1]))
+# multi-step S.E. grows with the horizon and starts at the static value
+series my_se = ev_fcast_se(f1)
+series my_ses = ev_fcast_se(f1s)
+check("dynamic S.E. step 1 = innovation S.E.", my_se[2016:1], e1.sigma)
+check("dynamic S.E. grows with horizon", my_se[2019:4] > my_se[2016:2], 1)
+check("level S.E. available", ok(ev_fcast_se(f1, 1)[2019:4]), 1)
+
+# --- 2. AR(1) model: dynamic S.E. against gretl
+smpl 1985:1 2015:4
+bundle e2 = ev_ls("FFR c FFR(-1)", dataset, null, 1)
+ols FFR const FFR(-1) --quiet
+fcast 2016:1 2019:4 --dynamic --quiet
+matrix nse = $fcse
+smpl 2016:1 2019:4
+bundle f2 = ev_forecast(e2, dataset, 1, 1)
+printf "gretl dynamic S.E.: %s\n", rows(nse) ? sprintf("%g ... %g", nse[1], nse[rows(nse)]) : "n/a"
+check("AR(1) dynamic S.E. step 4 vs gretl", f2.se[4], nse[4], 1e-4)
+check("AR(1) dynamic S.E. step 16 vs gretl", f2.se[16], nse[16], 1e-4)
+
+# --- 3. explicit equations (NLS)
+smpl 1985:1 2015:4
+bundle n1 = ev_ls("FFR = c(1) + c(2)*FFR(-1) + c(3)*dlog(GDP)", dataset, null, 1)
+ols FFR const FFR(-1) dg --quiet
+check("linear NLS = OLS, c(2)", n1.coeff[2], $coeff[2], 1e-5)
+check("linear NLS = OLS, se(c(3))", n1.stderr[3], $stderr[3], 1e-3)
+check("linear NLS = OLS, R-squared", n1.rsq, $rsq, 1e-6)
+check("NLS label", n1.labels[2] == "C(2)", 1)
+bundle w = ev_wald(n1, "c(2)=1", 1)
+check("Wald on NLS equation runs", ok(w.F), 1)
+smpl 2016:1 2019:4
+bundle fn = ev_forecast(n1, dataset, 0, 1)
+smpl 1985:1 2015:4
+bundle o1 = ev_ls("FFR c FFR(-1) dlog(GDP)", dataset, null, 1)
+smpl 2016:1 2019:4
+bundle fo = ev_forecast(o1, dataset, 0, 1)
+check("NLS static forecast = OLS static forecast", fn.yf[10], fo.yf[10], 1e-4)
+check("NLS static S.E. = OLS static S.E.", fn.se[10], fo.se[10], 1e-3)
+smpl 1985:1 2015:4
+bundle n2 = ev_ls("CONS = c(1)*GDP^c(2)", dataset, null, 1)
+scalar a = 1
+scalar g = 1
+nls CONS = a * GDP^g
+  params a g
+end nls --quiet
+check("nonlinear NLS c(2) vs gretl nls", n2.coeff[2], $coeff[2], 1e-3)
+check("nonlinear NLS SSR vs gretl nls", n2.ssr, $ess, 1e-3)
+
+# --- 4. ARMA terms vs arima
+smpl 1985:1 2015:4
+bundle a1 = ev_ls("dlog(GDP) c dlog(CONS) ar(1) ma(1)", dataset)
+arima 1 0 1 ; dg const dc --quiet
+matrix C = $coeff
+check("ARMA const", a1.coeff[1], C[1], 1e-4)
+check("ARMA AR(1)", a1.coeff[2], C[2], 1e-4)
+check("ARMA MA(1)", a1.coeff[3], C[3], 1e-4)
+check("ARMA regressor", a1.coeff[4], C[4], 1e-4)
+check("ARMA log likelihood", a1.lnl, $lnl, 1e-6)
+fcast 2016:1 2019:4 nat_ad --dynamic --quiet
+matrix nase = $fcse
+fcast 2016:1 2019:4 nat_as --static --quiet
+smpl 2016:1 2019:4
+bundle fa = ev_forecast(a1, dataset, 1, 1)
+bundle fas = ev_forecast(a1, dataset, 0, 1)
+series my_ad = ev_fcast_series(fa)
+series my_as = ev_fcast_series(fas)
+check("ARMA dynamic forecast 2016:1", my_ad[2016:1], nat_ad[2016:1], 1e-4)
+check("ARMA dynamic forecast 2019:4", my_ad[2019:4], nat_ad[2019:4], 1e-4)
+check("ARMA static forecast 2018:3", my_as[2018:3], nat_as[2018:3], 1e-4)
+check("ARMA dynamic S.E. step 6 vs gretl", fa.se[6], nase[6], 1e-3)
+bundle a2 = ev_ls("FFR c ar(1) ar(2)", dataset, null, 1)
+check("pure AR(2) without regressors runs", a2.k, 3)

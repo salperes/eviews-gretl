@@ -28,17 +28,20 @@ Also: `eq.fit` / `eq.makeresid` / `resid`, `@coefs(k)`, `equation e.arch(p,q)` (
 styling lines are ignored), `sort`, daily workfiles and dates, `@first+!i` sample
 arithmetic, `{%x}` / `x_!i` program variables, group elements `g(!i)`.
 
-Forecasts: `eq.forecast(s|d, e, g) yf yf_se` (dynamic by default) and `eq.fit yf` (static).
+Forecasts: `eq.forecast(e, g, d) yf yf_se` (dynamic) and `eq.fit yf` (static); like EViews,
+a dlog(Y)/d(Y)/log(Y) equation forecasts Y unless option `d` asks for the expression.
+Explicit equations `y = c(1) + c(2)*x` and ARMA terms `ar(k)`/`ma(k)` go to `ev_ls`.
 VARs: `var v.ls 1 2 y1 y2 @ c x` with `.impulse`, `.decomp`, `.testexog`, `.laglen`,
-`.makeresids`, `.output`; expressions become helper series built over the whole workfile.
+`.makeresids`, `.output`, `.coint`; VEC: `var v.ec(case, rank) 1 2 y1 y2`.
+Systems: `system s1`, `s1.append y = c(1) + c(2)*x`, `s1.append inst z1 z2`,
+`s1.ls|sur|tsls|3sls`, `.wald`, `.makeresids`. Johansen test: `group.coint(case, lags)`.
 Databases: `store(d=db)`, `fetch(d=db)`, `dbopen`/`db` (gretl `.bin` files).
-Pages: `pagecreate(page=x) freq start end`, `pageselect`, `pagedelete`, `pagerename`
-(pages are kept as `.gdtb` files in gretl's dot directory; groups are redefined on return).
+Pages: `pagecreate(page=x) freq start end`, `pageselect`, `pagedelete`, `pagerename`.
+`d()` and `dlog()` of a series or of its lag are written with explicit lags, so the first
+observation of a sample uses earlier data, as in EViews.
 
-Not yet: TGARCH/EGARCH, panel pages (`pagestruct`, `pageunstack`), IPS test,
-subroutines/`call`, `include`, matrices/vectors, system objects, VEC models.
-
-Use `--plot-files` to write graphs as PNG files when running with gretlcli.
+Not yet: TGARCH/EGARCH, panel pages (`pagestruct`, `pageunstack`), IPS test, FIML/GMM
+systems, subroutines/`call`, `include`, matrices/vectors, EViews model objects.
 
 ## Real programs (`real_prg/`, local testing only: the source repos have no licence)
 | Program | Lines | Untranslated | Ran in gretl |

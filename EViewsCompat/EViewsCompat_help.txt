@@ -64,3 +64,32 @@ VAR objects (var v.ls 1 2 y1 y2 @ c x)
   ev_vardecomp(v, 10)           variance decomposition (percent)
   ev_varlaglen(v, dataset, 8)   lag length criteria
   series r = ev_varresid(v, 1)  residuals of equation 1
+
+Explicit equations, ARMA terms (ev_ls dispatches automatically)
+
+  ev_ls("y = c(1) + c(2)*x^c(3)", dataset)    nonlinear least squares
+  ev_ls("y c x ar(1) ar(4) ma(1)", dataset)    regression with ARMA errors (ML)
+      ARMA output shows SIGMASQ and the inverted AR/MA roots. Forecasts of
+      either kind use the same ev_forecast call.
+
+Forecasts of transformed dependents
+
+  ev_forecast(eq, dataset, 1, 0, 1)   dynamic forecast reported in levels:
+      for log(Y), d(Y), dlog(Y) the forecast of Y is built step by step and
+      every regressor that uses Y is recomputed. ev_fcast_series(fc, 1) and
+      ev_fcast_se(fc, 1) give the level forecast and its S.E. Dynamic S.E.
+      follow the lags of the dependent variable (innovation uncertainty).
+
+Systems (system sys1 / sys1.sur)
+
+  ev_system(deps, xspecs, cnums, dataset, "sur" [, "z1 z2"])
+      deps: array of dependent variables; xspecs: regressors per equation
+      ("c x1 x2"); cnums: coefficient numbers per equation ("1 2 3"); the same
+      number in two equations shares the coefficient. Methods ls, sur, tsls,
+      3sls; instruments get a constant added. ev_wald works with c(i).
+
+VEC models (var v.ec(c, 1) 1 2 y1 y2)
+
+  ev_vecm("1 2 y1 y2 [@ x]", dataset, "c", 1)   trend case a-e, rank
+  ev_coint("y1 y2", dataset, "c", 4)            Johansen test
+      The VAR views (ev_varirf, ev_varirfplot, ev_vardecomp) work on VEC results.

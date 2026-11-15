@@ -62,6 +62,8 @@ class Ctx:
     group_page: dict = field(default_factory=dict)    # group -> page it lives on
     need_pages: bool = False
     var_counter: int = 0
+    systems: dict = field(default_factory=dict)     # name -> {"eqs": [...], "inst": "..."}
+    var_endo: dict = field(default_factory=dict)    # VAR name -> series names of its variables
 
 
 def safe_name(name: str, prefix: str) -> str:
@@ -449,13 +451,14 @@ def _forecast_call(o: str, opts: str | None, args: str, ctx: Ctx, dynamic: bool)
     op = _opts(opts)
     if "s" in op:
         dynamic = False
-    if "d" in op:
-        dynamic = True
+    # EViews forecasts the underlying series (Y for dlog(Y)) unless option d asks
+    # for the dependent expression itself
+    level = 0 if "d" in op else 1
     quiet = 0 if "e" in op else 1
-    res = [f"bundle {o}_fc = ev_forecast({o}, dataset, {int(dynamic)}, {quiet})",
-           f"series {translate_name(names[0], ctx)} = ev_fcast_series({o}_fc)"]
+    res = [f"bundle {o}_fc = ev_forecast({o}, dataset, {int(dynamic)}, {quiet}, {level})",
+           f"series {translate_name(names[0], ctx)} = ev_fcast_series({o}_fc, {o}_fc.level)"]
     if len(names) > 1:
-        res.append(f"series {translate_name(names[1], ctx)} = ev_fcast_se({o}_fc)")
+        res.append(f"series {translate_name(names[1], ctx)} = ev_fcast_se({o}_fc, {o}_fc.level)")
     if "g" in op:
         res.append(f"ev_fplot(&{o}_fc{_plot_file_arg(ctx)})")
     return res
@@ -493,6 +496,7 @@ def _var_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
         # build them over the whole workfile so that lags can use pre-sample data
         pre = ["scalar ev_s1 = $t1", "scalar ev_s2 = $t2", "smpl full"] + pre + ["smpl ev_s1 ev_s2"]
     ne = len(endo)
+    ctx.var_endo[name] = spec_t[:ne]
     out_spec = " ".join(lagp + spec_t[:ne])
     if right or "@" in spec:
         out_spec += " @ " + " ".join((["c"] if any(t.lower() == "c" for t in exo) else []) + spec_t[ne:])
@@ -501,9 +505,129 @@ def _var_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     return pre + [f'bundle {name} = ev_varest("{out_spec.strip()}", dataset, 0, "{" ".join(names)}")']
 
 
+def _vec_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    """var v.ec(case, rank) lags y1 y2 [@ x]  ->  ev_vecm."""
+    case, rank = "c", "1"
+    for x in (opts or "").split(","):
+        x = x.strip().lower()
+        if x in ("a", "b", "c", "d", "e"):
+            case = x
+        elif x.isdigit():
+            rank = x
+    out = _var_call(name, None, spec, ctx)          # builds helper series, records the object
+    ctx.equations[translate_name(name, ctx)] = "vecm"
+    last = out[-1]
+    m = re.fullmatch(r'bundle (\S+) = ev_varest\("([^"]*)", dataset, 0, "([^"]*)"\)', last)
+    out[-1] = f'bundle {m.group(1)} = ev_vecm("{m.group(2)}", dataset, "{case}", {rank}, 0, "{m.group(3)}")'
+    return out
+
+
+def _split_terms(rhs: str) -> list[str]:
+    """Split a right-hand side at top-level + and - (keeping the sign)."""
+    terms, depth, cur = [], 0, ""
+    for i, ch in enumerate(rhs):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch in "+-" and depth == 0 and cur.strip() and not cur.rstrip().endswith(("*", "/", "^", "e", "E")):
+            terms.append(cur)
+            cur = ch
+            continue
+        cur += ch
+    if cur.strip():
+        terms.append(cur)
+    return [t.strip() for t in terms]
+
+
+def _linear_equation(line: str) -> tuple[str, str, str]:
+    """'y = c(1) + c(2)*x - c(3)*z' -> ('y', 'c x (-(z))', '1 2 3')."""
+    if "=" not in line:
+        raise ValueError("system equations must be written as y = c(1) + c(2)*x ...")
+    lhs, rhs = line.split("=", 1)
+    xs, cs = [], []
+    for t in _split_terms(rhs.replace(" ", "")):
+        sign = -1 if t.startswith("-") else 1
+        t = t.lstrip("+-")
+        m = re.fullmatch(r"(?i)c\((\d+)\)", t)
+        if m:
+            if sign < 0:
+                raise ValueError("a negative intercept term is not supported")
+            xs.append("c")
+            cs.append(m.group(1))
+            continue
+        m = re.fullmatch(r"(?i)c\((\d+)\)\*(.+)", t) or re.fullmatch(r"(?i)(.+)\*c\((\d+)\)", t)
+        if not m:
+            raise ValueError("system equations must be linear in c(i)")
+        num, expr = (m.group(1), m.group(2)) if t.lower().startswith("c(") else (m.group(2), m.group(1))
+        if re.search(r"(?i)(?<![A-Za-z0-9_])c\(\d+\)", expr):
+            raise ValueError("system equations must be linear in c(i)")
+        xs.append(expr if sign > 0 else f"(-({expr}))")
+        cs.append(num)
+    return lhs.strip().replace(" ", ""), " ".join(xs), " ".join(cs)
+
+
+def _system_estimate(o: str, method: str, ctx: Ctx) -> list[str]:
+    sysd = ctx.systems.get(o)
+    if not sysd or not sysd["eqs"]:
+        raise ValueError(f"system {o} has no equations")
+    deps, xs, cs, txt = [], [], [], []
+    for ln in sysd["eqs"]:
+        d, x, c = _linear_equation(program_vars(ln, ctx))
+        deps.append(case_names(d, ctx) if ctx.case != "keep" else d)
+        xs.append(_spec(x, ctx))
+        cs.append(c)
+        txt.append(re.sub(r"\s+", "", ln).upper())
+    q = lambda arr: ", ".join(f'"{a}"' for a in arr)
+    inst = _spec(sysd["inst"], ctx) if sysd["inst"] else ""
+    ctx.equations[o] = "system"
+    ctx.last_eq = o
+    return [f"strings ev_sd = defarray({q(deps)})",
+            f"strings ev_sx = defarray({q(xs)})",
+            f"strings ev_sc = defarray({q(cs)})",
+            f"strings ev_st = defarray({q(txt)})",
+            f'bundle {o} = ev_system(ev_sd, ev_sx, ev_sc, dataset, "{method}", "{inst}", 1, ev_st)',
+            f'{o}.name = "{o.upper()}"',
+            f"ev_sysprint(&{o})"]
+
+
 def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -> list[str]:
     ml = meth.lower()
     o = translate_name(obj, ctx)
+    if o in ctx.systems or ctx.equations.get(o) == "system":
+        sysd = ctx.systems.setdefault(o, {"eqs": [], "inst": ""})
+        if ml == "append":
+            a = args.strip()
+            if re.match(r"(?i)inst\s", a):
+                sysd["inst"] = (sysd["inst"] + " " + a[4:].strip()).strip()
+            else:
+                sysd["eqs"].append(a)
+            return [f"# system {o}: {a}"]
+        meth_map = {"ls": "ls", "sur": "sur", "tsls": "tsls", "3sls": "3sls"}
+        if ml in meth_map:
+            return _system_estimate(o, meth_map[ml], ctx)
+        if ml in ("output", "results", "display", "spec"):
+            return [f"ev_sysprint(&{o})"]
+        if ml in ("makeresids", "makeresid"):
+            return [f"series {translate_name(n, ctx)} = ev_sysresid({o}, {k})"
+                    for k, n in enumerate(args.split(), 1)]
+        if ml == "wald":
+            return [f'bundle {o}_wald = ev_wald({o}, "{args.strip()}")']
+        raise ValueError(f"system method .{meth} not supported (use ls, sur, tsls or 3sls)")
+    if ml == "coint":
+        case, lag = "c", "4"
+        for x in (opts or "").replace(",", " ").split():
+            if x.lower() in ("a", "b", "c", "d", "e"):
+                case = x.lower()
+            elif x.isdigit():
+                lag = x
+        if o in ctx.groups:
+            names = " ".join(ctx.groups[o])
+        elif o in ctx.var_endo:
+            names = " ".join(ctx.var_endo[o])
+        else:
+            raise ValueError("coint needs a group of series or a VAR")
+        return [f'ev_coint("{names}", dataset, "{case}", {lag})']
     if ml == "ls":
         return _ls_call(obj, opts, args, ctx)
     if ml == "arch":
@@ -515,17 +639,20 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
     if ml in ("white", "hettest", "jbera"):
         return [f"bundle {o}_diag = ev_diag({o})"]
     if ml in ("output", "results", "display", "spec"):
-        return [f"ev_print(&{o})"]
+        kind = ctx.equations.get(o)
+        return [{"vecm": f"ev_vecprint(&{o})", "var": f"ev_varprint(&{o})"}.get(kind, f"ev_print(&{o})")]
     if ml == "resids":
         return [f"ev_plot(&{o})"]
     if ml in ("fit", "forecast") and ctx.equations.get(o, "ls") == "ls":
         # EViews: forecast = dynamic, fit = static, both over the current sample
         return _forecast_call(o, opts, args, ctx, dynamic=(ml == "forecast"))
-    if ctx.equations.get(o) == "var":
+    if ctx.equations.get(o) in ("var", "vecm"):
         h = (re.match(r"\s*(\d+)", opts or "") or re.match(r"\s*(\d+)", args or ""))
         h = h.group(1) if h else "10"
         if ml in ("output", "results", "display", "spec"):
-            return [f"ev_varprint(&{o})"]
+            return [f"ev_vecprint(&{o})" if ctx.equations.get(o) == "vecm" else f"ev_varprint(&{o})"]
+        if ml == "testexog" and ctx.equations.get(o) == "vecm":
+            raise ValueError("Granger tests are for VAR objects")
         if ml == "impulse":
             if "t" in _opts(opts):
                 return [f"matrix {o}_irf = ev_varirf({o}, {h})"]
@@ -648,7 +775,15 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         return ["string ev_pagedir = $dotdir", f'catch remove("@ev_pagedir/{new}.gdtb")',
                 f'# page {old} renamed to {new}: next pageselect uses the new name']
 
+    if word == "system":
+        name = translate_name(rest.split()[0], ctx) if rest else "sys01"
+        ctx.systems[name] = {"eqs": [], "inst": ""}
+        ctx.equations[name] = "system"
+        return [f"# system {name} declared"]
     if word == "var":
+        m = re.fullmatch(r"var\s+([\w{}!%$]+)\.ec(?:\(([^)]*)\))?\s+(.+)", s, flags=re.IGNORECASE)
+        if m:
+            return _vec_call(*m.groups(), ctx)
         m = re.fullmatch(r"var\s+([\w{}!%$]+)(?:\.ls(?:\(([^)]*)\))?\s+(.+))?", s, flags=re.IGNORECASE)
         if not m:
             raise ValueError("unsupported var statement")

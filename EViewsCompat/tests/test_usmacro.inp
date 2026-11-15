@@ -11,14 +11,15 @@ function void check (string what, scalar a, scalar b, scalar tol[1e-6])
     endif
 end function
 
+# series built over the whole workfile, as EViews evaluates dlog() of lags
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+series dc1 = dc(-1)
 smpl 1985:1 2019:4    # pre-COVID, post-Volcker
 
 # 1. Consumption function in growth rates, EViews:
 #    ls dlog(cons) c dlog(gdp) dlog(cons(-1)) ffr
 bundle eq = ev_ls("dlog(CONS) c dlog(GDP) dlog(CONS(-1)) FFR", dataset)
-series dc = ldiff(CONS)
-series dg = ldiff(GDP)
-series dc1 = dc(-1)
 ols dc const dg dc1 FFR --quiet
 check("coeff dlog(GDP)", eq.coeff[2], $coeff[2])
 check("stderr FFR", eq.stderr[4], $stderr[4])

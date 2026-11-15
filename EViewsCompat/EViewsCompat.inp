@@ -8,10 +8,27 @@
 # Private helpers
 # -------------------------------------------------------------------
 
+function string ev__expand_diff (string s)
+    # d(Y), d(Y(-k)), dlog(Y), dlog(Y(-k)), d(log(Y)), d(log(Y(-k))) written with
+    # explicit lags, so that the first observation of the sample uses pre-sample
+    # data, as EViews does (gretl's diff/ldiff of a lagged series would give NA)
+    string e = s
+    string N = "([A-Za-z_][A-Za-z0-9_]*)"
+    loop k = 0..24
+        string lk = k ? sprintf("\(\s*-\s*%d\s*\)", k) : ""
+        string a = k ? sprintf("(-%d)", k) : ""
+        string b2 = sprintf("(-%d)", k + 1)
+        e = regsub(e, "(?i)(?<![A-Za-z0-9_.])dlog\(\s*" ~ N ~ "\s*" ~ lk ~ "\s*\)", "(log(\1" ~ a ~ ")-log(\1" ~ b2 ~ "))")
+        e = regsub(e, "(?i)(?<![A-Za-z0-9_.])d\(\s*log\(\s*" ~ N ~ "\s*" ~ lk ~ "\s*\)\s*\)", "(log(\1" ~ a ~ ")-log(\1" ~ b2 ~ "))")
+        e = regsub(e, "(?i)(?<![A-Za-z0-9_.])d\(\s*" ~ N ~ "\s*" ~ lk ~ "\s*\)", "(\1" ~ a ~ "-\1" ~ b2 ~ ")")
+    endloop
+    return e
+end function
+
 function string ev__translate (string s)
     # Rewrite an EViews expression into hansl syntax.
     string AT = "@"
-    string e = s
+    string e = ev__expand_diff(s)
     # EViews function names -> hansl / package equivalents
     e = regsub(e, "(?i)\bdlog\(", "ldiff(")
     e = regsub(e, "(?i)\bd\(", "diff(")
@@ -60,9 +77,8 @@ end function
 # Expression evaluation (EViews syntax -> series)
 # -------------------------------------------------------------------
 
-function series ev_gen (string expr "EViews expression, e.g. dlog(y)",
-                        list vars "Series referenced in the expression")
-    # Evaluate an EViews-syntax expression and return the series.
+function string ev__prep (string expr, list vars)
+    # EViews expression -> hansl expression in which dataset series are vars.NAME
     string evx_e = ev__translate(expr)
     strings evx_nms = varnames(vars)
     strings evx_ids = strsplit(regsub(evx_e, "[^A-Za-z0-9_]+", " "))
@@ -77,6 +93,22 @@ function series ev_gen (string expr "EViews expression, e.g. dlog(y)",
             evx_done += evx_id
         endif
     endloop
+    return evx_e
+end function
+
+function series ev__gen2 (string expr, list vars, string base, series dlt)
+    # like ev_gen, but the dataset series called base is shifted by dlt
+    # (forecast minus actual; zero before the sample), lags included
+    string evx_e = ev__prep(expr, vars)
+    evx_e = regsub(evx_e, "vars\." ~ base ~ "(\(-?[0-9]+\))?(?![A-Za-z0-9_])", "(vars." ~ base ~ "\1 + misszero(dlt\1))")
+    series evx_out = @evx_e
+    return evx_out
+end function
+
+function series ev_gen (string expr "EViews expression, e.g. dlog(y)",
+                        list vars "Series referenced in the expression")
+    # Evaluate an EViews-syntax expression and return the series.
+    string evx_e = ev__prep(expr, vars)
     if instring(evx_e, "ev_")
         # expression calls package functions: catch is not allowed here
         series evx_out = @evx_e
@@ -97,6 +129,14 @@ function bundle ev_ls (string spec "Equation, e.g. y c x x(-1)",
                        bool quiet[0] "Suppress printed output")
     errorif(!exists(vars), "Pass the series to use as second argument, e.g. ev_ls(\"y c x\", dataset)")
     string evx_cov = exists(cov) ? tolower(cov) : "ordinary"
+    # explicit form y = c(1) + c(2)*x  -> nonlinear least squares
+    if instring(spec, "=")
+        return ev_nls(spec, vars, evx_cov, quiet)
+    endif
+    # ARMA error terms ar(k) / ma(k) -> regression with ARMA errors (exact ML)
+    if regsub(tolower(" " ~ spec ~ " "), ".*\s(ar|ma)\([0-9]+\)\s.*", "ARMA") == "ARMA"
+        return ev_arma(spec, vars, quiet)
+    endif
     errorif(!instring(" ordinary white hac ", " " ~ evx_cov ~ " "), "cov must be ordinary, white or hac")
     strings evx_tok = strsplit(spec)
     errorif(nelem(evx_tok) < 2, "The specification needs a dependent variable and at least one regressor")
@@ -192,7 +232,7 @@ end function
 function void ev_print (bundle *b)
     errorif(!inbundle(b, "coeff"), "Not an ev_ls result")
     printf "\nDependent Variable: %s\n", b.depvar
-    printf "Method: Least Squares\n"
+    printf "Method: %s\n", inbundle(b, "method") ? b.method : "Least Squares"
     printf "Date: %s\n", b.estdate
     printf "Sample%s: %s\n", b.adjusted ? " (adjusted)" : "", b.sample
     printf "Included observations: %d%s\n", b.T, b.adjusted ? " after adjustments" : ""
@@ -201,13 +241,21 @@ function void ev_print (bundle *b)
     elif b.covtype == "hac"
         printf "HAC standard errors & covariance (Bartlett kernel, Newey-West)\n"
     endif
+    if inbundle(b, "eqline")
+        printf "%s\n", b.eqline
+    endif
     printf "\n"
     ev__line(78)
     printf "%-26s%13s%13s%14s%12s\n", "Variable", "Coefficient", "Std. Error", "t-Statistic", "Prob."
     ev__line(78)
-    loop i = 1..b.k
+    matrix ord = inbundle(b, "order") ? b.order : seq(1, b.k)
+    loop r = 1..cols(ord)
+        scalar i = ord[r]
         printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", b.labels[i], b.coeff[i], b.stderr[i], b.tstat[i], b.pval[i]
     endloop
+    if inbundle(b, "sigmasq")
+        printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", "SIGMASQ", b.sigmasq, b.sigmasq_se, b.sigmasq / b.sigmasq_se, 2 * pvalue(t, b.T - b.k, abs(b.sigmasq / b.sigmasq_se))
+    endif
     ev__line(78)
     printf "%-22s%14.6f    %-24s%14.6f\n", "R-squared", b.rsq, "Mean dependent var", b.meany
     printf "%-22s%14.6f    %-24s%14.6f\n", "Adjusted R-squared", b.adjrsq, "S.D. dependent var", b.sdy
@@ -221,6 +269,15 @@ function void ev_print (bundle *b)
         printf "%-22s%14s    %-24s%14.6f\n", "", "", "Durbin-Watson stat", b.dw
     endif
     ev__line(78)
+    if inbundle(b, "ar_roots")
+        printf "%-22s%s\n", "Inverted AR Roots", b.ar_roots
+    endif
+    if inbundle(b, "ma_roots")
+        printf "%-22s%s\n", "Inverted MA Roots", b.ma_roots
+    endif
+    if inbundle(b, "ar_roots") || inbundle(b, "ma_roots")
+        ev__line(78)
+    endif
 end function
 
 function void ev_plot (bundle *b)
@@ -246,24 +303,30 @@ function bundle ev_wald (bundle b "ev_ls result",
     scalar n = b.T
     matrix Rm = zeros(J, k)
     matrix q = zeros(J, 1)
-    matrix evw_c = zeros(k, 1)
+    # coefficient numbers: c(i) is the i-th coefficient, except in systems
+    # where the numbers used may have gaps
+    matrix cpos = inbundle(b, "cnums") ? b.cnums : seq(1, k)
+    scalar K = maxr(cpos)
+    matrix evw_c = zeros(K, 1)
     loop j = 1..J
         strings sides = strsplit(R[j], "=")
         errorif(nelem(sides) != 2, sprintf("Restriction '%s' must contain exactly one '='", R[j]))
         string ex = sprintf("(%s)-(%s)", sides[1], sides[2])
         ex = regsub(ex, "(?i)\bc\(([0-9]+)\)", "evw_c[\1]")
         matrix idx = {}
-        evw_c = zeros(k, 1)
+        evw_c = zeros(K, 1)
         catch scalar f0 = @ex
         errorif($error, sprintf("Cannot parse restriction '%s' (coefficients are c(1)..c(%d))", R[j], k))
         loop i = 1..k
-            evw_c = zeros(k, 1)
-            evw_c[i] = 1
+            evw_c = zeros(K, 1)
+            evw_c[cpos[i]] = 1
             Rm[j, i] = (@ex) - f0
         endloop
         # linearity check at a random point
-        evw_c = mnormal(k, 1)
-        errorif(abs((@ex) - (Rm[j,] * evw_c + f0)) > 1e-8 * (1 + abs(f0)), sprintf("Restriction '%s' is not linear", R[j]))
+        matrix rc = mnormal(k, 1)
+        evw_c = zeros(K, 1)
+        evw_c[cpos] = rc
+        errorif(abs((@ex) - (Rm[j,] * rc + f0)) > 1e-8 * (1 + abs(f0)), sprintf("Restriction '%s' is not linear", R[j]))
         q[j] = -f0
     endloop
     matrix dev = Rm * b.coeff - q
@@ -506,78 +569,258 @@ end function
 # Forecast (eq.forecast), over the current sample as in EViews
 # -------------------------------------------------------------------
 
+function void ev__stats (bundle *b)
+    # common EViews statistics from b.y, b.uhat, b.k, b.lnl (and b.T)
+    scalar n = rows(b.uhat)
+    scalar k = b.k
+    matrix u = b.uhat
+    matrix d = b.y - meanc(b.y)
+    b.T = n
+    b.ssr = u'u
+    b.rsq = 1 - b.ssr / (d'd)
+    b.adjrsq = 1 - (1 - b.rsq) * (n - 1) / (n - k)
+    b.meany = meanc(b.y)
+    b.sdy = sqrt(d'd / (n - 1))
+    scalar kk = inbundle(b, "sigmasq") ? k + 1 : k
+    b.aic = -2 * b.lnl / n + 2 * kk / n
+    b.sc = -2 * b.lnl / n + kk * log(n) / n
+    b.hq = -2 * b.lnl / n + 2 * kk * log(log(n)) / n
+    matrix du = u[2:n] - u[1:n-1]
+    b.dw = (du'du) / (u'u)
+    b.tstat = b.coeff ./ b.stderr
+    matrix p = zeros(k, 1)
+    loop i = 1..k
+        p[i] = 2 * pvalue(t, n - k, abs(b.tstat[i]))
+    endloop
+    b.pval = p
+    if !inbundle(b, "F")
+        b.F = NA
+        b.Fp = NA
+    endif
+end function
+
+function scalar ev__depform (string dep, string *base, list vars)
+    # form of the dependent variable: 0 = Y, 1 = log(Y), 2 = d(Y), 3 = dlog(Y)
+    # or d(log(Y)); -1 = other. base receives the series name Y.
+    strings pats = defarray("^\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", \
+      "^\s*log\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$", \
+      "^\s*d\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$", \
+      "^\s*dlog\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$", \
+      "^\s*d\(\s*log\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\)\s*$")
+    matrix forms = {0, 1, 2, 3, 3}
+    loop i = 1..nelem(pats)
+        string m = regsub(dep, "(?i)" ~ pats[i], "\1")
+        if m != dep || i == 1 && regsub(dep, "(?i)" ~ pats[1], "") == ""
+            if rows(instrings(varnames(vars), m)) > 0
+                base = m
+                return forms[i]
+            endif
+        endif
+    endloop
+    base = ""
+    return -1
+end function
+
+function string ev_depbase (bundle b "Equation (ev_ls result)", list vars "Series used (e.g. dataset)")
+    # the series Y when the dependent variable is log(Y), d(Y) or dlog(Y); "" otherwise
+    string dep = inbundle(b, "lhs") ? b.lhs : strsplit(b.spec)[1]
+    string base = ""
+    scalar f = ev__depform(dep, &base, vars)
+    return f > 0 ? base : ""
+end function
+
+function series ev__toseries_s (const matrix v, const matrix tobs)
+    return ev__toseries(v, tobs)
+end function
+
 function bundle ev_forecast (bundle b "ev_ls result",
                              list vars "Series used (e.g. dataset)",
                              bool dynamic[1] "Dynamic (1) or static (0)",
-                             bool quiet[0])
-    errorif(!inbundle(b, "spec") || !inbundle(b, "coeff"), "First argument must be an ev_ls result")
-    strings tok = strsplit(b.spec)
-    scalar k = b.k
-    series evf_y = ev_gen(tok[1], vars)
-    matrix X = {}
-    strings lab = array(0)
-    loop i = 2..nelem(tok)
-        if tolower(tok[i]) == "c"
-            series evf_r = 1
-        else
-            series evf_r = ev_gen(tok[i], vars)
-        endif
-        X ~= {evf_r}
-    endloop
-    errorif(cols(X) != k, "Could not rebuild the regressors of the equation")
+                             bool quiet[0],
+                             bool level[0] "Report the level of the dependent variable, e.g. Y for dlog(Y)")
+    errorif(!inbundle(b, "coeff"), "First argument must be an equation (ev_ls result)")
+    string kind = inbundle(b, "kind") ? b.kind : "ls"
+    string dep = kind == "nls" ? b.lhs : strsplit(b.spec)[1]
+    string base = ""
+    scalar form = ev__depform(dep, &base, vars)
+    series evf_y = ev_gen(dep, vars)
     matrix y = {evf_y}
     series evf_o = obs
     matrix tobs = {evf_o}
-    scalar T = rows(X)
+    scalar T = rows(y)
+    scalar k = b.k
     matrix beta = b.coeff
+    scalar s2 = b.sigma^2
 
-    # dynamic: lags of a plain dependent variable are replaced by forecasts
-    matrix lagcol = zeros(1, k)
-    if dynamic && regsub(tok[1], "^[A-Za-z_][A-Za-z0-9_]*$", "") == ""
-        loop i = 2..nelem(tok)
-            string tt = tolower(tok[i])
-            string pre = tolower(tok[1]) ~ "(-"
-            if strlen(tt) > strlen(pre) && substr(tt, 1, strlen(pre)) == pre
-                string num = regsub(substr(tt, strlen(pre) + 1, strlen(tt)), "\)$", "")
-                if regsub(num, "^[0-9]+$", "") == ""
-                    lagcol[i-1] = atof(num)
-                endif
-            endif
-        endloop
+    # actual level and its previous value (pre-sample visible through the lag)
+    matrix Ylev = mshape(NA, T, 1)
+    matrix Yprev = mshape(NA, T, 1)
+    if form >= 0
+        string e1 = "vars." ~ base
+        string e2 = "vars." ~ base ~ "(-1)"
+        series evf_L = @e1
+        series evf_Lp = @e2
+        Ylev = {evf_L}
+        Yprev = {evf_Lp}
     endif
 
+    # how the right-hand side is evaluated
+    strings tok = array(0)
+    matrix X = {}
+    matrix usesY = {}
+    if kind == "arma"
+        return ev__fc_arma(b, vars, dynamic, quiet, level, form, base)
+    elif kind == "nls"
+        loop j = 1..k
+            string pn = sprintf("evn_c%d", b.cidx[j])
+            scalar @pn = beta[j]
+        endloop
+        string rhx = ev__prep(b.rhs, vars)
+        series evf_r0 = @rhx
+        matrix r0 = {evf_r0}
+        # gradient for the coefficient part of the S.E.
+        matrix J = {}
+        loop j = 1..k
+            string pn = sprintf("evn_c%d", b.cidx[j])
+            scalar h = 1e-6 * (1 + abs(beta[j]))
+            scalar @pn = beta[j] + h
+            series evf_rp = @rhx
+            scalar @pn = beta[j]
+            J ~= ({evf_rp} - r0) / h
+        endloop
+    else
+        tok = strsplit(b.spec)
+        loop i = 2..nelem(tok)
+            if tolower(tok[i]) == "c"
+                series evf_r = 1
+            else
+                series evf_r = ev_gen(tok[i], vars)
+            endif
+            X ~= {evf_r}
+            scalar u_ = form >= 0 && regsub(tok[i], "(?i)(?<![A-Za-z0-9_])" ~ base ~ "(?![A-Za-z0-9_])", "#") != tok[i]
+            usesY ~= u_
+        endloop
+        errorif(cols(X) != k, "Could not rebuild the regressors of the equation")
+    endif
+
+    # AR terms in the dependent variable -> psi weights for multi-step S.E.
+    matrix phi = zeros(1, 24)
+    scalar dyn_ok = dynamic && form >= 0
+    if kind == "ls" && form >= 0
+        string dl = tolower(regsub(dep, "\s", ""))
+        loop L = 1..24
+            string cand = regsub(dl, "(?<![a-z0-9_])" ~ tolower(base) ~ "(?![a-z0-9_])", tolower(base) ~ sprintf("(-%d)", L))
+            if form == 0
+                cand = tolower(base) ~ sprintf("(-%d)", L)
+            endif
+            loop i = 2..nelem(tok)
+                if tolower(regsub(tok[i], "\s", "")) == cand
+                    phi[L] = beta[i-1]
+                endif
+            endloop
+        endloop
+    endif
+    matrix psi = zeros(T, 1)
+    psi[1] = 1
+    loop j = 2..T
+        loop L = 1..min(24, j - 1)
+            psi[j] += phi[L] * psi[j - L]
+        endloop
+    endloop
+    matrix psiC = cum(psi)
+
+    # step through the forecast sample
     matrix yf = mshape(NA, T, 1)
     matrix se = mshape(NA, T, 1)
-    scalar s2 = b.sigma^2
+    matrix yfl = mshape(NA, T, 1)
+    matrix sel = mshape(NA, T, 1)
+    series evf_dlt = 0          # forecast minus actual level (dynamic forecasts)
     loop t = 1..T
-        matrix x = X[t,]
-        loop j = 1..k
-            if lagcol[j] > 0 && t - lagcol[j] >= 1
-                if ok(yf[t - lagcol[j]])
-                    x[j] = yf[t - lagcol[j]]
-                endif
+        scalar v = NA
+        scalar st = tobs[t]
+        matrix g = {}
+        if kind == "nls"
+            v = r0[t]
+            if dyn_ok && t > 1
+                series evf_rr = ev__gen2(b.rhs, vars, base, evf_dlt)
+                v = evf_rr[st]
             endif
-        endloop
-        if sum(!ok(x)) == 0
-            yf[t] = x * beta
-            se[t] = sqrt(s2 + qform(x, b.vcv))
+            g = J[t,]
+        else
+            matrix x = X[t,]
+            if dyn_ok && t > 1
+                loop i = 1..cols(x)
+                    if usesY[i]
+                        series evf_rc = ev__gen2(tok[i+1], vars, base, evf_dlt)
+                        if ok(evf_rc[st])
+                            x[i] = evf_rc[st]
+                        endif
+                    endif
+                endloop
+            endif
+            if sum(!ok(x)) == 0
+                v = x * beta
+            endif
+            g = x
+        endif
+        if !ok(v)
+            continue
+        endif
+        yf[t] = v
+        scalar h = dynamic ? t : 1
+        # static: innovation and coefficient uncertainty; dynamic: innovation
+        # uncertainty propagated through the lags of the dependent variable (as gretl)
+        scalar cvar = (!dynamic && sum(!ok(g)) == 0) ? qform(g, b.vcv) : 0
+        se[t] = sqrt(s2 * sumc(psi[1:h].^2) + cvar)
+        if form >= 0
+            scalar prev = (t > 1 && dynamic && ok(yfl[t-1])) ? yfl[t-1] : Yprev[t]
+            if form == 0
+                yfl[t] = v
+                sel[t] = se[t]
+            elif form == 1
+                yfl[t] = exp(v)
+                sel[t] = yfl[t] * se[t]
+            elif form == 2
+                yfl[t] = prev + v
+                sel[t] = dynamic ? sqrt(s2 * sumc(psiC[1:h].^2)) : se[t]
+            else
+                yfl[t] = prev * exp(v)
+                sel[t] = yfl[t] * (dynamic ? sqrt(s2 * sumc(psiC[1:h].^2)) : se[t])
+            endif
+            if dyn_ok
+                evf_dlt[st] = yfl[t] - Ylev[t]
+            endif
         endif
     endloop
+    return ev__fc_finish(b, dep, base, form, dynamic, level, y, yf, se, Ylev, yfl, sel, tobs, quiet, kind == "nls" && dynamic)
+end function
 
+function bundle ev__fc_finish (bundle b, string dep, string base, scalar form, bool dynamic,
+                               bool level, matrix y, matrix yf, matrix se, matrix Ylev,
+                               matrix yfl, matrix sel, matrix tobs, bool quiet, bool approx_se)
     bundle f
     f.depvar = b.depvar
+    f.base = toupper(base)
+    f.form = form
     f.dynamic = dynamic
+    f.level = level && form > 0
     f.yf = yf
     f.se = se
     f.actual = y
+    f.yfl = yfl
+    f.sel = sel
+    f.actual_level = Ylev
     f.tobs = tobs
     f.sample = sprintf("%s %s", obslabel($t1), obslabel($t2))
-    # evaluation where both actual and forecast exist
-    matrix m = ok(y) .* ok(yf)
+    f.se_note = approx_se ? "S.E. of a dynamic forecast from an explicit equation uses the one-step formula" : ""
+    # evaluation statistics for the series reported
+    matrix a = f.level ? Ylev : y
+    matrix p = f.level ? yfl : yf
+    matrix m = ok(a) .* ok(p)
     f.nobs = sum(m)
     if f.nobs > 0
-        matrix a = selifr(y, m)
-        matrix p = selifr(yf, m)
+        a = selifr(a, m)
+        p = selifr(p, m)
         matrix e = p - a
         scalar mse = meanc(e.^2)
         f.rmse = sqrt(mse)
@@ -597,8 +840,115 @@ function bundle ev_forecast (bundle b "ev_ls result",
     return f
 end function
 
+function bundle ev__fc_arma (bundle b, list vars, bool dynamic, bool quiet, bool level,
+                             scalar form, string base)
+    # regression with ARMA errors: y = X beta + u,  phi(L) u = theta(L) e
+    string dep = strsplit(b.spec)[1]
+    series eva_y = ev_gen(dep, vars)
+    matrix y = {eva_y}
+    series eva_o = obs
+    matrix tobs = {eva_o}
+    scalar T = rows(y)
+    matrix Xf = b.hasc ? ones(T, 1) : {}
+    loop i = 1..nelem(b.xtok)
+        series eva_x = ev_gen(b.xtok[i], vars)
+        Xf ~= {eva_x}
+    endloop
+    matrix xb = cols(Xf) > 0 ? Xf * b.beta : zeros(T, 1)
+    scalar s0 = tobs[1]
+    scalar N = max(tobs[T], maxc(b.tobs))
+    matrix U = mshape(NA, N, 1)        # u = y - X beta, by observation number
+    matrix E = mshape(NA, N, 1)        # innovations
+    U[b.tobs] = b.ureg
+    E[b.tobs] = b.uhat
+    scalar pmax = cols(b.pl) ? maxr(b.pl) : 0
+    scalar qmax = cols(b.ql) ? maxr(b.ql) : 0
+    errorif(s0 - max(pmax, qmax) < minc(b.tobs) || s0 > maxc(b.tobs) + 1, \
+      "ARMA forecasts must start inside the estimation sample or right after it")
+    # for static forecasts actual u and e inside the forecast sample are needed
+    matrix uact = y - xb
+    matrix yf = mshape(NA, T, 1)
+    loop t = 1..T
+        scalar s = tobs[t]
+        scalar uh = 0
+        loop i = 1..cols(b.pl)
+            scalar L = b.pl[i]
+            scalar uu = (s - L < s0 || !dynamic) ? U[s - L] : yf[t - L] - xb[t - L]
+            if s - L >= s0 && !dynamic
+                uu = uact[t - L]
+            endif
+            uh += b.phi[i] * uu
+        endloop
+        loop i = 1..cols(b.ql)
+            scalar L = b.ql[i]
+            scalar ee = s - L < s0 ? E[s - L] : (dynamic ? 0 : E[s - L])
+            uh += b.theta[i] * ee
+        endloop
+        yf[t] = xb[t] + uh
+        if !dynamic
+            # one-step innovation at s, used by later static steps
+            E[s] = uact[t] - uh
+            U[s] = uact[t]
+        endif
+    endloop
+    # psi weights of the ARMA error process
+    matrix psi = zeros(T, 1)
+    psi[1] = 1
+    loop j = 2..T
+        scalar v = 0
+        loop i = 1..cols(b.ql)
+            if b.ql[i] == j - 1
+                v += b.theta[i]
+            endif
+        endloop
+        loop i = 1..cols(b.pl)
+            if j - b.pl[i] >= 1
+                v += b.phi[i] * psi[j - b.pl[i]]
+            endif
+        endloop
+        psi[j] = v
+    endloop
+    matrix psiC = cum(psi)
+    scalar s2 = b.sigmasq
+    matrix se = mshape(NA, T, 1)
+    matrix Ylev = mshape(NA, T, 1)
+    matrix Yprev = mshape(NA, T, 1)
+    matrix yfl = mshape(NA, T, 1)
+    matrix sel = mshape(NA, T, 1)
+    if form >= 0
+        string e1 = "vars." ~ base
+        string e2 = "vars." ~ base ~ "(-1)"
+        series evf_L = @e1
+        series evf_Lp = @e2
+        Ylev = {evf_L}
+        Yprev = {evf_Lp}
+    endif
+    loop t = 1..T
+        scalar h = dynamic ? t : 1
+        se[t] = sqrt(s2 * sumc(psi[1:h].^2))
+        if form >= 0 && ok(yf[t])
+            scalar prev = (t > 1 && dynamic && ok(yfl[t-1])) ? yfl[t-1] : Yprev[t]
+            if form == 0
+                yfl[t] = yf[t]
+                sel[t] = se[t]
+            elif form == 1
+                yfl[t] = exp(yf[t])
+                sel[t] = yfl[t] * se[t]
+            elif form == 2
+                yfl[t] = prev + yf[t]
+                sel[t] = dynamic ? sqrt(s2 * sumc(psiC[1:h].^2)) : se[t]
+            else
+                yfl[t] = prev * exp(yf[t])
+                sel[t] = yfl[t] * (dynamic ? sqrt(s2 * sumc(psiC[1:h].^2)) : se[t])
+            endif
+        endif
+    endloop
+    return ev__fc_finish(b, dep, base, form, dynamic, level, y, yf, se, Ylev, yfl, sel, tobs, quiet, 0)
+end function
+
 function void ev_fprint (bundle *f)
-    printf "\nForecast: %sF\nActual: %s\n", f.depvar, f.depvar
+    string nm = f.level ? f.base : f.depvar
+    printf "\nForecast: %sF\nActual: %s\n", f.level ? f.base : f.depvar, nm
     printf "Forecast sample: %s\n", f.sample
     printf "Method: %s\n", f.dynamic ? "Dynamic forecast" : "Static forecast"
     printf "Included observations: %d\n", f.nobs
@@ -611,23 +961,301 @@ function void ev_fprint (bundle *f)
         printf "%-34s%14.6f\n", "     Variance Proportion", f.var_prop
         printf "%-34s%14.6f\n", "     Covariance Proportion", f.cov_prop
     endif
+    if f.se_note != ""
+        printf "Note: %s\n", f.se_note
+    endif
 end function
 
-function series ev_fcast_series (bundle f "ev_forecast result")
-    return ev__toseries(f.yf, f.tobs)
+function series ev_fcast_series (bundle f "ev_forecast result", bool level[0] "Level of the dependent variable")
+    return ev__toseries(level ? f.yfl : f.yf, f.tobs)
 end function
 
-function series ev_fcast_se (bundle f "ev_forecast result")
-    return ev__toseries(f.se, f.tobs)
+function series ev_fcast_se (bundle f "ev_forecast result", bool level[0] "Level of the dependent variable")
+    return ev__toseries(level ? f.sel : f.se, f.tobs)
 end function
 
 function void ev_fplot (bundle *f, string fname[null])
     # forecast with +/- 2 S.E. bands, and the actual series
-    matrix M = f.yf ~ (f.yf + 2 * f.se) ~ (f.yf - 2 * f.se) ~ f.actual
+    matrix p = f.level ? f.yfl : f.yf
+    matrix s = f.level ? f.sel : f.se
+    matrix a = f.level ? f.actual_level : f.actual
+    matrix M = p ~ (p + 2 * s) ~ (p - 2 * s) ~ a
     cnameset(M, defarray("Forecast", "+2 S.E.", "-2 S.E.", "Actual"))
     string out = exists(fname) ? fname : "display"
     gnuplot 1 2 3 4 --matrix=M --time-series --with-lines --single-yaxis --output="@out" \
-      {set title "Forecast with +/- 2 S.E."; set style line 2 dt 2; set style line 3 dt 2;}
+      {set title "Forecast with +/- 2 S.E.";}
+end function
+
+# -------------------------------------------------------------------
+# Explicit equations:  y = c(1) + c(2)*x   (nonlinear least squares)
+# -------------------------------------------------------------------
+
+function bundle ev_nls (string spec "Explicit equation, e.g. y = c(1) + c(2)*x^c(3)",
+                        list vars "Series used (e.g. dataset)",
+                        string cov[null] "ordinary, white or hac",
+                        bool quiet[0])
+    string covt = exists(cov) ? tolower(cov) : "ordinary"
+    strings sides = strsplit(spec, "=")
+    errorif(nelem(sides) != 2, "Use exactly one '=' in an explicit equation")
+    string lhs = strstrip(sides[1])
+    string rhs0 = strstrip(sides[2])
+    string low = tolower(rhs0)
+    matrix cidx = {}
+    loop i = 1..99
+        if instring(low, sprintf("c(%d)", i))
+            cidx ~= i
+        endif
+    endloop
+    errorif(cols(cidx) == 0, "No coefficients c(1), c(2), ... in the equation")
+    string rhs = regsub(rhs0, "(?i)(?<![A-Za-z0-9_])c\(([0-9]+)\)", "evn_c\1")
+    string rhx = ev__prep(rhs, vars)
+    series evn_y = ev_gen(lhs, vars)
+    string plist = ""
+    loop j = 1..cols(cidx)
+        string pn = sprintf("evn_c%d", cidx[j])
+        scalar @pn = 0
+        plist ~= " " ~ pn
+    endloop
+    scalar n0 = $nobs
+    if covt == "ordinary"
+        nls evn_y = @rhx
+          params @plist
+        end nls --quiet
+    else
+        nls evn_y = @rhx
+          params @plist
+        end nls --quiet --robust
+    endif
+    bundle b
+    b.kind = "nls"
+    b.spec = spec
+    b.lhs = lhs
+    b.rhs = rhs
+    b.cidx = cidx
+    b.depvar = toupper(lhs)
+    b.method = "Least Squares (Gauss-Newton / Marquardt steps)"
+    b.eqline = regsub(toupper(lhs ~ "=" ~ rhs0), "\s", "")
+    strings lab = array(0)
+    loop j = 1..cols(cidx)
+        lab += sprintf("C(%d)", cidx[j])
+    endloop
+    b.labels = lab
+    b.covtype = covt
+    b.coeff = $coeff
+    b.stderr = $stderr
+    b.vcv = $vcv
+    b.k = $ncoeff
+    b.lnl = $lnl
+    b.sigma = $sigma
+    b.adjusted = $T < n0
+    b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    series evn_u = $uhat
+    series evn_f = $yhat
+    smpl ok(evn_u) --restrict
+    b.y = {evn_y}
+    b.uhat = {evn_u}
+    b.yhat = {evn_f}
+    series evn_o = obs
+    b.tobs = {evn_o}
+    b.sample = sprintf("%s %s", obslabel($t1), obslabel($t2))
+    # numerical gradient: used as regressors by the residual diagnostics
+    matrix J = {}
+    loop j = 1..b.k
+        string pn = sprintf("evn_c%d", cidx[j])
+        scalar h = 1e-6 * (1 + abs(b.coeff[j]))
+        scalar @pn = b.coeff[j] + h
+        series evn_fp = @rhx
+        scalar @pn = b.coeff[j]
+        J ~= ({evn_fp} - b.yhat) / h
+    endloop
+    b.X = J
+    ev__stats(&b)
+    if !quiet
+        ev_print(&b)
+    endif
+    return b
+end function
+
+# -------------------------------------------------------------------
+# ARMA terms:  y c x ar(1) ma(1)   (regression with ARMA errors, exact ML)
+# -------------------------------------------------------------------
+
+function string ev__roots (matrix coefs, matrix lagv, scalar sgn)
+    # inverted roots of 1 - sgn*sum(coef_i L^lag_i), formatted like EViews
+    if cols(lagv) == 0
+        return ""
+    endif
+    scalar p = maxr(lagv)
+    matrix a = zeros(1, p + 1)
+    a[1] = 1
+    loop i = 1..cols(lagv)
+        a[lagv[i] + 1] = -sgn * coefs[i]
+    endloop
+    matrix r = polroots(a)
+    matrix rr = iscomplex(r) ? Re(r) : r[,1]
+    matrix ri = iscomplex(r) ? Im(r) : (cols(r) > 1 ? r[,2] : zeros(rows(r), 1))
+    string out = ""
+    loop i = 1..rows(rr)
+        scalar xr = rr[i]
+        scalar xi = ri[i]
+        scalar m2 = xr^2 + xi^2
+        scalar ire = xr / m2
+        scalar iim = -xi / m2
+        if abs(iim) < 1e-8
+            out ~= sprintf("%10.2f", ire)
+        else
+            out ~= sprintf("%10s", sprintf("%.2f%s%.2fi", ire, iim >= 0 ? "+" : "-", abs(iim)))
+        endif
+    endloop
+    return out
+end function
+
+function bundle ev_arma (string spec "Equation with ar(k) / ma(k) terms, e.g. y c x ar(1) ma(1)",
+                         list vars "Series used (e.g. dataset)",
+                         bool quiet[0])
+    strings tok = strsplit(spec)
+    series eva_y = ev_gen(tok[1], vars)
+    list evaX = null
+    strings xlab = array(0)
+    strings xtok = array(0)
+    scalar hasc = 0
+    matrix pl = {}
+    matrix ql = {}
+    loop i = 2..nelem(tok)
+        string t = tolower(tok[i])
+        if t == "c"
+            hasc = 1
+        elif regsub(t, "^ar\([0-9]+\)$", "") == ""
+            pl ~= atof(regsub(t, "[^0-9]", ""))
+        elif regsub(t, "^ma\([0-9]+\)$", "") == ""
+            ql ~= atof(regsub(t, "[^0-9]", ""))
+        else
+            string v = sprintf("eva_x%d", i)
+            series @v = ev_gen(tok[i], vars)
+            list evaX += @v
+            xlab += toupper(tok[i])
+            xtok += tok[i]
+        endif
+    endloop
+    if cols(pl)
+        pl = values(pl')'
+    endif
+    if cols(ql)
+        ql = values(ql')'
+    endif
+    matrix eva_pl = pl
+    matrix eva_ql = ql
+    string pa = cols(pl) ? "eva_pl" : "0"
+    string qa = cols(ql) ? "eva_ql" : "0"
+    scalar n0 = $nobs
+    # with regressors gretl needs the constant listed explicitly
+    if hasc && nelem(evaX) > 0
+        arima @pa 0 @qa ; eva_y const evaX --quiet
+    elif hasc
+        arima @pa 0 @qa ; eva_y --quiet
+    elif nelem(evaX) > 0
+        arima @pa 0 @qa ; eva_y evaX --quiet --nc
+    else
+        arima @pa 0 @qa ; eva_y --quiet --nc
+    endif
+    matrix cf = $coeff
+    matrix sd = $stderr
+    bundle b
+    b.kind = "arma"
+    b.spec = spec
+    b.depvar = toupper(tok[1])
+    b.method = "ARMA Maximum Likelihood (BFGS)"
+    b.covtype = "ordinary"
+    b.hasc = hasc
+    b.pl = pl
+    b.ql = ql
+    b.xtok = xtok
+    # gretl order: const, AR, MA, regressors;  EViews order: C, regressors, AR, MA
+    scalar np = cols(pl)
+    scalar nq = cols(ql)
+    scalar nx = nelem(xtok)
+    strings lab = array(0)
+    if hasc
+        lab += "C"
+    endif
+    loop i = 1..np
+        lab += sprintf("AR(%d)", pl[i])
+    endloop
+    loop i = 1..nq
+        lab += sprintf("MA(%d)", ql[i])
+    endloop
+    loop i = 1..nx
+        lab += xlab[i]
+    endloop
+    b.labels = lab
+    matrix ord = {}
+    if hasc
+        ord ~= 1
+    endif
+    scalar o1 = hasc + np + nq + 1
+    scalar o2 = hasc + np + nq + nx
+    scalar o3 = hasc + 1
+    scalar o4 = hasc + np + nq
+    if nx
+        ord ~= seq(o1, o2)
+    endif
+    if np + nq
+        ord ~= seq(o3, o4)
+    endif
+    b.order = ord
+    b.coeff = cf
+    b.stderr = sd
+    b.vcv = $vcv
+    b.k = rows(cf)
+    b.lnl = $lnl
+    scalar i1 = hasc + 1
+    scalar i2 = hasc + np
+    scalar i3 = hasc + np + 1
+    scalar i4 = hasc + np + nq
+    scalar i5 = hasc + np + nq + 1
+    scalar i6 = hasc + np + nq + nx
+    b.phi = np ? cf[i1:i2]' : {}
+    b.theta = nq ? cf[i3:i4]' : {}
+    matrix bb = {}
+    if hasc
+        bb |= cf[1]
+    endif
+    if nx
+        bb |= cf[i5:i6]
+    endif
+    b.beta = bb
+    b.adjusted = $T < n0
+    b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    series eva_u = $uhat
+    series eva_f = $yhat
+    smpl ok(eva_u) --restrict
+    b.y = {eva_y}
+    b.uhat = {eva_u}
+    b.yhat = {eva_f}
+    series eva_o = obs
+    b.tobs = {eva_o}
+    b.sample = sprintf("%s %s", obslabel($t1), obslabel($t2))
+    matrix Xm = hasc ? ones(rows(b.y), 1) : {}
+    if nx
+        Xm ~= {evaX}
+    endif
+    b.X = cols(Xm) ? Xm : ones(rows(b.y), 1)
+    b.ureg = cols(Xm) ? b.y - Xm * bb : b.y
+    scalar T = rows(b.y)
+    b.sigmasq = (b.uhat'b.uhat) / T
+    b.sigmasq_se = b.sigmasq * sqrt(2 / T)
+    b.sigma = sqrt((b.uhat'b.uhat) / (T - b.k))
+    if np
+        b.ar_roots = ev__roots(b.phi, pl, 1)
+    endif
+    if nq
+        b.ma_roots = ev__roots(b.theta, ql, -1)
+    endif
+    ev__stats(&b)
+    if !quiet
+        ev_print(&b)
+    endif
+    return b
 end function
 
 # -------------------------------------------------------------------
@@ -1019,6 +1647,436 @@ end function
 function series ev_varresid (bundle b "ev_varest result", int i[1::1] "Equation number")
     matrix t = seq(b.sys.t1, b.sys.t2)'
     return ev__toseries(b.sys.uhat[, i], t)
+end function
+
+# -------------------------------------------------------------------
+# System objects: several equations sharing coefficients c(i)
+#   estimators ls, sur, tsls, 3sls (computed here in matrix form)
+# -------------------------------------------------------------------
+
+function bundle ev_system (strings deps "Dependent variable of each equation",
+                           strings xspecs "Regressors of each equation, e.g. c x1 x2",
+                           strings cnums "Coefficient numbers of each equation, e.g. 1 2 3",
+                           list vars "Series used (e.g. dataset)",
+                           string method[null] "ls, sur, tsls or 3sls",
+                           string inst[null] "Instruments (a constant is added)",
+                           bool quiet[0],
+                           strings eqtext[null] "Equations as written, for the output")
+    string meth = exists(method) ? tolower(method) : "ls"
+    errorif(!instring(" ls ols sur tsls 2sls 3sls ", " " ~ meth ~ " "), "method must be ls, sur, tsls or 3sls")
+    meth = meth == "ols" ? "ls" : (meth == "2sls" ? "tsls" : meth)
+    scalar n = nelem(deps)
+    errorif(nelem(xspecs) != n || nelem(cnums) != n, "deps, xspecs and cnums must have one entry per equation")
+    # series of every equation, over the current sample
+    matrix Yall = {}
+    matrices XX = array(n)
+    matrices CC = array(n)
+    loop i = 1..n
+        series evs_y = ev_gen(deps[i], vars)
+        Yall ~= {evs_y}
+        strings tk = strsplit(xspecs[i])
+        strings cn = strsplit(cnums[i])
+        errorif(nelem(tk) != nelem(cn), sprintf("equation %d: regressors and coefficient numbers differ", i))
+        matrix Xi = {}
+        matrix ci = {}
+        loop j = 1..nelem(tk)
+            if tolower(tk[j]) == "c"
+                series evs_x = 1
+            else
+                series evs_x = ev_gen(tk[j], vars)
+            endif
+            Xi ~= {evs_x}
+            ci ~= atof(cn[j])
+        endloop
+        XX[i] = Xi
+        CC[i] = ci
+    endloop
+    matrix Z = {}
+    if exists(inst) && strstrip(inst) != ""
+        series evs_one = 1
+        Z = {evs_one}
+        strings zt = strsplit(inst)
+        loop j = 1..nelem(zt)
+            if tolower(zt[j]) != "c"
+                series evs_z = ev_gen(zt[j], vars)
+                Z ~= {evs_z}
+            endif
+        endloop
+    endif
+    errorif((meth == "tsls" || meth == "3sls") && cols(Z) == 0, "tsls and 3sls need instruments")
+    # balanced sample: rows complete in every equation
+    matrix okr = sumr(!ok(Yall)) .= 0
+    loop i = 1..n
+        okr = okr .* (sumr(!ok(XX[i])) .= 0)
+    endloop
+    if cols(Z)
+        okr = okr .* (sumr(!ok(Z)) .= 0)
+        Z = selifr(Z, okr)
+    endif
+    series evs_o = obs
+    matrix tobs = selifr({evs_o}, okr)
+    Yall = selifr(Yall, okr)
+    scalar T = rows(Yall)
+    # unique coefficient numbers -> columns of the stacked design
+    matrix allc = {}
+    loop i = 1..n
+        XX[i] = selifr(XX[i], okr)
+        allc ~= CC[i]
+    endloop
+    matrix cu = values(allc')'
+    scalar p = cols(cu)
+    matrix Xs = zeros(n * T, p)
+    matrix kk = zeros(1, n)
+    loop i = 1..n
+        matrix ci = CC[i]
+        kk[i] = cols(ci)
+        loop j = 1..cols(ci)
+            scalar col = imaxr(cu .= ci[j])
+            scalar r1 = (i - 1) * T + 1
+            scalar r2 = i * T
+            matrix xij = XX[i]
+            Xs[r1:r2, col] += xij[, j]
+        endloop
+    endloop
+    matrix ys = vec(Yall)
+    # instruments: project each equation's block
+    matrix Xh = Xs
+    if meth == "tsls" || meth == "3sls"
+        matrix P = Z * inv(Z'Z) * Z'
+        loop i = 1..n
+            scalar r1 = (i - 1) * T + 1
+            scalar r2 = i * T
+            Xh[r1:r2, ] = P * Xs[r1:r2, ]
+        endloop
+    endif
+    # first stage: equation by equation (OLS or 2SLS), with sandwich covariance
+    matrix A = inv(Xh'Xs)
+    matrix b = A * (Xh'ys)
+    matrix E = mshape(ys - Xs * b, T, n)
+    matrix S = E'E / T
+    matrix V = {}
+    if meth == "ls" || meth == "tsls"
+        matrix dfa = sqrt((T - kk)' * (T - kk))
+        matrix Sd = (E'E) ./ dfa
+        V = A * Xh' * (Sd ** I(T)) * Xh * A'
+    else
+        # SUR / 3SLS: feasible GLS with Sigma from the first stage
+        matrix Wi = inv(S) ** I(T)
+        V = inv(Xh' * Wi * Xh)
+        b = V * (Xh' * Wi * ys)
+        E = mshape(ys - Xs * b, T, n)
+    endif
+    bundle bs
+    bs.kind = "system"
+    bs.method = meth
+    bs.spec = "system"
+    bs.coeff = b
+    bs.vcv = V
+    bs.stderr = sqrt(diag(V))
+    bs.cnums = cu
+    strings lab = array(0)
+    loop j = 1..p
+        lab += sprintf("C(%d)", cu[j])
+    endloop
+    bs.labels = lab
+    bs.k = p
+    bs.n = n
+    bs.Tobs = T
+    bs.T = n * T                 # total system observations (for Wald F df)
+    bs.uhat = E
+    bs.sigma_mat = E'E / T
+    bs.detS = det(E'E / T)
+    bs.tobs = tobs
+    bs.sample = sprintf("%s %s", obslabel(minc(tobs)), obslabel(maxc(tobs)))
+    bs.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    bs.tstat = b ./ bs.stderr
+    matrix pv = zeros(p, 1)
+    loop j = 1..p
+        pv[j] = 2 * pvalue(t, n * T - p, abs(bs.tstat[j]))
+    endloop
+    bs.pval = pv
+    strings dl = array(0)
+    loop i = 1..n
+        dl += toupper(deps[i])
+    endloop
+    bs.deps = dl
+    if exists(eqtext)
+        bs.eqtext = eqtext
+    else
+        bs.eqtext = dl
+    endif
+    # per-equation statistics
+    matrix st = {}
+    loop i = 1..n
+        matrix u = E[, i]
+        matrix y = Yall[, i]
+        matrix d = y - meanc(y)
+        scalar ssr = u'u
+        scalar r2 = 1 - ssr / (d'd)
+        matrix du = u[2:T] - u[1:T-1]
+        st |= {r2, 1 - (1 - r2) * (T - 1) / (T - kk[i]), sqrt(ssr / (T - kk[i])), (du'du) / ssr, meanc(y), sqrt(d'd / (T - 1)), ssr}
+    endloop
+    bs.eqstats = st
+    if !quiet
+        ev_sysprint(&bs)
+    endif
+    return bs
+end function
+
+function void ev_sysprint (bundle *b)
+    strings mname = defarray("Least Squares", "Seemingly Unrelated Regression", \
+      "Two-Stage Least Squares", "Three-Stage Least Squares")
+    scalar mi = b.method == "ls" ? 1 : (b.method == "sur" ? 2 : (b.method == "tsls" ? 3 : 4))
+    printf "\nSystem: %s\nEstimation Method: %s\nDate: %s\n", inbundle(b, "name") ? b.name : "UNTITLED", mname[mi], b.estdate
+    printf "Sample: %s\nIncluded observations: %d\n", b.sample, b.Tobs
+    printf "Total system (balanced) observations %d\n\n", b.T
+    ev__line(78)
+    printf "%-26s%13s%13s%14s%12s\n", "", "Coefficient", "Std. Error", "t-Statistic", "Prob."
+    ev__line(78)
+    loop j = 1..b.k
+        printf "%-26s%13.6f%13.6f%14.6f%12.4f\n", b.labels[j], b.coeff[j], b.stderr[j], b.tstat[j], b.pval[j]
+    endloop
+    ev__line(78)
+    printf "%-40s%16.6g\n", "Determinant residual covariance", b.detS
+    ev__line(78)
+    loop i = 1..b.n
+        printf "\nEquation: %s\nObservations: %d\n", b.eqtext[i], b.Tobs
+        matrix s = b.eqstats[i,]
+        printf "%-22s%14.6f    %-24s%14.6f\n", "R-squared", s[1], "Mean dependent var", s[5]
+        printf "%-22s%14.6f    %-24s%14.6f\n", "Adjusted R-squared", s[2], "S.D. dependent var", s[6]
+        printf "%-22s%14.6f    %-24s%14.6f\n", "S.E. of regression", s[3], "Sum squared resid", s[7]
+        printf "%-22s%14.6f\n", "Durbin-Watson stat", s[4]
+        ev__line(78)
+    endloop
+end function
+
+function series ev_sysresid (bundle b "ev_system result", int i[1::1] "Equation number")
+    return ev__toseries(b.uhat[, i], b.tobs)
+end function
+
+# -------------------------------------------------------------------
+# Vector error correction:  var v.ec(c, 1) 1 2 y1 y2
+# -------------------------------------------------------------------
+
+function bundle ev_vecm (string spec "Lag pairs of the differences, endogenous, then exogenous after the at-sign",
+                         list vars "Series used (e.g. dataset)",
+                         string tcase[null] "Trend case a, b, c (default), d or e",
+                         int crank[1::1] "Number of cointegrating equations",
+                         bool quiet[0],
+                         string names[null] "Display names, space separated")
+    string AT = "@"
+    string cs = exists(tcase) ? tolower(tcase) : "c"
+    errorif(!instring(" a b c d e ", " " ~ cs ~ " "), "trend case must be a, b, c, d or e")
+    strings LB = exists(names) ? strsplit(names) : array(0)
+    strings parts = strsplit(spec, AT)
+    strings L = strsplit(parts[1])
+    matrix lagv = {}
+    scalar i0 = 1
+    loop while i0 + 1 <= nelem(L) && regsub(L[i0], "^[0-9]+$", "") == "" && regsub(L[i0+1], "^[0-9]+$", "") == ""
+        lagv ~= seq(atof(L[i0]), atof(L[i0+1]))
+        i0 += 2
+    endloop
+    errorif(cols(lagv) == 0, "Start with lag pairs for the differences, e.g. 1 2")
+    lagv = values(lagv')'
+    errorif(lagv[1] != 1 || maxr(lagv) != cols(lagv), "VEC lags must run from 1 without gaps, e.g. 1 2")
+    scalar order = maxr(lagv) + 1          # gretl's order counts lags in levels
+    list Y = null
+    strings ylab = array(0)
+    strings ytok = array(0)
+    loop i = i0..nelem(L)
+        matrix pp = instrings(varnames(vars), L[i])
+        if rows(pp) > 0
+            list Y += vars[pp[1]]
+        else
+            string v = sprintf("evc_y%d", i)
+            series @v = ev_gen(L[i], vars)
+            list Y += @v
+        endif
+        scalar li = nelem(ytok) + 1
+        ylab += nelem(LB) >= li ? toupper(LB[li]) : toupper(L[i])
+        ytok += L[i]
+    endloop
+    errorif(crank < 1 || crank >= nelem(Y), "rank must be between 1 and the number of variables minus 1")
+    list X = null
+    strings xlab = array(0)
+    if nelem(parts) == 2
+        strings R = strsplit(parts[2])
+        loop i = 1..nelem(R)
+            if tolower(R[i]) != "c"
+                matrix pp = instrings(varnames(vars), R[i])
+                if rows(pp) > 0
+                    list X += vars[pp[1]]
+                else
+                    string v = sprintf("evc_x%d", i)
+                    series @v = ev_gen(R[i], vars)
+                    list X += @v
+                endif
+                xlab += toupper(R[i])
+            endif
+        endloop
+    endif
+    string opt = cs == "a" ? "--nc" : (cs == "b" ? "--rc" : (cs == "c" ? "--uc" : (cs == "d" ? "--crt" : "--ct")))
+    scalar n0 = $nobs
+    if nelem(X) > 0
+        vecm order crank Y ; X --silent @opt
+    else
+        vecm order crank Y --silent @opt
+    endif
+    bundle sys = $system
+    bundle b
+    b.kind = "vecm"
+    b.spec = spec
+    b.case = cs
+    b.rank = crank
+    b.sys = sys
+    b.ylab = ylab
+    b.xlab = xlab
+    b.ytok = ytok
+    strings noxt = array(0)
+    b.xtok = noxt
+    b.lags = lagv
+    b.hasc = cs == "c" || cs == "d" || cs == "e"
+    b.n = nelem(Y)
+    b.T = sys.T
+    b.coeff = $coeff
+    b.se = $stderr
+    b.tstat = b.coeff ./ b.se
+    b.beta = $jbeta
+    b.alpha = $jalpha
+    b.beta_se = sqrt(abs(diag($jvbeta)))
+    b.k = rows(b.coeff)
+    b.adjusted = sys.T < n0
+    b.sample = sprintf("%s %s", obslabel(sys.t1), obslabel(sys.t2))
+    b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    b.lnl = $lnl
+    b.aic = -2 * b.lnl / b.T + 2 * (b.n * b.k) / b.T
+    b.sc = -2 * b.lnl / b.T + (b.n * b.k) * log(b.T) / b.T
+    matrix E = sys.uhat
+    b.det = det(E'E / b.T)
+    # gretl order: const, lagged differences, exogenous, trend, EC terms
+    strings clab = array(0)
+    if b.hasc
+        clab += "C"
+    endif
+    loop j = 1..b.n
+        loop l = 1..cols(lagv)
+            clab += sprintf("D(%s(-%d))", ylab[j], lagv[l])
+        endloop
+    endloop
+    loop j = 1..nelem(xlab)
+        clab += xlab[j]
+    endloop
+    if cs == "e"
+        clab += "@TREND"
+    endif
+    loop r = 1..crank
+        clab += sprintf("CointEq%d", r)
+    endloop
+    errorif(nelem(clab) != b.k, sprintf("Internal error: %d labels for %d coefficients", nelem(clab), b.k))
+    b.clab = clab
+    if !quiet
+        ev_vecprint(&b)
+    endif
+    return b
+end function
+
+function void ev_vecprint (bundle *b)
+    scalar n = b.n
+    printf "\nVector Error Correction Estimates\nDate: %s\n", b.estdate
+    printf "Sample%s: %s\n", b.adjusted ? " (adjusted)" : "", b.sample
+    printf "Included observations: %d%s\n", b.T, b.adjusted ? " after adjustments" : ""
+    printf "Standard errors in ( ) & t-statistics in [ ]\n\n"
+    scalar w = 22 + 16 * max(n, b.rank)
+    ev__line(w)
+    printf "%-22s", "Cointegrating Eq:"
+    loop r = 1..b.rank
+        printf "%16s", sprintf("CointEq%d", r)
+    endloop
+    printf "\n"
+    ev__line(w)
+    scalar nb = rows(b.beta)
+    loop i = 1..nb
+        string nm = i <= n ? sprintf("%s(-1)", b.ylab[i]) : (b.case == "b" ? "C" : "@TREND(-1)")
+        printf "%-22s", nm
+        loop r = 1..b.rank
+            printf "%16.6f", b.beta[i, r]
+        endloop
+        printf "\n"
+        # gretl gives the variance of the freely estimated elements only
+        scalar fi = (i - b.rank - 1) * b.rank + 1
+        if i > b.rank && rows(b.beta_se) >= fi + b.rank - 1
+            printf "%-22s", ""
+            loop r = 1..b.rank
+                printf "%16s", sprintf("(%.5f)", b.beta_se[fi + r - 1])
+            endloop
+            printf "\n%-22s", ""
+            loop r = 1..b.rank
+                printf "%16s", sprintf("[%.5f]", b.beta[i, r] / b.beta_se[fi + r - 1])
+            endloop
+            printf "\n"
+        endif
+    endloop
+    printf "\n"
+    ev__line(w)
+    printf "%-22s", "Error Correction:"
+    loop j = 1..n
+        printf "%16s", sprintf("D(%s)", b.ylab[j])
+    endloop
+    printf "\n"
+    ev__line(w)
+    # EViews order: CointEq, lagged differences, C, exogenous
+    scalar k = b.k
+    matrix ord = seq(k - b.rank + 1, k)
+    scalar c0 = b.hasc ? 2 : 1
+    scalar nl = n * cols(b.lags)
+    ord ~= seq(c0, c0 + nl - 1)
+    if b.hasc
+        ord ~= 1
+    endif
+    if k - b.rank >= c0 + nl
+        ord ~= seq(c0 + nl, k - b.rank)
+    endif
+    loop r = 1..cols(ord)
+        scalar i = ord[r]
+        printf "%-22s", b.clab[i]
+        loop j = 1..n
+            printf "%16.6f", b.coeff[i, j]
+        endloop
+        printf "\n%-22s", ""
+        loop j = 1..n
+            printf "%16s", sprintf("(%.5f)", b.se[i, j])
+        endloop
+        printf "\n%-22s", ""
+        loop j = 1..n
+            printf "%16s", sprintf("[%.5f]", b.tstat[i, j])
+        endloop
+        printf "\n\n"
+    endloop
+    ev__line(w)
+    printf "%-44s%16.6g\n", "Determinant resid covariance", b.det
+    printf "%-44s%16.6f\n", "Log likelihood", b.lnl
+    printf "%-44s%16.6f\n", "Akaike information criterion", b.aic
+    printf "%-44s%16.6f\n", "Schwarz criterion", b.sc
+    ev__line(w)
+end function
+
+function void ev_coint (string names "Endogenous series, e.g. y1 y2",
+                        list vars "Series used (e.g. dataset)",
+                        string tcase[null] "Trend case a, b, c (default), d or e",
+                        int nlag[1::4] "Lags of the differences")
+    # Johansen cointegration test (gretl's coint2)
+    string cs = exists(tcase) ? tolower(tcase) : "c"
+    string opt = cs == "a" ? "--nc" : (cs == "b" ? "--rc" : (cs == "c" ? "" : (cs == "d" ? "--crt" : "--ct")))
+    list Y = null
+    strings L = strsplit(names)
+    loop i = 1..nelem(L)
+        matrix pp = instrings(varnames(vars), L[i])
+        errorif(rows(pp) == 0, sprintf("%s: use series names for the Johansen test", L[i]))
+        list Y += vars[pp[1]]
+    endloop
+    scalar order = nlag + 1
+    printf "\nJohansen Cointegration Test\nSeries: %s\nLags interval (in first differences): 1 to %d\n", toupper(names), nlag
+    coint2 order Y @opt
 end function
 
 # -------------------------------------------------------------------

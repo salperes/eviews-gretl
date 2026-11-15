@@ -1,8 +1,10 @@
 # EViewsCompat (gretl package)
 
-EViews-style `ls`, forecasts (static/dynamic with evaluation statistics), VAR objects
-(estimates, Granger tests, impulse responses, variance decomposition, lag length
-criteria), Wald test, residual diagnostics, freeze and @-functions for gretl.
+EViews-style `ls` (including explicit `c(i)` equations by NLS and ARMA terms), forecasts
+(static/dynamic, level forecasts of dlog/d/log dependents, multi-step S.E., evaluation
+statistics), systems (LS, SUR, 2SLS, 3SLS with shared coefficients), VAR and VEC objects
+(estimates, Granger tests, Johansen test, impulse responses, variance decomposition, lag
+length criteria), Wald test, residual diagnostics, freeze and @-functions for gretl.
 Usage: see `EViewsCompat_help.txt` and `EViewsCompat_sample.inp`.
 
 ## Build / test / install
@@ -14,7 +16,7 @@ export GRETL_HOME=/Applications/Gretl.app/Contents/Resources/share/gretl/
 ```
 
 ```bash
-for t in test_evcompat test_usmacro test_forecast_var; do /Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/$t.inp" | grep -E '^(ok|FAIL)'; done
+for t in test_evcompat test_usmacro test_forecast_var test_estimators test_systems; do /Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/$t.inp" | grep -E '^(ok|FAIL)'; done
 ```
 
 ```bash

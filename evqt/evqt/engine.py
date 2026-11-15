@@ -41,7 +41,8 @@ class Workfile:
     lists: list = field(default_factory=list)
     scalars: dict = field(default_factory=dict)
     strings: list = field(default_factory=list)
-    kinds: dict = field(default_factory=dict)       # bundle name -> "equation" | "var" | "bundle"
+    kinds: dict = field(default_factory=dict)       # bundle -> "equation" | "var" | "vecm" | "system" | "bundle"
+    dirty: bool = False                             # unsaved changes
     # workfile pages: each page is a dataset kept as a .gdtb file while not shown
     page: str = "page1"
     pages: list = field(default_factory=lambda: ["page1"])
@@ -177,12 +178,16 @@ class GretlEngine:
         self.wf.lists = [b for b in self.wf.lists if not b.startswith("ev_")]
         new = [b for b in self.wf.bundles if b not in self.wf.kinds]
         if new:
-            q = "\n".join(f'printf "%s|%d|%d\\n", "{b}", inbundle({b}, "sys"), inbundle({b}, "uhat")' for b in new)
+            q = "\n".join(f'printf "%s|%d|%d|%s\\n", "{b}", inbundle({b}, "sys"), inbundle({b}, "uhat"), '
+                          f'inbundle({b}, "kind") ? {b}.kind : ""' for b in new)
             for ln in self.run(q):
                 parts = ln.strip().split("|")
-                if len(parts) == 3:
-                    b, sys_, uh = parts
-                    self.wf.kinds[b] = "var" if sys_ != "0" else ("equation" if uh != "0" else "bundle")
+                if len(parts) == 4:
+                    b, sys_, uh, kind = parts
+                    if kind in ("vecm", "system"):
+                        self.wf.kinds[b] = kind
+                    else:
+                        self.wf.kinds[b] = "var" if sys_ != "0" else ("equation" if uh != "0" else "bundle")
         for b in self.wf.bundles:
             self.wf.obj_page.setdefault(b, self.wf.page)
         for gone in [b for b in self.wf.kinds if b not in self.wf.bundles]:
@@ -294,7 +299,10 @@ class GretlEngine:
                  f'store "{path}" {" ".join(names)} --database --overwrite\nsmpl ev_s1 ev_s2', check=True)
 
     def db_fetch(self, path: str, names: list[str]):
+        if not path.endswith(".bin"):
+            path = self.file_as_db(path)
         self.run(f'open "{path}" --quiet\ndata {" ".join(names)} --quiet', check=True)
+        self.wf.dirty = True
         self.refresh()
 
     @staticmethod
@@ -333,19 +341,76 @@ class GretlEngine:
         else:
             float(v)                       # raises ValueError for non-numbers
         self.run(f"{name}[{obsno}] = {v}", check=True)
+        self.wf.dirty = True
 
-    def forecast(self, eq: str, fname: str, sename: str, dynamic: bool) -> tuple[str, str]:
-        """EViews Forecast: series fname (and sename), evaluation text and graph."""
-        self.run(f"bundle ev_fc = ev_forecast({eq}, dataset, {int(dynamic)}, 1)", check=True)
-        cmds = [f"series {fname} = ev_fcast_series(ev_fc)"]
+    def forecast(self, eq: str, fname: str, sename: str, dynamic: bool, level: bool = True) -> tuple[str, str]:
+        """EViews Forecast: series fname (and sename), evaluation text and graph.
+        With level, a transformed dependent (dlog(Y)...) is forecast as Y."""
+        self.run(f"bundle ev_fc = ev_forecast({eq}, dataset, {int(dynamic)}, 1, {int(level)})", check=True)
+        cmds = [f"series {fname} = ev_fcast_series(ev_fc, ev_fc.level)"]
         if sename:
-            cmds.append(f"series {sename} = ev_fcast_se(ev_fc)")
+            cmds.append(f"series {sename} = ev_fcast_se(ev_fc, ev_fc.level)")
         self.run("\n".join(cmds), check=True)
         text = "\n".join(self.run("ev_fprint(&ev_fc)", check=True)).strip("\n")
         png = self.tmp_png()
         self.run(f'ev_fplot(&ev_fc, "{png}")', check=True)
+        self.wf.dirty = True
         self.refresh()
         return text, png
+
+    def dep_info(self, eq: str) -> tuple[str, str]:
+        """(dependent expression, base series) of an equation; base is '' when the
+        dependent is not log/d/dlog of a single series."""
+        out = self.run(f'printf "%s|%s\\n", {eq}.depvar, ev_depbase({eq}, dataset)')
+        for ln in out:
+            parts = ln.strip().split("|")
+            if len(parts) == 2:
+                return parts[0], parts[1]
+        return "", ""
+
+    # -- saving -------------------------------------------------------------
+    def save(self, path: str | None = None) -> list[str]:
+        """Save the workfile: the current page to path, other pages next to it
+        as <name>_<page>.gdt. Returns the files written."""
+        wf = self.wf
+        path = path or wf.path
+        if not path or not path.endswith((".gdt", ".gdtb")):
+            raise GretlError("choose a .gdt file name with Save As")
+        self.run(f'scalar ev_s1 = $t1\nscalar ev_s2 = $t2\nsmpl full\nstore "{path}"\nsmpl ev_s1 ev_s2', check=True)
+        written = [path]
+        others = [p for p in wf.pages if p != wf.page]
+        if others:
+            base = os.path.splitext(path)[0]
+            cur = wf.page
+            self._save_page()
+            try:
+                for p in others:
+                    target = f"{base}_{p}.gdt"
+                    self.run(f'clear --dataset\nopen "{self._page_file(p)}" --quiet --preserve\n'
+                             f'store "{target}"', check=True)
+                    written.append(target)
+            finally:
+                self.run(f'clear --dataset\nopen "{self._page_file(cur)}" --quiet --preserve')
+                self._enter_page(cur)
+        wf.path = path
+        wf.dirty = False
+        return written
+
+    # -- fetch from any data file -----------------------------------------
+    def file_as_db(self, path: str) -> str:
+        """Convert a data file gretl can read (.wf1, .gdt, .csv, .xlsx, .dta ...)
+        into a temporary .bin database, keeping the current workfile as it is."""
+        db = os.path.join(self.tmpdir, "fetch_" + re.sub(r"\W", "_", os.path.basename(path)) + ".bin")
+        if os.path.exists(db) and os.path.getmtime(db) >= os.path.getmtime(path):
+            return db
+        self._save_page()
+        try:
+            self.run(f'clear --dataset\nopen "{path}" --quiet', check=True)
+            self.run(f'store "{db}" --database --overwrite', check=True)
+        finally:
+            self.run(f'clear --dataset\nopen "{self._page_file(self.wf.page)}" --quiet --preserve')
+            self._enter_page(self.wf.page)
+        return db
 
     def tmp_png(self) -> str:
         self.plot_counter += 1

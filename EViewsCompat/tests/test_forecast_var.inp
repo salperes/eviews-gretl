@@ -94,6 +94,8 @@ ev_varirfplot(v, 10, tmp)
 printf "IRF plot: %s\n", tmp
 # expressions still work (with a note about pre-sample lags)
 bundle v3 = ev_varest("1 2 dlog(CONS) dlog(GDP) FFR", dataset, 1)
-check("VAR from expressions loses 2 pre-sample obs", v3.T, 138)
+# expressions are built inside the function, so their lags miss pre-sample data;
+# the translator and evqt create such series over the whole workfile first
+check("VAR from expressions inside the package (138 obs)", v3.T, 138)
 series r1 = ev_varresid(v, 1)
 check("VAR residual series", nobs(r1), v.T)

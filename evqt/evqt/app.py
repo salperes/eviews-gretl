@@ -35,6 +35,7 @@ def _icon(kind: str) -> QIcon:
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
     colors = {"series": "#2e7d32", "equation": "#1565c0", "group": "#6a1b9a", "var": "#ad1457",
+              "vecm": "#c62828", "system": "#283593",
               "scalar": "#ef6c00", "string": "#5d4037", "bundle": "#455a64", "workfile": "#00838f"}
     c = QColor(colors.get(kind, "#455a64"))
     p.setPen(QPen(c.darker(130), 1))
@@ -45,7 +46,7 @@ def _icon(kind: str) -> QIcon:
         p.drawPolyline([(QPixmapPoint(x, y)) for x, y in ((4, 12), (7, 7), (10, 10), (14, 4))])
     else:
         glyph = {"equation": "=", "group": "G", "scalar": "#", "string": "a", "bundle": "b",
-                 "workfile": "W", "var": "V", "forecast": "F"}.get(kind, "?")
+                 "workfile": "W", "var": "V", "vecm": "V", "forecast": "F", "system": "S"}.get(kind, "?")
         f = QFont()
         f.setBold(True)
         f.setPixelSize(12)
@@ -403,25 +404,36 @@ class EquationWindow(ObjectWindow):
 
     def forecast(self):
         """EViews Forecast dialog: series names, method and forecast sample."""
-        dep = "".join(self.main.engine.run(f'printf "%s\\n", {self.name}.depvar')).strip()
-        base = re.sub(r"\W+", "_", dep.lower()).strip("_") or "y"
+        dep, lvl = self.main.engine.dep_info(self.name)
         wf = self.main.engine.wf
-        fname, sename = QLineEdit(base + "f"), QLineEdit()
+        target = QComboBox()
+        if lvl:
+            target.addItems([lvl.upper(), dep])         # EViews default: the series itself
+        else:
+            target.addItems([dep])
+        fname, sename = QLineEdit(), QLineEdit()
         sename.setPlaceholderText("optional")
+
+        def _name(_=None):
+            t = target.currentText()
+            fname.setText((re.sub(r"\W+", "_", t.lower()).strip("_") or "y") + "f")
+        target.currentIndexChanged.connect(_name)
+        _name()
         method = QComboBox()
         method.addItems(["Dynamic forecast", "Static forecast"])
         smp = QLineEdit(f"{wf.sample_first} {wf.sample_last}")
         d = _form_dialog(self, f"Forecast: {self.name.upper()}", [
-            (f"Series to forecast: {dep}", QLabel("")), ("Forecast name:", fname),
+            ("Series to forecast:", target), ("Forecast name:", fname),
             ("S.E. (optional):", sename), ("Method:", method), ("Forecast sample:", smp)])
         if not d or not fname.text().strip():
             return
+        level = bool(lvl) and target.currentIndex() == 0
         m = self.main
         if smp.text().strip() != f"{wf.sample_first} {wf.sample_last}":
             m.execute("smpl " + m.eviews_dates(smp.text().strip()))
         try:
             text, png = m.engine.forecast(self.name, fname.text().strip(), sename.text().strip(),
-                                          method.currentIndex() == 0)
+                                          method.currentIndex() == 0, level)
         except GretlError as e:
             m.error(str(e))
             return
@@ -433,9 +445,11 @@ class VarWindow(ObjectWindow):
     def __init__(self, main, name):
         super().__init__(main, f"Var: {name.upper()}   Workfile: {main.wf_title()}")
         self.name = name
+        self.vec = main.engine.wf.kinds.get(name) == "vecm"
         self.set_toolbar(_toolbar([
             ("View", [("Estimation Output", self.output),
                       ("Lag Structure: Granger Causality / Block Exogeneity Tests", self.granger),
+                      ("Cointegration Test...", self.coint),
                       ("Lag Structure: Lag Length Criteria...", self.laglen),
                       ("Impulse Response...", self.impulse),
                       ("Variance Decomposition...", self.decomp),
@@ -453,10 +467,24 @@ class VarWindow(ObjectWindow):
         self.output()
 
     def output(self):
-        self.run_text(f"ev_varprint(&{self.name})")
+        self.run_text(f"ev_vecprint(&{self.name})" if self.vec else f"ev_varprint(&{self.name})")
 
     def granger(self):
+        if self.vec:
+            self.main.error("Granger causality tests are available for unrestricted VARs.")
+            return
         self.run_text(f"ev_vargranger({self.name})")
+
+    def coint(self):
+        names = " ".join(self.main.engine.strings(f"{self.name}.ytok"))
+        case, ok = QInputDialog.getItem(self, "Johansen Cointegration Test", "Deterministic trend case:",
+                                        ["a: no intercept or trend", "b: intercept in CE", "c: intercept in CE and VAR",
+                                         "d: intercept and trend in CE", "e: quadratic trend"], 2, False)
+        if not ok:
+            return
+        k, ok = QInputDialog.getInt(self, "Johansen Cointegration Test", "Lags (in first differences):", 2, 1, 20)
+        if ok:
+            self.run_text(f'ev_coint("{names}", dataset, "{case[0]}", {k})')
 
     def laglen(self):
         k, ok = QInputDialog.getInt(self, "Lag Specification", "Lags to include:", 8, 1, 40)
@@ -497,7 +525,84 @@ class VarWindow(ObjectWindow):
 
     def estimate(self):
         spec = "".join(self.main.engine.run(f'printf "%s\\n", {self.name}.spec')).strip()
-        self.main.var_dialog(name=self.name, spec=spec)
+        self.main.var_dialog(name=self.name, spec=spec, vec=self.vec)
+
+
+class SystemWindow(ObjectWindow):
+    """System object: specification text (EViews syntax) and estimation output."""
+
+    def __init__(self, main, name):
+        super().__init__(main, f"System: {name.upper()}   Workfile: {main.wf_title()}")
+        self.name = name
+        self.set_toolbar(_toolbar([
+            ("View", [("System Specification", self.show_spec),
+                      ("Estimation Output", self.output),
+                      ("Residuals: Graphs", self.resid_graph)]),
+            ("Proc", [("Make Residuals", self.make_resids)]),
+            ("Object", [("Delete", lambda: main.delete_object(name))]),
+            ("|", None),
+            ("Name", lambda: main.rename_object(name)),
+            ("Freeze", self.freeze),
+            ("Spec", self.show_spec),
+            ("Estimate", self.estimate),
+            ("Stats", self.output),
+        ]))
+        known = main.ctx.systems.get(name)
+        text = main.system_specs.get(name) or (
+            "\n".join(known["eqs"] + ([f"inst {known['inst']}"] if known["inst"] else [])) if known else "")
+        self.spec = QPlainTextEdit(text)
+        self.spec.setFont(MONO)
+        self.spec.setPlaceholderText(
+            "One equation per line, linear in the coefficients, e.g.\n"
+            "dlog(cons) = c(1) + c(2)*dlog(gdp)\n"
+            "dlog(inv) = c(3) + c(2)*dlog(gdp) + c(4)*ffr\n"
+            "inst ffr(-1) dlog(gdp(-1)) ffr      (instruments, for 2SLS / 3SLS)")
+        self.stack.addWidget(self.spec)
+        if name in main.engine.wf.bundles:
+            self.output()
+        else:
+            self.show_spec()
+
+    def show_spec(self):
+        self.stack.setCurrentWidget(self.spec)
+
+    def output(self):
+        if self.name in self.main.engine.wf.bundles:
+            self.run_text(f"ev_sysprint(&{self.name})")
+        else:
+            self.show_spec()
+
+    def estimate(self):
+        lines = [ln.strip() for ln in self.spec.toPlainText().splitlines() if ln.strip()]
+        if not lines:
+            self.main.error("Write the system's equations in the specification first.")
+            self.show_spec()
+            return
+        meth, ok = QInputDialog.getItem(self, "System Estimation", "Estimation method:",
+                                        ["Ordinary Least Squares", "Seemingly Unrelated Regression",
+                                         "Two-Stage Least Squares", "Three-Stage Least Squares"], 1, False)
+        if not ok:
+            return
+        code = {"Ordinary": "ls", "Seemingly": "sur", "Two-Stage": "tsls", "Three-Stage": "3sls"}[meth.split()[0]]
+        self.main.system_specs[self.name] = self.spec.toPlainText()
+        self.main.execute(f"system {self.name}")
+        for ln in lines:
+            self.main.execute(f"{self.name}.append {ln}", quiet=True)
+        self.main.execute(f"{self.name}.{code}")
+        if self.name in self.main.engine.wf.bundles:
+            self.output()
+
+    def resid_graph(self):
+        try:
+            self.main.engine.run(f"matrix ev_M = {self.name}.uhat\ncnameset(ev_M, {self.name}.deps)", check=True)
+            self.run_plot("gnuplot --matrix=ev_M --time-series --with-lines")
+        except GretlError as e:
+            self.main.error(str(e))
+
+    def make_resids(self):
+        n = int(float("".join(self.main.engine.run(f'printf "%d\\n", {self.name}.n')).strip() or 0))
+        self.main.execute("\n".join(f"series resid{k:02d} = ev_sysresid({self.name}, {k})"
+                                     for k in range(1, n + 1)), hansl=True)
 
 
 class ForecastWindow(ObjectWindow):
@@ -538,7 +643,7 @@ class WorkfileWindow(QWidget):
                         ("Rename Selected...", self.rename_selected),
                         ("Delete Selected", self.delete_selected)]),
             ("|", None),
-            ("Save", main.save_as),
+            ("Save", main.save),
             ("Freeze", None),
             ("Details+/-", self.toggle_details),
             ("Show", main.show_dialog),
@@ -588,7 +693,8 @@ class WorkfileWindow(QWidget):
         self.sample_lbl.setText(f"Sample: {wf.sample_first} {wf.sample_last}  --  {wf.sample_nobs} obs")
         self.list.clear()
         objs = [(b, wf.kinds.get(b, "bundle")) for b in wf.bundles
-                if wf.kinds.get(b) in ("equation", "var") and wf.obj_page.get(b, wf.page) == wf.page]
+                if wf.kinds.get(b) in ("equation", "var", "vecm", "system")
+                and wf.obj_page.get(b, wf.page) == wf.page]
         items = [(n, "series") for n in wf.series] + [(n, "group") for n in wf.lists] \
             + objs + [(n, "scalar") for n in wf.scalars] + [(n, "string") for n in wf.strings]
         for name, kind in sorted(items, key=lambda x: x[0].lower()):
@@ -750,6 +856,7 @@ class MainWindow(QMainWindow):
         self.ctx.plot_files = True
         self.eq_count = 0
         self.windows: dict[str, QWidget] = {}
+        self.system_specs: dict[str, str] = {}
 
         central = QWidget()
         cl = QVBoxLayout(central)
@@ -783,6 +890,8 @@ class MainWindow(QMainWindow):
         f.addAction("New Workfile...", self.new_workfile)
         a = f.addAction("Open...", self.open_dialog)
         a.setShortcut(QKeySequence.Open)
+        a = f.addAction("Save", self.save)
+        a.setShortcut(QKeySequence.Save)
         f.addAction("Save As (.gdt)...", self.save_as)
         f.addSeparator()
         f.addAction("Fetch from Database...", self.fetch_dialog)
@@ -800,6 +909,7 @@ class MainWindow(QMainWindow):
         q.addSeparator()
         q.addAction("Estimate Equation...", lambda: self.equation_dialog())
         q.addAction("Estimate VAR...", lambda: self.var_dialog())
+        q.addAction("Estimate System...", self.new_system)
         w = mb.addMenu("&Window")
         w.addAction("Cascade", self.mdi.cascadeSubWindows)
         w.addAction("Tile", self.mdi.tileSubWindows)
@@ -842,10 +952,18 @@ class MainWindow(QMainWindow):
         self.engine.refresh()
         if self.wf_window:
             self.wf_window.populate()
+        self._update_titles()
         wf = self.engine.wf
         self.statusBar().showMessage(
             f"Path = {os.path.dirname(wf.path) if wf.path else os.path.expanduser('~')}    "
             f"WF = {self.wf_title().lower()}    Sample: {wf.sample_first} {wf.sample_last}")
+
+    def _update_titles(self):
+        wf = self.engine.wf
+        star = "*" if wf.dirty else ""
+        self.setWindowTitle(f"evqt — {self.wf_title()}{star}")
+        if self.wf_window:
+            self.wf_window.setWindowTitle(f"Workfile: {self.wf_title()}{star} - ({wf.path or 'untitled'})")
 
     def show_workfile(self):
         if self.wf_window is None:
@@ -854,7 +972,6 @@ class MainWindow(QMainWindow):
             sub.setWindowIcon(_icon("workfile"))
             sub.resize(600, 380)
             sub.move(10, 10)
-        self.wf_window.setWindowTitle(f"Workfile: {self.wf_title()} - ({self.engine.wf.path or 'untitled'})")
         self.wf_window.parentWidget().show()
         self.refresh()
 
@@ -869,9 +986,11 @@ class MainWindow(QMainWindow):
                               lambda m: names.get(m.group(1).lower(), m.group(1)), parts[i])
         return "".join(parts)
 
-    def execute(self, line: str, hansl: bool = False):
+    def execute(self, line: str, hansl: bool = False, quiet: bool = False):
         """Run an EViews command (translated) or, failing that, a gretl command."""
-        self.log_append(f"> {line}")
+        if not quiet:
+            self.log_append(f"> {line}")
+        self.engine.wf.dirty = True
         if not hansl:
             line = self.fix_case(line)
         before = set(self.engine.wf.bundles)
@@ -1057,6 +1176,13 @@ class MainWindow(QMainWindow):
             self._last_db = path
         return path
 
+    def _fetch_source(self) -> str:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Fetch from database or data file", os.path.dirname(getattr(self, "_last_db", os.path.expanduser("~/x"))),
+            "Databases and data files (*.bin *.wf1 *.gdt *.gdtb *.csv *.txt *.xlsx *.xls *.ods *.dta *.sav);;"
+            "gretl database (*.bin);;All files (*)")
+        return path
+
     def store_dialog(self, names: list[str], path: str | None = None):
         path = path or self._db_path(save=True)
         if not path:
@@ -1069,13 +1195,16 @@ class MainWindow(QMainWindow):
             self.error(str(e))
 
     def fetch_dialog(self, path: str | None = None, choose=None):
-        path = path or self._db_path(save=False)
+        path = path or self._fetch_source()
         if not path:
             return
+        self._last_db = path
         try:
-            contents = self.engine.db_contents(path)
-        except OSError as e:
-            self.error(f"Cannot read the database index: {e}")
+            # data files (.wf1, .csv, .xlsx ...) are read through a temporary database
+            db = path if path.endswith(".bin") else self.engine.file_as_db(path)
+            contents = self.engine.db_contents(db)
+        except (OSError, GretlError) as e:
+            self.error(f"Cannot read {os.path.basename(path)}: {e}")
             return
         if choose is None:
             d = QDialog(self)
@@ -1115,8 +1244,10 @@ class MainWindow(QMainWindow):
             self.add_window(name, GroupWindow(self, name), (520, 420), "group")
         elif kind == "equation":
             self.add_window(name, EquationWindow(self, name), (700, 520), "equation")
-        elif kind == "var":
-            self.add_window(name, VarWindow(self, name), (760, 560), "var")
+        elif kind in ("var", "vecm"):
+            self.add_window(name, VarWindow(self, name), (760, 560), kind)
+        elif kind == "system":
+            self.add_window(name, SystemWindow(self, name), (720, 560), "system")
         elif kind == "scalar":
             self.statusBar().showMessage(f"{name} = {self.engine.wf.scalars.get(name)}")
         elif kind == "string":
@@ -1156,7 +1287,36 @@ class MainWindow(QMainWindow):
         if path:
             self.open_file(path)
 
+    def maybe_save(self) -> bool:
+        """Ask about unsaved changes. False means: cancel what was going to happen."""
+        if not self.engine.wf.dirty or not self.engine.wf.nobs_full:
+            return True
+        r = QMessageBox.question(self, "Unsaved changes",
+                                 f"Save changes to {self.wf_title()}?",
+                                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
+        if r == QMessageBox.Cancel:
+            return False
+        if r == QMessageBox.Save:
+            return self.save()
+        return True
+
+    def save(self) -> bool:
+        wf = self.engine.wf
+        if not wf.path or not wf.path.endswith((".gdt", ".gdtb")):
+            return self.save_as()
+        try:
+            written = self.engine.save()
+        except GretlError as e:
+            self.error(str(e))
+            return False
+        self.log_append("Saved " + ", ".join(written))
+        self.statusBar().showMessage("Saved " + ", ".join(os.path.basename(w) for w in written))
+        self._update_titles()
+        return True
+
     def open_file(self, path: str):
+        if not self.maybe_save():
+            return
         try:
             self.engine.open(path)
         except GretlError as e:
@@ -1192,14 +1352,26 @@ class MainWindow(QMainWindow):
             return
         self.show_workfile()
 
-    def save_as(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save workfile", "", "gretl data (*.gdt)")
-        if path:
-            if not path.endswith(".gdt"):
-                path += ".gdt"
-            self.execute(f'store "{path}"', hansl=True)
-            self.engine.wf.path = path
-            self.show_workfile()
+    def save_as(self) -> bool:
+        start = self.engine.wf.path or os.path.expanduser("~/untitled.gdt")
+        if not start.endswith(".gdt"):
+            start = os.path.splitext(start)[0] + ".gdt"
+        path, _ = QFileDialog.getSaveFileName(self, "Save workfile", start, "gretl data (*.gdt)")
+        if not path:
+            return False
+        if not path.endswith(".gdt"):
+            path += ".gdt"
+        try:
+            written = self.engine.save(path)
+        except GretlError as e:
+            self.error(str(e))
+            return False
+        self.log_append("Saved " + ", ".join(written))
+        if len(written) > 1:
+            QMessageBox.information(self, "Saved", "gretl keeps one dataset per file, so each page was saved "
+                                    "separately:\n" + "\n".join(written))
+        self.show_workfile()
+        return True
 
     def run_program_dialog(self):
         path, _ = QFileDialog.getOpenFileName(self, "Run EViews program", os.path.expanduser("~"), "EViews programs (*.prg)")
@@ -1329,8 +1501,8 @@ class MainWindow(QMainWindow):
         if name in self.engine.wf.bundles:
             self.open_object((name, "equation"))
 
-    def var_dialog(self, name: str | None = None, spec: str = ""):
-        """VAR Specification dialog (unrestricted VAR)."""
+    def var_dialog(self, name: str | None = None, spec: str = "", vec: bool = False):
+        """VAR Specification dialog: unrestricted VAR or vector error correction."""
         lags, endo, exo = "1 2", "", "c"
         if spec:
             left, _, right = spec.partition("@")
@@ -1352,11 +1524,28 @@ class MainWindow(QMainWindow):
         e_endo.setFixedHeight(70)
         wf = self.engine.wf
         smp = QLineEdit(f"{wf.sample_first} {wf.sample_last}")
+        vtype = QComboBox()
+        vtype.addItems(["Unrestricted VAR", "Vector Error Correction"])
+        vtype.setCurrentIndex(1 if vec else 0)
+        trend = QComboBox()
+        trend.addItems(["a: no intercept or trend", "b: intercept (no trend) in CE",
+                        "c: intercept in CE and VAR", "d: intercept and trend in CE",
+                        "e: intercept and trend in CE, linear trend in VAR"])
+        trend.setCurrentIndex(2)
+        rank = QLineEdit("1")
+        if vec and name:
+            cs = "".join(self.engine.run(f'printf "%s|%d\\n", {name}.case, {name}.rank')).strip().split("|")
+            if len(cs) == 2:
+                trend.setCurrentIndex("abcde".index(cs[0]))
+                rank.setText(cs[1])
         d = _form_dialog(self, "VAR Specification", [
-            ("Endogenous variables:", e_endo), ("Lag intervals for endogenous:", e_lags),
-            ("Exogenous variables:", e_exo), ("Estimation sample:", smp)])
+            ("VAR type:", vtype),
+            ("Endogenous variables:", e_endo), ("Lag intervals (in differences for VEC):", e_lags),
+            ("Exogenous variables:", e_exo), ("Estimation sample:", smp),
+            ("VEC trend case:", trend), ("VEC number of cointegrating equations:", rank)])
         if not d or not e_endo.toPlainText().split():
             return
+        is_vec = vtype.currentIndex() == 1
         if name is None:
             k = 1
             while f"var{k:02d}" in wf.bundles:
@@ -1367,11 +1556,33 @@ class MainWindow(QMainWindow):
         s = f"{e_lags.text().strip()} {' '.join(e_endo.toPlainText().split())}"
         if e_exo.text().strip():
             s += " @ " + e_exo.text().strip()
-        self.execute(f"var {name}.ls {s}")
+        if is_vec:
+            exo_part = s.split("@", 1)[1].split() if "@" in s else []
+            s = s.split("@")[0].strip()
+            exo_rest = [x for x in exo_part if x.lower() != "c"]
+            if exo_rest:
+                s += " @ " + " ".join(exo_rest)
+            self.execute(f"var {name}.ec({trend.currentText()[0]}, {rank.text().strip() or 1}) {s}")
+        else:
+            self.execute(f"var {name}.ls {s}")
         if name in self.engine.wf.bundles:
-            self.open_object((name, "var"))
+            self.open_object((name, self.engine.wf.kinds.get(name, "var")))
+
+    def new_system(self):
+        name, ok = QInputDialog.getText(self, "New Object", "Name for the system:", text=self._next_name("sys"))
+        if ok and name.strip():
+            self.add_window(name.strip(), SystemWindow(self, name.strip()), (720, 560), "system")
+
+    def _next_name(self, prefix):
+        k = 1
+        while f"{prefix}{k:02d}" in self.engine.wf.bundles or f"{prefix}{k:02d}" in self.windows:
+            k += 1
+        return f"{prefix}{k:02d}"
 
     def closeEvent(self, e):
+        if not self.maybe_save():
+            e.ignore()
+            return
         self.engine.close()
         super().closeEvent(e)
 
