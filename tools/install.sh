@@ -80,7 +80,8 @@ echo "built $(ls -l EViewsCompat.gfn | awk '{print $5}') bytes"
 step "Installing EViewsCompat for gretl"
 res=$(printf 'install "%s/EViewsCompat/EViewsCompat.gfn" --local\nprintf "DOT=%%s\\n", $dotdir\n' "$repo" | run_hansl)
 printf '%s\n' "$res" | grep -q "Installed EViewsCompat" || { printf '%s\n' "$res"; die "gretl could not install the package"; }
-echo "installed into $(printf '%s\n' "$res" | sed -n 's/^DOT=//p')functions (used by gretlcli and evqt)"
+dot=$(printf '%s\n' "$res" | sed -n 's/^DOT=//p')
+echo "installed into ${dot%/}/functions (used by gretlcli and evqt)"
 if [ "$(uname -s)" = "Darwin" ]; then
     # the gretl GUI app on macOS reads packages from Application Support
     gui="$HOME/Library/Application Support/gretl/functions/EViewsCompat"
@@ -96,10 +97,18 @@ echo "ok: EViewsCompat works"
 
 # --- 3. translator (standard library only) ------------------------------------------------
 step "Checking the translator"
-PYTHON=${PYTHON:-python3}
-command -v "$PYTHON" >/dev/null 2>&1 || die "$PYTHON not found (Python 3.10+ is needed)"
-"$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
-    || die "$PYTHON is older than 3.10"
+# first Python 3.10+ that actually runs ($PYTHON, versioned names, Homebrew, python3); on macOS
+# /usr/bin/python3 can be a stub that only asks for the Xcode tools
+py_ok() { "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; }
+found=""
+for c in ${PYTHON:-} python3.14 python3.13 python3.12 python3.11 python3.10 \
+         /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+    if command -v "$c" >/dev/null 2>&1 && py_ok "$c"; then found=$(command -v "$c"); break; fi
+done
+[ -n "$found" ] || die "no working Python 3.10+ found (tried \$PYTHON, python3.1x, Homebrew, python3).
+  Install Python 3.10 or newer, or set PYTHON=/path/to/python3."
+[ -n "${PYTHON:-}" ] && [ "$(command -v "$PYTHON" 2>/dev/null)" != "$found" ] && echo "note: \$PYTHON=$PYTHON does not run; using $found"
+PYTHON=$found
 "$PYTHON" "$repo/translator/evprg2hansl.py" --help >/dev/null || die "the translator does not start"
 echo "ok: $("$PYTHON" --version) runs translator/evprg2hansl.py"
 

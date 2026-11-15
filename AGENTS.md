@@ -22,7 +22,9 @@ user.
      from source or use the gretl site's packages. Ask the user before using `sudo`.
    - Windows: not supported by the scripts here (use WSL with a Linux gretl).
    The packages EViewsCompat uses (`gig`, `regls`, `ivpanel`, `dbnomics`) ship with gretl.
-2. **Python 3.10+** as `python3` (or set `PYTHON=/path/to/python3`).
+2. **Python 3.10+.** The script uses the first one that runs among `$PYTHON`, `python3.14` ...
+   `python3.10`, Homebrew's and `python3`. On macOS `/usr/bin/python3` may be Apple's stub that only
+   asks to install the Xcode tools; Homebrew's Python (`/opt/homebrew/bin/python3`) works.
 3. **Network access** only for `pip` (PySide6, about 117 MB) when installing evqt. Ask the user first if
    downloads need approval in your environment.
 
@@ -103,6 +105,7 @@ python3 -m venv ~/.venvs/eviews-gretl
 | `gretl ... is too old` | Install gretl 2026a or newer. |
 | evqt: `Could not find the Qt platform plugin "cocoa"` | The venv is in a cloud-synced folder: recreate it elsewhere with `EVQT_VENV=...`. |
 | evqt crashes while an automation tool types into it | Qt 6.8 is installed: `pip install -r evqt/requirements.txt` (6.12). |
+| `no working Python 3.10+ found`, or the Xcode licence message | Install Python 3.10+ (e.g. Homebrew) or set `PYTHON=/path/to/python3`. |
 | `x.x13` reports that x13as is missing | Run `tools/setup_x13.sh` (Apple Silicon) or set `x12a = /path/to/x13as` in `~/.gretl2rc`. |
 
 ## For agents changing the code
