@@ -4371,6 +4371,279 @@ string o = exists(out) ? out : &quot;display&quot;
 gnuplot 1 2 3 --matrix=M --with-lines --output=&quot;@o&quot;
 </code>
 </gretl-function>
+<gretl-function name="ev_pp" type="bundle">
+ <params count="6">
+  <param name="expr" type="string">
+<description>Series or expression, e.g. log(gdp)</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="det" type="string" optional="true">
+<description>c (constant), ct (constant and trend) or nc (none)</description>
+  </param>
+  <param name="bw" type="scalar" default="-1">
+<description>Bandwidth: -1 Newey-West automatic, -2 Newey-West fixed rule, &gt;= 0 fixed</description>
+  </param>
+  <param name="dif" type="bool" default="0">
+<description>Test the first difference</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>string d = exists(det) ? tolower(det) : &quot;c&quot;
+errorif(!instring(&quot; c ct nc &quot;, &quot; &quot; ~ d ~ &quot; &quot;), &quot;det must be c, ct or nc&quot;)
+set skip_missing off
+# lags written into the expression, so that pre-sample data are used (as EViews)
+series evp_0 = ev_gen(expr, vars)
+series evp_1 = ev_gen(ev__lagx(expr, 1, vars), vars)
+series evp_x = evp_0
+series evp_l = evp_1
+if dif
+  series evp_2 = ev_gen(ev__lagx(expr, 2, vars), vars)
+  evp_x = evp_0 - evp_1
+  evp_l = evp_1 - evp_2
+endif
+series evp_d = evp_x - evp_l
+series evp_tr = obs - 1
+series evp_o = obs
+list L = evp_d evp_l evp_tr evp_o
+matrix D = {L}
+D = selifr(D, sumr(!ok(D)) .= 0)
+matrix dy = D[, 1]
+matrix X = D[, 2]
+if d != &quot;nc&quot;
+  X ~= ones(rows(D), 1)
+endif
+if d == &quot;ct&quot;
+  X ~= D[, 3]
+endif
+scalar T = rows(dy)
+scalar k = cols(X)
+matrix e = {}
+matrix bh = mols(dy, X, &amp;e)
+scalar s2 = e'e / (T - k)
+matrix V = s2 * inv(X'X)
+scalar se = sqrt(V[1, 1])
+scalar tal = bh[1] / se
+scalar g0 = e'e / T
+scalar bwu = bw
+string bwm = &quot;fixed&quot;
+if bw == -1
+  bwu = ev__nwbw(e)
+  bwm = &quot;Newey-West automatic&quot;
+elif bw == -2
+  bwu = floor(4 * (T / 100)^(2 / 9))
+  bwm = &quot;Newey-West fixed&quot;
+endif
+scalar l2 = ev__lrvar(e, bwu)
+scalar zt = tal * sqrt(g0 / l2) - T * (l2 - g0) * se / (2 * sqrt(l2) * sqrt(s2))
+scalar itv = d == &quot;nc&quot; ? 1 : (d == &quot;c&quot; ? 2 : 3)
+bundle r
+r.stat = zt
+r.pval = urcpval(zt, T, 1, itv)
+r.cv = {ev__urccv(T, itv, 0.01), ev__urccv(T, itv, 0.05), ev__urccv(T, itv, 0.10)}
+r.bandwidth = bwu
+r.bwmethod = bwm
+r.T = T
+r.resvar = g0
+r.lrvar = l2
+r.tdf = tal
+r.coeff = bh
+r.det = d
+if !quiet
+  printf &quot;\nNull Hypothesis: %s has a unit root\n&quot;, toupper(dif ? &quot;D(&quot; ~ expr ~ &quot;)&quot; : expr)
+  printf &quot;Exogenous: %s\n&quot;, d == &quot;c&quot; ? &quot;Constant&quot; : (d == &quot;ct&quot; ? &quot;Constant, Linear Trend&quot; : &quot;None&quot;)
+  printf &quot;Bandwidth: %.4g (%s) using Bartlett kernel\n\n&quot;, bwu, bwm
+  printf &quot;%-40s%14s%10s\n&quot;, &quot;&quot;, &quot;Adj. t-Stat&quot;, &quot;Prob.*&quot;
+  ev__line(78)
+  printf &quot;%-40s%14.6f%10.4f\n&quot;, &quot;Phillips-Perron test statistic&quot;, zt, r.pval
+  printf &quot;%-20s%-20s%14.6f\n&quot;, &quot;Test critical values:&quot;, &quot;1% level&quot;, r.cv[1]
+  printf &quot;%-20s%-20s%14.6f\n&quot;, &quot;&quot;, &quot;5% level&quot;, r.cv[2]
+  printf &quot;%-20s%-20s%14.6f\n&quot;, &quot;&quot;, &quot;10% level&quot;, r.cv[3]
+  ev__line(78)
+  printf &quot;*MacKinnon (1996) one-sided p-values.\n\n&quot;
+  printf &quot;%-40s%14.6f\n&quot;, &quot;Residual variance (no correction)&quot;, g0
+  printf &quot;%-40s%14.6f\n&quot;, &quot;HAC corrected variance (Bartlett kernel)&quot;, l2
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_cointeg" type="bundle">
+ <params count="7">
+  <param name="names" type="string">
+<description>Series, e.g. y x1 x2 (the first is the dependent one)</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="method" type="string" optional="true">
+<description>eg (Engle-Granger) or po (Phillips-Ouliaris)</description>
+  </param>
+  <param name="det" type="string" optional="true">
+<description>c (constant), ct (constant and trend) or nc (none)</description>
+  </param>
+  <param name="lag" type="int" min="-1" default="-1">
+<description>ADF lags for EG: -1 automatic (SIC)</description>
+  </param>
+  <param name="maxlag" type="int" min="-1" default="-1">
+<description>Maximum lag for the automatic choice (-1: EViews rule)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>string meth = exists(method) ? tolower(method) : &quot;eg&quot;
+errorif(meth != &quot;eg&quot; &amp;&amp; meth != &quot;po&quot;, &quot;method must be eg or po&quot;)
+string d = exists(det) ? tolower(det) : &quot;c&quot;
+strings tok = strsplit(names)
+scalar m = nelem(tok)
+errorif(m &lt; 2, &quot;Give at least two series&quot;)
+set skip_missing off
+matrix Y = {}
+loop i = 1..m
+  series evc_x = ev_gen(tok[i], vars)
+  Y ~= {evc_x}
+endloop
+Y = selifr(Y, sumr(!ok(Y)) .= 0)
+scalar T = rows(Y)
+matrix X = Y[, 2:m]
+if d != &quot;nc&quot;
+  X ~= ones(T, 1)
+endif
+if d == &quot;ct&quot;
+  X ~= seq(0, T - 1)'
+endif
+matrix u = {}
+matrix bh = mols(Y[, 1], X, &amp;u)
+scalar itv = d == &quot;nc&quot; ? 1 : (d == &quot;c&quot; ? 2 : 3)
+bundle r
+r.method = meth
+r.coeff = bh
+r.uhat = u
+if meth == &quot;eg&quot;
+  # ADF regression on the residuals without deterministic terms
+  scalar pmax = maxlag &gt;= 0 ? maxlag : floor(4 * (T / 100)^(1 / 4))
+  scalar bestp = lag
+  if lag &lt; 0
+    # choose the lag by SIC on a common sample
+    scalar best = 1e300
+    loop p = 0..pmax
+      matrix du = u[2:T] - u[1:T-1]
+      matrix Z = u[pmax+1:T-1]
+      loop j = 1..p
+        Z ~= du[pmax+1-j:T-1-j]
+      endloop
+      matrix ee = {}
+      matrix bb = mols(du[pmax+1:T-1], Z, &amp;ee)
+      scalar n = rows(ee)
+      scalar sic = log(ee'ee / n) + cols(Z) * log(n) / n
+      if sic &lt; best
+        best = sic
+        bestp = p
+      endif
+    endloop
+  endif
+  scalar p = bestp
+  matrix du = u[2:T] - u[1:T-1]
+  matrix Z = u[p+1:T-1]
+  loop j = 1..p
+    Z ~= du[p+1-j:T-1-j]
+  endloop
+  matrix ee = {}
+  matrix bb = mols(du[p+1:T-1], Z, &amp;ee)
+  scalar n = rows(ee)
+  matrix V = (ee'ee / (n - cols(Z))) * inv(Z'Z)
+  r.tau = bb[1] / sqrt(V[1, 1])
+  scalar sg = p &gt; 0 ? sumc(bb[2:p+1]) : 0
+  r.z = n * bb[1] / (1 - sg)
+  r.lag = p
+  r.n = n
+else
+  # Phillips-Ouliaris: PP-type correction of the residual autoregression
+  matrix y1 = u[2:T]
+  matrix y0 = u[1:T-1]
+  scalar rho = (y0'y1) / (y0'y0)
+  matrix e = y1 - rho * y0
+  scalar n = rows(e)
+  scalar bwu = ev__nwbw(e)
+  scalar g0 = e'e / n
+  scalar l2 = ev__lrvar(e, bwu)
+  scalar lam = (l2 - g0) / 2
+  scalar s2 = e'e / (n - 1)
+  scalar se = sqrt(s2 / (y0'y0))
+  scalar tr = (rho - 1) / se
+  r.tau = tr * sqrt(g0 / l2) - lam * n * se / (sqrt(l2) * sqrt(s2))
+  r.z = n * (rho - 1) - lam * n^2 / (y0'y0)
+  r.bandwidth = bwu
+  r.n = n
+endif
+r.taup = urcpval(r.tau, T, m, itv)        # sample size of the cointegrating regression (as gretl)
+if !quiet
+  printf &quot;\nNull hypothesis: Series are not cointegrated\nCointegrating equation deterministics: %s\n&quot;, d == &quot;c&quot; ? &quot;C&quot; : (d == &quot;ct&quot; ? &quot;C @TREND&quot; : &quot;none&quot;)
+  if meth == &quot;eg&quot;
+    printf &quot;Automatic lags specification based on Schwarz criterion\n&quot;
+    printf &quot;Lags: %d\n&quot;, r.lag
+  else
+    printf &quot;Long-run variance estimate (Bartlett kernel, Newey-West bandwidth %.4g)\n&quot;, r.bandwidth
+  endif
+  printf &quot;\n%-26s%14s%14s%10s\n&quot;, &quot;Dependent&quot;, &quot;tau-statistic&quot;, &quot;z-statistic&quot;, &quot;Prob.*&quot;
+  ev__line(78)
+  printf &quot;%-26s%14.6f%14.6f%10.4f\n&quot;, toupper(tok[1]), r.tau, r.z, r.taup
+  ev__line(78)
+  printf &quot;*MacKinnon (1996) p-values (for the tau-statistic).\n&quot;
+  printf &quot;Method: %s\n&quot;, meth == &quot;eg&quot; ? &quot;Engle-Granger&quot; : &quot;Phillips-Ouliaris&quot;
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_seasadj" type="series">
+ <params count="3">
+  <param name="x" type="series">
+<description>Monthly or quarterly series</description>
+  </param>
+  <param name="kind" type="string" optional="true">
+<description>m (multiplicative) or a (additive)</description>
+  </param>
+  <param name="factors" type="seriesref" optional="true">
+<description>Output: seasonal factors</description>
+  </param>
+ </params>
+<code>errorif($pd != 4 &amp;&amp; $pd != 12, &quot;Seasonal adjustment needs quarterly or monthly data&quot;)
+string k = exists(kind) ? tolower(kind) : &quot;m&quot;
+errorif(k != &quot;m&quot; &amp;&amp; k != &quot;a&quot;, &quot;kind must be m or a&quot;)
+errorif(k == &quot;m&quot; &amp;&amp; min(x) &lt;= 0, &quot;Multiplicative adjustment needs positive values&quot;)
+scalar s = $pd
+scalar h = s / 2
+# centred 2 x s moving average
+set skip_missing off
+matrix v = {x}
+matrix mv = 0.5 * mlag(v, h, NA) + 0.5 * mlag(v, -h, NA)
+scalar jlo = 1 - h
+loop j = jlo..h-1
+  mv += mlag(v, j, NA)
+endloop
+series ma = mv / s
+series ratio = k == &quot;m&quot; ? x / ma : x - ma
+series per = $obsminor
+matrix idx = zeros(s, 1)
+loop j = 1..s
+  series sel = per == j &amp;&amp; ok(ratio)
+  idx[j] = sum(sel ? ratio : 0) / sum(sel)
+endloop
+# normalise: product 1 (multiplicative) or sum 0 (additive)
+if k == &quot;m&quot;
+  idx = idx / exp(meanc(log(idx)))
+else
+  idx = idx - meanc(idx)
+endif
+series sf = 0
+loop j = 1..s
+  sf = per == j ? idx[j] : sf
+endloop
+if exists(factors)
+  factors = sf
+endif
+return k == &quot;m&quot; ? x / sf : x - sf
+</code>
+</gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
  <params count="5">
   <param name="spec" type="string">
@@ -5364,6 +5637,60 @@ if !quiet
   ev__line(78)
 endif
 return r
+</code>
+</gretl-function>
+<gretl-function name="ev__nwbw" type="scalar" private="1">
+ <params count="1">
+  <param name="u" type="matrix" const="true"/>
+ </params>
+<code># Newey-West (1994) automatic bandwidth for the Bartlett kernel (EViews default)
+scalar T = rows(u)
+scalar n = floor(4 * (T / 100)^(2 / 9))
+scalar s0 = u'u / T
+scalar s1 = 0
+loop j = 1..n
+  scalar g = u[j+1:T]'u[1:T-j] / T
+  s0 += 2 * g
+  s1 += 2 * j * g
+endloop
+return 1.1447 * ((s1 / s0)^2)^(1 / 3) * T^(1 / 3)
+</code>
+</gretl-function>
+<gretl-function name="ev__lrvar" type="scalar" private="1">
+ <params count="2">
+  <param name="u" type="matrix" const="true"/>
+  <param name="bw" type="scalar"/>
+ </params>
+<code># Bartlett-kernel long-run variance with bandwidth bw (weights 1 - j/(bw+1))
+scalar T = rows(u)
+scalar l2 = u'u / T
+scalar jmax = floor(bw)
+loop j = 1..jmax
+  if j &lt; T
+    l2 += 2 * (1 - j / (bw + 1)) * (u[j+1:T]'u[1:T-j] / T)
+  endif
+endloop
+return l2
+</code>
+</gretl-function>
+<gretl-function name="ev__urccv" type="scalar" private="1">
+ <params count="3">
+  <param name="T" type="scalar"/>
+  <param name="itv" type="scalar"/>
+  <param name="p" type="scalar"/>
+ </params>
+<code># MacKinnon critical value for level p: invert urcpval by bisection
+scalar lo = -10
+scalar hi = 3
+loop 60
+  scalar mid = (lo + hi) / 2
+  if urcpval(mid, T, 1, itv) &gt; p
+    hi = mid
+  else
+    lo = mid
+  endif
+endloop
+return (lo + hi) / 2
 </code>
 </gretl-function>
 <sample-script>

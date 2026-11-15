@@ -30,3 +30,14 @@ e1.chow(f) 2015q1
 e1.testadd dlog(cons(-1))
 e1.testdrop ffr
 e1.rls(c)
+
+' S4, G6, S10: Phillips-Perron, Engle-Granger, moving-average seasonal adjustment
+smpl 1960q1 2019q4
+series lgdp = log(gdp)
+series lcons = log(cons)
+lgdp.uroot(pp, trend)
+group gc lcons lgdp
+gc.coint(method=eg)
+gc.coint(method=po)
+smpl @all
+cons.seas(m) cons_sa cons_sf

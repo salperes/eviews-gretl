@@ -252,6 +252,22 @@ class Phase1Equations(unittest.TestCase):
         self.assertEqual(translate_line("e.rls(q)", c), ["bundle e_rls = ev_rls(e)", 'ev_rlsplot(e_rls, "q")'])
 
 
+class Phase1Series(unittest.TestCase):
+    def test_pp_eg_seas(self):
+        c = Ctx()
+        self.assertEqual(translate_line("y.uroot(pp, trend)", c), ['bundle y_pp = ev_pp("y", dataset, "ct", -1, 0)'])
+        self.assertEqual(translate_line("y.uroot(pp, bw=4, dif=1)", c), ['bundle y_pp = ev_pp("y", dataset, "c", 4, 1)'])
+        translate_line("group g y x", c)
+        self.assertEqual(translate_line("g.coint(method=eg, lag=2)", c),
+                         ['bundle g_coint = ev_cointeg("y x", dataset, "eg", "c", 2, -1)'])
+        self.assertEqual(translate_line("g.coint(method=po, trend=linear)", c),
+                         ['bundle g_coint = ev_cointeg("y x", dataset, "po", "ct", -1, -1)'])
+        self.assertEqual(translate_line("x.seas(a) xsa xsf", c),
+                         ["series xsf = NA", 'series xsa = ev_seasadj(x, "a", &xsf)'])
+        with self.assertRaises(ValueError):
+            translate_line("x.x13", c)
+
+
 class Structure(unittest.TestCase):
     def test_subroutine_and_call(self):
         prg = """call twice(gdp, 3, "out")

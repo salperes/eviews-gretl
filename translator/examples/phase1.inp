@@ -41,3 +41,16 @@ bundle E1_test = ev_testdrop(E1, "FFR")
 bundle E1_rls = ev_rls(E1)
 ev_rlsplot(E1_rls, "c")
 
+# S4, G6, S10: Phillips-Perron, Engle-Granger, moving-average seasonal adjustment
+smpl full
+smpl 1960:1 2019:4
+series LGDP = log(GDP)
+series LCONS = log(CONS)
+bundle LGDP_pp = ev_pp("LGDP", dataset, "ct", -1, 0)
+list GC = LCONS LGDP
+bundle GC_coint = ev_cointeg("LCONS LGDP", dataset, "eg", "c", -1, -1)
+bundle GC_coint = ev_cointeg("LCONS LGDP", dataset, "po", "c", -1, -1)
+smpl full
+series CONS_SF = NA
+series CONS_SA = ev_seasadj(CONS, "m", &CONS_SF)
+

@@ -575,6 +575,13 @@ def _uroot(series: str, opts: str | None, ctx: Ctx) -> list[str]:
             "hqc": " --test-down=tstat", "tstat": " --test-down=tstat"}.get(info, "")
     if test == "adf":
         return [f"adf {lag} {x} {det}{diff}{down}"]
+    if "pp" in o:
+        # Phillips-Perron (Bartlett kernel, Newey-West automatic bandwidth by default)
+        bw = o.get("bw") or o.get("band") or ""
+        bw = bw if re.fullmatch(r"\d+(\.\d+)?", bw) else "-1"
+        d = "ct" if "trend" in o else ("nc" if "none" in o else "c")
+        dif = 1 if o.get("dif", "0") not in ("", "0") else 0
+        return [f'bundle {x}_pp = ev_pp("{x}", dataset, "{d}", {bw}, {dif})']
     if "kpss" in o:
         return [f"kpss {o.get('lag', '-1')} {x}" + (" --trend" if "trend" in o else "")]
     if "llc" in o:
@@ -1050,6 +1057,31 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
                 out.append(f"series {base}_a = " + (f"ev_eqres({e}, dataset)" if ml == "addinit" else "0"))
             return out
         raise ValueError(f"model method .{meth} not supported")
+    if ml == "coint" and re.search(r"(?i)method\s*=\s*(eg|po)", opts or ""):
+        op = _opts(opts)
+        if o in ctx.groups:
+            names = " ".join(ctx.groups[o])
+        else:
+            raise ValueError("coint(method=eg|po) needs a group of series")
+        d = {"none": "nc", "const": "c", "linear": "ct"}.get(op.get("trend", "const").lower(), "c")
+        lagv = op.get("lag", "a")
+        lagv = lagv if lagv.isdigit() else "-1"
+        ml_ = op.get("maxlag", "-1")
+        ml_ = ml_ if ml_.isdigit() else "-1"
+        return [f'bundle {o}_coint = ev_cointeg("{names}", dataset, "{op["method"].lower()}", "{d}", {lagv}, {ml_})']
+    if ml == "seas":
+        k = (opts or "m").strip().lower()[:1] or "m"
+        if k not in ("m", "a"):
+            raise ValueError("seas: m (multiplicative) or a (additive)")
+        outs = [translate_name(n, ctx) for n in args.split()]
+        if not outs:
+            raise ValueError("seas needs the name of the adjusted series")
+        if len(outs) > 1:
+            return [f"series {outs[1]} = NA", f'series {outs[0]} = ev_seasadj({o}, "{k}", &{outs[1]})']
+        return [f'series {outs[0]} = ev_seasadj({o}, "{k}")']
+    if ml in ("x13", "x12", "tramoseats"):
+        raise ValueError("X-13/TRAMO-SEATS need the x13as program (not installed with gretl on macOS); "
+                         "use x.seas(m) for moving-average adjustment")
     if ml == "coint":
         case, lag = "c", "4"
         for x in (opts or "").replace(",", " ").split():

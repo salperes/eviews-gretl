@@ -1,0 +1,56 @@
+# Phase 1: Phillips-Perron, Engle-Granger / Phillips-Ouliaris, moving-average seasonal adjustment
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series ly = log(GDP)
+series lc = log(CONS)
+smpl 1960:1 2019:4
+# --- S4 Phillips-Perron: with bandwidth 0 it is the Dickey-Fuller t statistic
+bundle p0 = ev_pp("log(GDP)", dataset, "c", 0, 0, 1)
+adf 0 ly --c --quiet
+check("PP with bandwidth 0 = DF t (gretl adf 0)", p0.stat, $test)
+check("PP p-value = MacKinnon p-value of gretl adf", p0.pval, $pvalue, 1e-4)
+bundle p1 = ev_pp("log(GDP)", dataset, "ct", -1, 0, 1)
+check("PP automatic bandwidth > 0", p1.bandwidth > 0, 1)
+check("PP long-run variance >= 0", p1.lrvar > 0, 1)
+check("PP 5% critical value (trend) about -3.43", p1.cv[2], -3.43, 0.01)
+bundle p2 = ev_pp("log(GDP)", dataset, "c", -1, 1, 1)
+check("PP on the first difference rejects the unit root", p2.pval < 0.01, 1)
+ev_pp("log(GDP)", dataset)
+
+# --- G6 Engle-Granger against gretl coint
+bundle eg = ev_cointeg("log(CONS) log(GDP)", dataset, "eg", "c", 2, 0, 1)
+coint 2 lc ly --skip-df
+check("Engle-Granger tau (2 lags) = gretl coint", eg.tau, $test)
+# gretl coint reports the asymptotic MacKinnon p-value; EViews (and ev_cointeg) the finite-sample one
+check("Engle-Granger asymptotic p-value = gretl coint", urcpval(eg.tau, 0, 2, 2), $pvalue, 1e-4)
+check("Engle-Granger finite-sample p-value (T = 240)", eg.taup, urcpval(eg.tau, 240, 2, 2))
+bundle ega = ev_cointeg("log(CONS) log(GDP)", dataset, "eg", "c", -1, -1, 1)
+check("Engle-Granger automatic lag chosen", ega.lag >= 0, 1)
+bundle po = ev_cointeg("log(CONS) log(GDP)", dataset, "po", "c", -1, -1, 0)
+check("Phillips-Ouliaris tau computed", ok(po.tau), 1)
+ev_cointeg("log(CONS) log(GDP)", dataset)
+
+# --- S10 moving-average seasonal adjustment (quarterly)
+smpl full
+series s0 = $obsminor == 1 ? 3 : ($obsminor == 2 ? -1 : ($obsminor == 3 ? -4 : 2))
+series xa = 100 + 0.5 * obs + s0
+series fa
+series adj = ev_seasadj(xa, "a", &fa)
+check("additive: seasonal factor of quarter 1 recovered", fa[5], 3)
+check("additive: adjusted = linear trend", adj[40] - adj[39], 0.5)
+series xm = exp(0.01 * obs) * ($obsminor == 1 ? 1.1 : ($obsminor == 2 ? 0.95 : ($obsminor == 3 ? 0.9 : 1.0526315789)))
+series fm
+series adjm = ev_seasadj(xm, "m", &fm)
+check("multiplicative: factors multiply to 1", fm[1] * fm[2] * fm[3] * fm[4], 1)
+check("multiplicative: quarter 1 factor close to 1.1", fm[5], 1.1, 0.01)
