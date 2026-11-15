@@ -78,3 +78,18 @@ smpl full
 smpl 1960:1 2019:4
 bundle VEC1 = ev_vecm("1 2 LC LGD", dataset, "c", 1, 0, "lc lgd")
 
+# S5-S16, G7: more unit root tests, filters, smoothing, interpolation, plots, principal components
+smpl full
+smpl 1960:1 2019:4
+adf 4 LGD --gls --c
+bundle LGD_np = ev_ngperron("LGD", dataset, 0)
+bundle LGD_buroot = ev_zivot("LGD", dataset, "a")
+series LGD_CYC = ev_cf(LGD, 6, 32)
+smpl full
+smpl 1970:1 2019:4
+series DG_SM = ev_smooth(DG, "s", NA, NA, NA)
+qqplot DG --output=display
+list GPC = DC DG
+bundle GPC_pc = ev_pcomp("DC DG", dataset, 0)
+series PC1 = ev_pcscore(GPC_pc, 1)
+

@@ -1,0 +1,94 @@
+# Phase 2 series tools: Ng-Perron/ERS, Zivot-Andrews, panel unit roots, CF filter,
+# exponential smoothing, interpolation, principal components
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+nulldata 300
+setobs 4 1950:1 --time-series
+set seed 21
+series rw = cum(normal())
+series ar1s = 0
+ar1s = 0.5 * ar1s(-1) + normal()
+# --- S5 Ng-Perron and ERS
+bundle n1 = ev_ngperron("ar1s", dataset, 0, -1, 0)
+check("Ng-Perron MZt = MZa x MSB", n1.MZt, n1.MZa * n1.MSB)
+check("Ng-Perron rejects for a stationary AR(1)", n1.MZa < n1.cv[2, 1], 1)
+bundle n2 = ev_ngperron("rw", dataset, 0, -1, 1)
+check("Ng-Perron does not reject for a random walk", n2.MZa > n2.cv[2, 1], 1)
+check("ERS P-statistic: large for a random walk", n2.PT > n2.cvpt[2], 1)
+check("ERS P-statistic: small for a stationary series", n1.PT < n1.cvpt[2], 1)
+# --- S6 Zivot-Andrews: stationary series with a level shift at observation 150
+series zb = 0
+zb = 0.5 * zb(-1) + normal() + 5 * (obs > 150)
+bundle za = ev_zivot("zb", dataset, "a", -1, 0.15, 0)
+check("Zivot-Andrews rejects the unit root", za.stat < za.cv[2], 1)
+check("Zivot-Andrews break near observation 151 (1987:3)", abs(obsnum(za.break) - 151) <= 3, 1)
+# --- S9 CF filter
+series cst = 5
+series lin = 2 + 0.3 * obs
+series cf1 = ev_cf(lin, 6, 32)
+check("CF filter removes a linear trend", maxc(abs({cf1})), 0, 1e-8)
+series cyc = sin(2 * $pi * obs / 16)
+series cf2 = ev_cf(cyc, 6, 32)
+check("CF filter keeps a 16-quarter cycle (middle of the sample)", corr(cf2, cyc), 1, 0.05)
+# --- S11 exponential smoothing
+bundle si
+series sm = ev_smooth(ar1s, "s", 0.3, NA, NA, &si)
+check("single smoothing with alpha = 0.3", si.params[1], 0.3)
+bundle se
+series sme = ev_smooth(ar1s, "s", NA, NA, NA, &se)
+check("estimated alpha lowers the SSR", se.ssr <= si.ssr + 1e-8, 1)
+series seasy = 10 + 0.05 * obs + 2 * ($obsminor == 1) - 1.5 * ($obsminor == 3) + 0.2 * normal()
+bundle sh
+series hw = ev_smooth(seasy, "a", NA, NA, NA, &sh)
+bundle sn
+series hn = ev_smooth(seasy, "n", NA, NA, NA, &sn)
+check("Holt-Winters additive fits seasonal data better than without seasonals", sh.ssr < sn.ssr, 1)
+# --- S12 interpolation
+series gap = obs
+gap[10] = NA
+gap[11] = NA
+series gi = ev_ipolate(gap)
+check("linear interpolation fills the gap exactly", gi[10] + gi[11], 21)
+series lg = exp(0.1 * obs)
+lg[20] = NA
+series li = ev_ipolate(lg, "log")
+check("log interpolation of an exponential series", li[20], exp(2), 1e-10)
+# --- G7 principal components against gretl princomp
+open ../../data/usmacro.gdt --quiet
+smpl 1960:1 2019:4
+bundle pc = ev_pcomp("dlog(GDP) dlog(CONS) dlog(INV)", dataset, 0, 0)
+check("eigenvalues of a correlation matrix sum to 3", sumc(pc.eigval), 3)
+series g1 = ldiff(GDP)
+series g2 = ldiff(CONS)
+series g3 = ldiff(INV)
+list L = g1 g2 g3
+matrix P = princomp({L}, 1)
+check("first component = gretl princomp (up to sign)", abs(corr(P[, 1], pc.scores[, 1])), 1, 1e-8)
+# --- S7 panel unit roots: Fisher (ADF) against unit-by-unit gretl adf
+open ../../data/panel_demo.csv --quiet
+setobs ID YEAR --panel-vars
+bundle pf = ev_panelur(LY, "fisher", 0, 1, 0)
+# unit ADF statistics equal gretl's; p-values are MacKinnon finite-sample (gretl prints asymptotic ones here)
+scalar k = 1
+loop foreach u 11 12 13
+    smpl ID == $u --restrict --replace
+    adf 1 LY --c --quiet
+    check(sprintf("Fisher-ADF: unit %s ADF statistic = gretl adf", "$u"), pf.stats[k], $test, 1e-8)
+    k++
+endloop
+smpl full
+check("Fisher chi-square = -2 sum log p", pf.fisher, -2 * sumc(log(pf.pvals)))
+bundle ph = ev_panelur(LY, "hadri", 0, 0, 0)
+check("Hadri rejects stationarity for trending log GDP levels", ph.p < 0.05, 1)
+bundle pp = ev_panelur(LY, "fisherpp", 0, 0, 1)
+check("Fisher-PP computed", ok(pp.fisher), 1)

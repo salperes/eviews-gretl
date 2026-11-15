@@ -263,6 +263,9 @@ class SeriesWindow(ObjectWindow):
             ("View", [("Spreadsheet", self.spreadsheet),
                       ("Graph: Line", lambda: self.run_plot(f"gnuplot {name} --time-series --with-lines")),
                       ("Graph: Histogram", self.histogram),
+                      ("Graph: Kernel Density", lambda: self.run_plot_cmd(f"ev_kdplot({name}, \"@PNG\")")),
+                      ("Graph: Quantile-Quantile (Normal)", lambda: self.run_plot_cmd(f"qqplot {name} --output=\"@PNG\"")),
+                      ("Graph: Boxplot", lambda: self.run_plot_cmd(f"boxplot {name} --output=\"@PNG\"")),
                       ("-", None),
                       ("Descriptive Statistics", lambda: self.run_text(f"summary {name}\nnormtest {name} --jbera")),
                       ("Correlogram...", self.correlogram),
@@ -270,6 +273,9 @@ class SeriesWindow(ObjectWindow):
             ("Proc", [("Generate by Equation...", lambda: main.genr_dialog(f"{name} = ")),
                       ("Hodrick-Prescott Filter...", self.hpf),
                       ("Seasonal Adjustment: Moving Average...", self.seas),
+                      ("Frequency Filter (BK / CF)...", self.bpf),
+                      ("Exponential Smoothing...", self.smooth),
+                      ("Interpolate...", lambda: main.execute(f"{name}.ipolate {name}_ipol")),
                       ("Seasonal Adjustment: Census X-13", lambda: main.execute(f'{name}.x13(save="d10 d11")'))]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
@@ -304,7 +310,8 @@ class SeriesWindow(ObjectWindow):
     def adf(self):
         """EViews Unit Root Test dialog: ADF, Phillips-Perron or KPSS."""
         test, level, det, lags = QComboBox(), QComboBox(), QComboBox(), QSpinBox()
-        test.addItems(["Augmented Dickey-Fuller", "Phillips-Perron", "Kwiatkowski-Phillips-Schmidt-Shin"])
+        test.addItems(["Augmented Dickey-Fuller", "Phillips-Perron", "Kwiatkowski-Phillips-Schmidt-Shin",
+                       "Dickey-Fuller GLS (ERS)", "Ng-Perron / ERS Point-Optimal", "Breakpoint (Zivot-Andrews)"])
         level.addItems(["Level", "1st difference"])
         det.addItems(["Intercept", "Trend and intercept", "None"])
         lags.setRange(0, 60)
@@ -321,10 +328,41 @@ class SeriesWindow(ObjectWindow):
         elif test.currentIndex() == 1:
             dd = ["c", "ct", "nc"][det.currentIndex()]
             self.run_text(f'bundle ev_ur = ev_pp("{x}", dataset, "{dd}", -1, {int(dif)})')
+        elif test.currentIndex() == 3:
+            opt = "--ct" if det.currentIndex() == 1 else "--c"
+            self.run_text(f"adf {lags.value()} {x} --gls {opt} --test-down=AIC" + (" --difference" if dif else ""))
+        elif test.currentIndex() == 4:
+            self.run_text(f'bundle ev_ur = ev_ngperron("{x}", dataset, {int(det.currentIndex() == 1)})')
+        elif test.currentIndex() == 5:
+            self.run_text(f'bundle ev_ur = ev_zivot("{x}", dataset, "{"b" if det.currentIndex() == 1 else "a"}")')
         else:
             src = f"diff({x})" if dif else x
             self.run_text(f"series ev_kx = {src}\nscalar ev_kl = int(4 * ($nobs / 100)^0.25)\n"
                           f"kpss ev_kl ev_kx" + (" --trend" if det.currentIndex() == 1 else ""))
+
+    def run_plot_cmd(self, cmd):
+        png = self.main.engine.tmp_png()
+        try:
+            self.main.engine.run(cmd.replace("@PNG", png), check=True)
+            self.show_image(png)
+        except GretlError as e:
+            self.main.error(str(e))
+
+    def bpf(self):
+        ty, ok = QInputDialog.getItem(self, "Frequency Filter", "Filter type:",
+                                      ["Baxter-King (fixed length symmetric)", "Christiano-Fitzgerald (full sample asymmetric)"], 0, False)
+        if ok:
+            t = "bk" if ty.startswith("Baxter") else "cf"
+            self.main.execute(f"{self.name}.bpf(type={t}) {self.name}_cycle")
+            self.main.open_object((f"{self.name}_cycle", "series"))
+
+    def smooth(self):
+        m, ok = QInputDialog.getItem(self, "Exponential Smoothing", "Smoothing method:",
+                                     ["Single", "Double", "Holt-Winters - No seasonal", "Holt-Winters - Additive",
+                                      "Holt-Winters - Multiplicative"], 0, False)
+        if ok:
+            k = {"Single": "s", "Double": "d"}.get(m, {"No seasonal": "n", "Additive": "a"}.get(m.split(" - ")[-1], "m"))
+            self.main.execute(f"{self.name}.smooth({k}) {self.name}sm")
 
     def seas(self):
         kind, ok = QInputDialog.getItem(self, "Seasonal Adjustment", "Moving average method:",
@@ -353,7 +391,8 @@ class GroupWindow(ObjectWindow):
                       ("Covariance / Correlation", lambda: self.run_text(f"corr {name}")),
                       ("Cointegration Test: Engle-Granger", lambda: self.coint("eg")),
                       ("Cointegration Test: Phillips-Ouliaris", lambda: self.coint("po")),
-                      ("Granger Causality...", self.cause)]),
+                      ("Granger Causality...", self.cause),
+                      ("Principal Components", lambda: self.run_text(f'bundle ev_pc = ev_pcomp("{" ".join(self.members())}", dataset)'))]),
             ("Object", [("Delete", lambda: main.delete_object(name))]),
             ("|", None),
             ("Name", lambda: main.rename_object(name)),

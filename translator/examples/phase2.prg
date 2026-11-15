@@ -49,3 +49,15 @@ smpl 2016q1 2019q4
 mv.solve
 smpl 1960q1 2019q4
 var vec1.ec(c, 1) 1 2 lc lgd
+
+' S5-S16, G7: more unit root tests, filters, smoothing, interpolation, plots, principal components
+smpl 1960q1 2019q4
+lgd.uroot(dfgls)
+lgd.uroot(np)
+lgd.buroot(break=intercept)
+lgd.bpf(type=cf) lgd_cyc
+smpl 1970q1 2019q4
+dg.smooth(s) dg_sm
+dg.qqplot
+group gpc dc dg
+gpc.pcomp pc1

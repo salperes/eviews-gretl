@@ -705,11 +705,28 @@ def _graph_cmd(kind: str, members: list[str], ctx: Ctx) -> list[str]:
             raise ValueError("scatter needs two series")
         members = members[1:] + members[:1]   # gretl: x variable last
         return [f"gnuplot {' '.join(members)} {_plot_out(ctx)}"]
-    style = "--with-boxes" if kind == "bar" else "--with-lines"
+    if kind in ("pie", "seasplot"):
+        raise ValueError(f"{kind} graphs are not available in gretl")
+    if kind in ("hist", "boxplot", "qqplot", "kernel", "distplot"):
+        outs = []
+        for mbr in (ctx.groups.get(members[0], members) if len(members) == 1 else members):
+            po = _plot_out(ctx)
+            if kind == "hist":
+                outs.append(f"freq {mbr} --plot={'display' if po == '--output=display' else po.split('=', 1)[1].strip(chr(34))}")
+            elif kind == "boxplot":
+                outs.append(f"boxplot {mbr} {po}")
+            elif kind == "qqplot":
+                outs.append(f"qqplot {mbr} {po}")
+            else:
+                f = po.split("=", 1)[1]
+                outs.append(f"ev_kdplot({mbr}" + ("" if f == "display" else f", {f}") + ")")
+        return outs
+    style = {"bar": "--with-boxes", "dot": "--with-points", "spike": "--with-impulses"}.get(kind, "--with-lines")
     return [f"gnuplot {' '.join(members)} --time-series {style} {_plot_out(ctx)}"]
 
 
-GRAPH_KINDS = {"line", "bar", "scat", "scatter", "area", "spike"}
+GRAPH_KINDS = {"line", "bar", "scat", "scatter", "area", "spike", "hist", "boxplot", "qqplot", "dot", "distplot",
+               "kernel", "pie", "seasplot"}
 GRAPH_STYLING = {"addtext", "setelem", "axis", "legend", "options", "save", "draw",
                  "name", "datelabel", "scale", "align", "template", "setfont",
                  "addarrow", "setobslabel", "displayname", "label"}
@@ -721,7 +738,7 @@ def _uroot(series: str, opts: str | None, ctx: Ctx) -> list[str]:
         k, _, v = x.strip().lower().partition("=")
         o[k] = v
     # ips: gretl's adf on a panel prints the Im-Pesaran-Shin W_tbar test
-    test = "adf" if "adf" in o or "ips" in o or not ({"kpss", "pp", "llc", "df", "ers", "np"} & o.keys()) else None
+    test = "adf" if "adf" in o or "ips" in o or not ({"kpss", "pp", "llc", "df", "ers", "np", "dfgls", "hadri", "breit"} & o.keys()) else None
     det = "--ct" if "trend" in o else ("--nc" if "none" in o else "--c")
     diff = " --difference" if o.get("dif", "0") not in ("", "0") else ""
     lag = o.get("maxlag") or o.get("lag") or "4"
@@ -729,6 +746,16 @@ def _uroot(series: str, opts: str | None, ctx: Ctx) -> list[str]:
     info = o.get("info", "")
     down = {"aic": " --test-down=AIC", "sic": " --test-down=BIC", "bic": " --test-down=BIC",
             "hqc": " --test-down=tstat", "tstat": " --test-down=tstat"}.get(info, "")
+    if ctx.panel and ({"adf", "pp", "hadri", "fisher", "breit"} & o.keys()):
+        if "breit" in o:
+            raise ValueError("the Breitung panel test is not available (use llc, ips, adf, pp or hadri)")
+        kind = "hadri" if "hadri" in o else ("fisherpp" if "pp" in o else "fisher")
+        lg = o.get("lag", "1") if o.get("lag", "1").isdigit() else "1"
+        return [f'bundle {x}_pur = ev_panelur({x}, "{kind}", {int("trend" in o)}, {lg})']
+    if "dfgls" in o:
+        return [f"adf {lag} {x} --gls {'--ct' if 'trend' in o else '--c'}{diff}{down}"]
+    if "ers" in o or "np" in o:
+        return [f'bundle {x}_np = ev_ngperron("{x}", dataset, {int("trend" in o)})']
     if test == "adf":
         return [f"adf {lag} {x} {det}{diff}{down}"]
     if "pp" in o:
@@ -1237,6 +1264,36 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if len(outs) > 1:
             return [f"series {outs[1]} = NA", f'series {outs[0]} = ev_seasadj({o}, "{k}", &{outs[1]})']
         return [f'series {outs[0]} = ev_seasadj({o}, "{k}")']
+    if ml == "buroot":
+        op = _opts(opts)
+        brk = op.get("break", op.get("breaktype", "intercept")).lower()
+        md = {"intercept": "a", "int": "a", "trend": "b", "both": "c", "inttrend": "c"}.get(brk, "a")
+        return [f'bundle {o}_buroot = ev_zivot("{o}", dataset, "{md}")']
+    if ml == "bpf":
+        op = _opts(opts)
+        ty = op.get("type", "bk").lower()
+        lo, hi = op.get("low", "6"), op.get("high", "32")
+        out = translate_name(args.split()[0], ctx) if args.split() else apply_case(f"{o}_cycle", ctx)
+        if ty == "bk":
+            return [f"series {out} = bkfilt({o}, {lo}, {hi}, {op.get('lag', '12')})"]
+        if ty == "cf":
+            return [f"series {out} = ev_cf({o}, {lo}, {hi})"]
+        raise ValueError(f"bpf type={ty} not supported (bk, cf)")
+    if ml == "smooth":
+        parts = [x.strip() for x in (opts or "s").split(",")]
+        meth = (parts[0] or "s").lower()[:1]
+        if meth not in ("s", "d", "n", "a", "m"):
+            raise ValueError("smooth: s, d, n, a or m")
+        pars = (parts[1:] + ["NA", "NA", "NA"])[:3]
+        pars = [p if re.fullmatch(r"[\d.]+", p) else "NA" for p in pars]
+        out = translate_name(args.split()[0], ctx) if args.split() else apply_case(f"{o}sm", ctx)
+        return [f'series {out} = ev_smooth({o}, "{meth}", {", ".join(pars)})']
+    if ml == "ipolate":
+        ty = _opts(opts).get("type", "lin").lower()
+        if ty not in ("lin", "log"):
+            raise ValueError("ipolate: type=lin or log (cubic and Catmull-Rom are not supported)")
+        out = translate_name(args.split()[0], ctx) if args.split() else apply_case(f"{o}_ipol", ctx)
+        return [f'series {out} = ev_ipolate({o}, "{ty}")']
     if ml in ("x13", "x12"):
         # X-13ARIMA-SEATS through gretl's deseas() (needs the x13as program set up in gretl)
         op = opts or ""
@@ -1291,6 +1348,11 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return [f"matrix {o}_vif = ev_vif({o})"]
     if ml in ("ranhaus", "fixedtest") and ctx.equations.get(o) == "panel":
         return [f"bundle {o}_ptest = ev_paneltests({o}.spec, dataset)"]
+    if ml == "pcomp" and o in ctx.groups:
+        cov = 1 if "cov" in (opts or "").lower() else 0
+        out = [f'bundle {o}_pc = ev_pcomp("{" ".join(ctx.groups[o])}", dataset, {cov})']
+        out += [f"series {translate_name(n, ctx)} = ev_pcscore({o}_pc, {k})" for k, n in enumerate(args.split(), 1)]
+        return out
     if ml == "cause" and o in ctx.groups:
         m = re.match(r"\s*(\d+)", opts or "")
         return [f'matrix {o}_cause = ev_cause("{" ".join(ctx.groups[o])}", dataset, {m.group(1) if m else 2})']

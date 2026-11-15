@@ -435,6 +435,17 @@ check("Granger" in w.windows["gcoint"].text.toPlainText(), "group view: Granger 
 vw2.var_view("bundle ev_w = ev_varwhite(vtest)")
 check("Heteroskedasticity" in vw2.text.toPlainText(), "VAR view: White test")
 
+w.open_object(("GDP", "series"))
+gs = w.windows["GDP"]
+gs.run_plot_cmd('qqplot GDP --output="@PNG"')
+check(gs.stack.currentWidget() is gs._scroll, "series view: QQ plot")
+w.execute("smpl 1960q1 2019q4")
+w.execute("series lgdp2 = log(gdp)")
+w.execute("lgdp2.bpf(type=cf) lgdp2_cyc")
+check("lgdp2_cyc" in w.engine.wf.series, "series proc: CF frequency filter")
+w.windows["gcoint"].run_text('bundle ev_pc = ev_pcomp("lcons lgdp", dataset)')
+check("Principal Components" in w.windows["gcoint"].text.toPlainText(), "group view: principal components")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
 if failures:

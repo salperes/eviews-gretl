@@ -399,6 +399,27 @@ class Phase2Tests(unittest.TestCase):
         self.assertIn("bundles ev_mb = defarray(v_eq1, v_eq2)", out)
 
 
+class Phase2Series(unittest.TestCase):
+    def test_series_tools(self):
+        c = Ctx()
+        self.assertEqual(translate_line("y.uroot(dfgls)", c), ["adf 4 y --gls --c"])
+        self.assertEqual(translate_line("y.uroot(np, trend)", c), ['bundle y_np = ev_ngperron("y", dataset, 1)'])
+        self.assertEqual(translate_line("y.buroot(break=trend)", c), ['bundle y_buroot = ev_zivot("y", dataset, "b")'])
+        self.assertEqual(translate_line("y.bpf(type=bk, low=6, high=32, lag=12) yc", c),
+                         ["series yc = bkfilt(y, 6, 32, 12)"])
+        self.assertEqual(translate_line("y.smooth(s) ys", c), ['series ys = ev_smooth(y, "s", NA, NA, NA)'])
+        self.assertEqual(translate_line("y.ipolate(type=log) yi", c), ['series yi = ev_ipolate(y, "log")'])
+        self.assertEqual(translate_line("y.qqplot", c), ["qqplot y --output=display"])
+        translate_line("group g a b c", c)
+        self.assertEqual(translate_line("g.pcomp pc1 pc2", c),
+                         ['bundle g_pc = ev_pcomp("a b c", dataset, 0)', "series pc1 = ev_pcscore(g_pc, 1)",
+                          "series pc2 = ev_pcscore(g_pc, 2)"])
+        translate_line("pagestruct id @date(t)", c)
+        self.assertEqual(translate_line("x.uroot(hadri)", c), ['bundle x_pur = ev_panelur(x, "hadri", 0, 1)'])
+        with self.assertRaises(ValueError):
+            translate_line("x.uroot(breit)", c)
+
+
 class Structure(unittest.TestCase):
     def test_subroutine_and_call(self):
         prg = """call twice(gdp, 3, "out")

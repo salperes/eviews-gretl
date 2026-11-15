@@ -6349,6 +6349,542 @@ endif
 return w
 </code>
 </gretl-function>
+<gretl-function name="ev_ngperron" type="bundle">
+ <params count="5">
+  <param name="expr" type="string">
+<description>Series or expression</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="trend" type="bool" default="0">
+<description>Include a linear trend</description>
+  </param>
+  <param name="maxlag" type="int" min="-1" default="-1">
+<description>Maximum lag (-1: EViews rule)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># ERS point-optimal P_T and Ng-Perron MZa, MZt, MSB, MPT (AR spectral, GLS-detrended, SIC lags)
+set skip_missing off
+series evn_x = ev_gen(expr, vars)
+matrix y = {evn_x}
+y = selifr(y, ok(y))
+scalar T = rows(y)
+scalar cb = 0
+matrix yd = ev__glsdetrend(y, trend, &amp;cb)
+scalar pmax = maxlag &gt;= 0 ? maxlag : floor(12 * (T / 100)^(1 / 4))
+scalar kopt = 0
+scalar f0 = ev__arspec(yd, pmax, &amp;kopt)
+matrix yl = yd[1:T-1]
+scalar s1 = yl'yl / T^2
+scalar yT = yd[T]
+bundle r
+r.MZa = (yT^2 / T - f0) / (2 * s1)
+r.MSB = sqrt(s1 / f0)
+r.MZt = r.MZa * r.MSB
+r.MPT = trend ? (cb^2 * s1 + (1 - cb) * yT^2 / T) / f0 : (cb^2 * s1 - cb * yT^2 / T) / f0
+# ERS point optimal: SSR of the quasi-differenced regressions at a-bar and at 1
+scalar abar = 1 + cb / T
+matrix Z = ones(T, 1)
+if trend
+  Z ~= seq(1, T)'
+endif
+matrix yq = y[1] | (y[2:T] - abar * y[1:T-1])
+matrix Zq = Z[1,] | (Z[2:T,] - abar * Z[1:T-1,])
+matrix ea = yq - Zq * mols(yq, Zq)
+matrix y1 = y[1] | (y[2:T] - y[1:T-1])
+matrix Z1 = Z[1,] | (Z[2:T,] - Z[1:T-1,])
+matrix e1 = y1 - Z1 * mols(y1, Z1)
+r.PT = (ea'ea - abar * e1'e1) / f0
+r.f0 = f0
+r.lag = kopt
+r.T = T
+# asymptotic critical values (1%, 5%, 10%): Ng and Perron (2001) Table 1; ERS (1996) Table 1
+if trend
+  r.cv = {-23.8, -3.42, 0.143, 4.03; -17.3, -2.91, 0.168, 5.48; -14.2, -2.62, 0.185, 6.67}
+  r.cvpt = {4.26, 5.64, 6.79}
+else
+  r.cv = {-13.8, -2.58, 0.174, 1.78; -8.1, -1.98, 0.233, 3.17; -5.7, -1.62, 0.275, 4.45}
+  r.cvpt = {1.99, 3.26, 4.48}
+endif
+if !quiet
+  printf &quot;\nNull Hypothesis: %s has a unit root\nExogenous: %s\n&quot;, toupper(expr), trend ? &quot;Constant, Linear Trend&quot; : &quot;Constant&quot;
+  printf &quot;Lag length: %d (Spectral GLS-detrended AR based on SIC, maxlag=%d)\nSample size: %d\n\n&quot;, kopt, pmax, T
+  printf &quot;%-34s%10s%10s%10s%10s\n&quot;, &quot;&quot;, &quot;MZa&quot;, &quot;MZb&quot;, &quot;MSB&quot;, &quot;MPT&quot;
+  ev__line(74)
+  printf &quot;%-34s%10.4f%10.4f%10.4f%10.4f\n&quot;, &quot;Ng-Perron test statistics&quot;, r.MZa, r.MZt, r.MSB, r.MPT
+  strings lv = defarray(&quot;1%&quot;, &quot;5%&quot;, &quot;10%&quot;)
+  loop i = 1..3
+    printf &quot;%-34s%10.3f%10.3f%10.3f%10.3f\n&quot;, sprintf(&quot;Asymptotic critical values*: %s&quot;, lv[i]), r.cv[i, 1], r.cv[i, 2], r.cv[i, 3], r.cv[i, 4]
+  endloop
+  ev__line(74)
+  printf &quot;*Ng-Perron (2001, Table 1)\n\nElliott-Rothenberg-Stock point-optimal P-statistic: %.4f\n&quot;, r.PT
+  printf &quot;Asymptotic critical values (ERS 1996): 1%% %.2f  5%% %.2f  10%% %.2f\n&quot;, r.cvpt[1], r.cvpt[2], r.cvpt[3]
+  printf &quot;(MZb above is MZt)\n&quot;
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_zivot" type="bundle">
+ <params count="6">
+  <param name="expr" type="string">
+<description>Series or expression</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="model" type="string" optional="true">
+<description>a (intercept break), b (trend break) or c (both)</description>
+  </param>
+  <param name="lag" type="int" min="-1" default="-1">
+<description>ADF lags (-1: chosen by SIC without break)</description>
+  </param>
+  <param name="trim" type="scalar" default="0.15"/>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># Zivot-Andrews (1992) unit root test with one endogenous break: minimum t over break dates
+string md = exists(model) ? tolower(model) : &quot;a&quot;
+errorif(md != &quot;a&quot; &amp;&amp; md != &quot;b&quot; &amp;&amp; md != &quot;c&quot;, &quot;model must be a, b or c&quot;)
+set skip_missing off
+series evz_x = ev_gen(expr, vars)
+series evz_o = obs
+matrix D = {evz_x} ~ {evz_o}
+D = selifr(D, ok(D[, 1]))
+matrix y = D[, 1]
+matrix tob = D[, 2]
+scalar T = rows(y)
+matrix dy = y[2:T] - y[1:T-1]
+# lag order: SIC on the ADF regression without a break
+scalar pmax = floor(12 * (T / 100)^(1 / 4))
+scalar p = lag
+if lag &lt; 0
+  scalar best = 1e300
+  loop k = 0..pmax
+    matrix Z = ones(T - 1 - pmax, 1) ~ seq(pmax + 2, T)' ~ y[pmax + 1:T - 1]
+    loop j = 1..k
+      Z ~= dy[pmax + 1 - j:T - 1 - j]
+    endloop
+    matrix e = {}
+    matrix b = mols(dy[pmax + 1:T - 1], Z, &amp;e)
+    scalar n = rows(e)
+    scalar sic = log(e'e / n) + cols(Z) * log(n) / n
+    if sic &lt; best
+      best = sic
+      p = k
+    endif
+  endloop
+endif
+scalar t1 = ceil(trim * T)
+scalar t2 = floor((1 - trim) * T)
+scalar tmin = 1e300
+scalar tb = NA
+loop bk = t1..t2
+  matrix tt = seq(p + 2, T)'
+  matrix Z = ones(rows(tt), 1) ~ tt ~ y[p + 1:T - 1]
+  if md == &quot;a&quot; || md == &quot;c&quot;
+    Z ~= tt .&gt; bk                        # DU: intercept shift
+  endif
+  if md == &quot;b&quot; || md == &quot;c&quot;
+    Z ~= (tt .&gt; bk) .* (tt - bk)         # DT: trend shift
+  endif
+  loop j = 1..p
+    Z ~= dy[p + 1 - j:T - 1 - j]
+  endloop
+  matrix e = {}
+  matrix b = mols(dy[p + 1:T - 1], Z, &amp;e)
+  matrix V = (e'e / (rows(e) - cols(Z))) * inv(Z'Z)
+  scalar tv = b[3] / sqrt(V[3, 3])
+  if tv &lt; tmin
+    tmin = tv
+    tb = bk
+  endif
+endloop
+bundle r
+r.stat = tmin
+r.break = obslabel(tob[tb + 1])
+r.lag = p
+r.model = md
+# Zivot and Andrews (1992), Tables 2-4: 1%, 5%, 10%
+r.cv = md == &quot;a&quot; ? {-5.34, -4.80, -4.58} : (md == &quot;b&quot; ? {-4.93, -4.42, -4.11} : {-5.57, -5.08, -4.82})
+if !quiet
+  printf &quot;\nZivot-Andrews Unit Root Test\nNull Hypothesis: %s has a unit root with a structural break in the %s\n&quot;, toupper(expr), md == &quot;a&quot; ? &quot;intercept&quot; : (md == &quot;b&quot; ? &quot;trend&quot; : &quot;intercept and trend&quot;)
+  printf &quot;Chosen lag length: %d\nChosen break point: %s\n\n&quot;, p, r.break
+  printf &quot;%-30s%12s\n&quot;, &quot;&quot;, &quot;t-Statistic&quot;
+  printf &quot;%-30s%12.6f\n&quot;, &quot;Zivot-Andrews test statistic&quot;, r.stat
+  printf &quot;%-30s%12.2f\n%-30s%12.2f\n%-30s%12.2f\n&quot;, &quot;1% critical value:&quot;, r.cv[1], &quot;5% critical value:&quot;, r.cv[2], &quot;10% critical value:&quot;, r.cv[3]
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_panelur" type="bundle">
+ <params count="5">
+  <param name="x" type="series">
+<description>Series of a panel page</description>
+  </param>
+  <param name="test" type="string" optional="true">
+<description>fisher (ADF, default), fisherpp or hadri</description>
+  </param>
+  <param name="trend" type="bool" default="0"/>
+  <param name="lag" type="int" min="0" default="1">
+<description>ADF lag for the Fisher test</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># Maddala-Wu / Choi Fisher-type tests and Hadri's stationarity test
+errorif($datatype != 3, &quot;Panel unit root tests need a panel page&quot;)
+string ts = exists(test) ? tolower(test) : &quot;fisher&quot;
+set skip_missing off
+matrix M = ev_unstack(x)
+scalar N = cols(M)
+matrix pv = zeros(N, 1)
+matrix stv = zeros(N, 1)
+bundle r
+if ts == &quot;hadri&quot;
+  matrix LMi = zeros(N, 1)
+  scalar ssum = 0
+  scalar nobs = 0
+  scalar lmh = 0
+  matrix s2i = zeros(N, 1)
+  matrix etas = zeros(N, 1)
+  loop i = 1..N
+    matrix yi = M[, i]
+    yi = selifr(yi, ok(yi))
+    scalar T = rows(yi)
+    matrix Z = ones(T, 1)
+    if trend
+      Z ~= seq(1, T)'
+    endif
+    matrix e = yi - Z * mols(yi, Z)
+    matrix S = cum(e)
+    etas[i] = (S'S) / T^2
+    s2i[i] = e'e / T
+  endloop
+  scalar s2 = meanc(s2i)
+  scalar xi = trend ? 1 / 15 : 1 / 6
+  scalar ze = trend ? sqrt(11 / 6300) : sqrt(1 / 45)
+  scalar LMh = meanc(etas / s2)              # homoskedastic
+  scalar LMhet = meanc(etas ./ s2i)          # heteroskedasticity consistent
+  r.Z = sqrt(N) * (LMh - xi) / ze
+  r.Zhet = sqrt(N) * (LMhet - xi) / ze
+  r.p = 1 - cnorm(r.Z)
+  r.phet = 1 - cnorm(r.Zhet)
+  if !quiet
+    printf &quot;\nHadri Panel Unit Root Test\nNull Hypothesis: Stationarity\nExogenous variables: %s\n\n&quot;, trend ? &quot;Individual effects, individual linear trends&quot; : &quot;Individual effects&quot;
+    printf &quot;%-34s%14s%10s\n&quot;, &quot;Method&quot;, &quot;Statistic&quot;, &quot;Prob.**&quot;
+    printf &quot;%-34s%14.6f%10.4f\n&quot;, &quot;Hadri Z-stat&quot;, r.Z, r.p
+    printf &quot;%-34s%14.6f%10.4f\n&quot;, &quot;Heteroscedastic Consistent Z-stat&quot;, r.Zhet, r.phet
+  endif
+  return r
+endif
+errorif(ts != &quot;fisher&quot; &amp;&amp; ts != &quot;fisherpp&quot;, &quot;test must be fisher, fisherpp or hadri&quot;)
+scalar itv = trend ? 3 : 2
+loop i = 1..N
+  matrix yi = M[, i]
+  yi = selifr(yi, ok(yi))
+  scalar T = rows(yi)
+  matrix dy = yi[2:T] - yi[1:T-1]
+  scalar st = NA
+  if ts == &quot;fisher&quot;
+    matrix Z = ones(T - 1 - lag, 1)
+    if trend
+      Z ~= seq(lag + 2, T)'
+    endif
+    Z ~= yi[lag + 1:T - 1]
+    loop j = 1..lag
+      Z ~= dy[lag + 1 - j:T - 1 - j]
+    endloop
+    matrix e = {}
+    matrix b = mols(dy[lag + 1:T - 1], Z, &amp;e)
+    matrix V = (e'e / (rows(e) - cols(Z))) * inv(Z'Z)
+    scalar kk = trend ? 3 : 2
+    st = b[kk] / sqrt(V[kk, kk])
+    stv[i] = st
+    pv[i] = urcpval(st, rows(e), 1, itv)
+  else
+    matrix Z = ones(T - 1, 1)
+    if trend
+      Z ~= seq(2, T)'
+    endif
+    Z ~= yi[1:T - 1]
+    matrix e = {}
+    matrix b = mols(dy, Z, &amp;e)
+    scalar kk = cols(Z)
+    scalar s2 = e'e / (rows(e) - kk)
+    matrix ZZi = inv(Z'Z)
+    scalar se = sqrt(s2 * ZZi[kk, kk])
+    scalar g0 = e'e / rows(e)
+    scalar l2 = ev__lrvar(e, ev__nwbw(e))
+    st = (b[kk] / se) * sqrt(g0 / l2) - rows(e) * (l2 - g0) * se / (2 * sqrt(l2) * sqrt(s2))
+    pv[i] = urcpval(st, rows(e), 1, itv)
+  endif
+endloop
+r.pvals = pv
+r.stats = stv
+r.fisher = -2 * sumc(log(pv))
+r.fisherp = pvalue(c, 2 * N, r.fisher)
+r.choi = sumc(invcdf(z, pv)) / sqrt(N)
+r.choip = cnorm(r.choi)
+if !quiet
+  printf &quot;\n%s Fisher Panel Unit Root Test\nNull Hypothesis: Unit root (individual unit root process)\nCross-sections: %d\n\n&quot;, ts == &quot;fisher&quot; ? &quot;ADF -&quot; : &quot;PP -&quot;, N
+  printf &quot;%-34s%14s%10s\n&quot;, &quot;Method&quot;, &quot;Statistic&quot;, &quot;Prob.**&quot;
+  printf &quot;%-34s%14.6f%10.4f\n&quot;, ts == &quot;fisher&quot; ? &quot;ADF - Fisher Chi-square&quot; : &quot;PP - Fisher Chi-square&quot;, r.fisher, r.fisherp
+  printf &quot;%-34s%14.6f%10.4f\n&quot;, ts == &quot;fisher&quot; ? &quot;ADF - Choi Z-stat&quot; : &quot;PP - Choi Z-stat&quot;, r.choi, r.choip
+  printf &quot;** Probabilities for Fisher tests use the asymptotic Chi-square distribution;\n   the Choi test assumes asymptotic normality.\n&quot;
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_cf" type="series">
+ <params count="3">
+  <param name="x" type="series">
+<description>Series</description>
+  </param>
+  <param name="low" type="int" min="2" default="6">
+<description>Lower period</description>
+  </param>
+  <param name="high" type="int" min="2" default="32">
+<description>Upper period</description>
+  </param>
+ </params>
+<code># Christiano-Fitzgerald asymmetric full-sample filter (random-walk assumption, drift removed)
+set skip_missing off
+matrix y = {x}
+errorif(sumc(!ok(y)) &gt; 0, &quot;The series has missing values in the sample&quot;)
+scalar T = rows(y)
+# remove the drift
+scalar d = (y[T] - y[1]) / (T - 1)
+y = y - d * seq(0, T - 1)'
+scalar a = 2 * $pi / high
+scalar bb = 2 * $pi / low
+matrix B = zeros(T, 1)                     # B[j+1] = B_j
+B[1] = (bb - a) / $pi
+loop j = 1..T - 1
+  B[j + 1] = (sin(j * bb) - sin(j * a)) / ($pi * j)
+endloop
+matrix cy = zeros(T, 1)
+loop t = 1..T
+  scalar v = B[1] * y[t]
+  # forward: y[t+1] .. y[T-1], then y[T] with B-tilde(T-t) = -B0/2 - sum B
+  scalar sf = 0
+  if T - t - 1 &gt;= 1
+    loop j = 1..T - t - 1
+      v += B[j + 1] * y[t + j]
+      sf += B[j + 1]
+    endloop
+  endif
+  v += (-B[1] / 2 - sf) * y[T]
+  # backward: y[t-1] .. y[2], then y[1] with B-tilde(t-1)
+  scalar sb = 0
+  if t - 2 &gt;= 1
+    loop j = 1..t - 2
+      v += B[j + 1] * y[t - j]
+      sb += B[j + 1]
+    endloop
+  endif
+  v += (-B[1] / 2 - sb) * y[1]
+  cy[t] = v
+endloop
+series out = cy
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_smooth" type="series">
+ <params count="6">
+  <param name="x" type="series">
+<description>Series</description>
+  </param>
+  <param name="method" type="string" optional="true">
+<description>s (single), d (double), n (Holt-Winters no seasonal), a (additive) or m (multiplicative)</description>
+  </param>
+  <param name="pa" type="scalar" default="NA">
+<description>alpha</description>
+  </param>
+  <param name="pb" type="scalar" default="NA">
+<description>beta</description>
+  </param>
+  <param name="pg" type="scalar" default="NA">
+<description>gamma</description>
+  </param>
+  <param name="res" type="bundleref" optional="true">
+<description>Output: parameters, SSR, RMSE</description>
+  </param>
+ </params>
+<code># exponential smoothing; parameters not given are estimated by minimising the sum of squared one-step errors
+string m = exists(method) ? tolower(method) : &quot;s&quot;
+errorif(!instring(&quot; s d n a m &quot;, &quot; &quot; ~ m ~ &quot; &quot;), &quot;method must be s, d, n, a or m&quot;)
+set skip_missing off
+matrix y = {x}
+errorif(sumc(!ok(y)) &gt; 0, &quot;The series has missing values in the sample&quot;)
+scalar s = $pd
+errorif((m == &quot;a&quot; || m == &quot;m&quot;) &amp;&amp; s &lt; 2, &quot;Seasonal Holt-Winters needs seasonal data&quot;)
+errorif(m == &quot;m&quot; &amp;&amp; minc(y) &lt;= 0, &quot;Multiplicative seasonals need positive data&quot;)
+matrix fix = {pa, pb, pg}
+scalar np = m == &quot;s&quot; || m == &quot;d&quot; ? 1 : (m == &quot;n&quot; ? 2 : 3)
+matrix th = zeros(np, 1)                 # logit scale
+matrix th0 = th
+scalar nfree = 0
+loop i = 1..np
+  nfree += !ok(fix[i])
+endloop
+if nfree &gt; 0
+  set max_verbose off
+  scalar ssr = BFGSmin(&amp;th, &quot;ev__smooth_ssr(th, y, m, s, fix)&quot;)
+endif
+matrix f = ev__smooth_run(th, y, m, s, fix)
+if exists(res)
+  matrix par = 1 ./ (1 + exp(-th))
+  loop i = 1..np
+    if ok(fix[i])
+      par[i] = fix[i]
+    endif
+  endloop
+  res.params = par
+  res.ssr = sumc((y - f[, 1]).^2)
+  res.rmse = sqrt(res.ssr / rows(y))
+endif
+return f[, 2]
+</code>
+</gretl-function>
+<gretl-function name="ev_ipolate" type="series">
+ <params count="2">
+  <param name="x" type="series">
+<description>Series with missing values</description>
+  </param>
+  <param name="kind" type="string" optional="true">
+<description>lin (default) or log</description>
+  </param>
+ </params>
+<code># fills interior missing values by linear (or log-linear) interpolation, as EViews ipolate
+string k = exists(kind) ? tolower(kind) : &quot;lin&quot;
+set skip_missing off
+matrix y = {x}
+if k == &quot;log&quot;
+  errorif(minc(selifr(y, ok(y))) &lt;= 0, &quot;Log interpolation needs positive values&quot;)
+  y = log(y)
+endif
+scalar T = rows(y)
+matrix r = y
+scalar last = 0
+loop t = 1..T
+  if ok(y[t])
+    if last &gt; 0 &amp;&amp; t - last &gt; 1
+      loop j = last + 1..t - 1
+        r[j] = y[last] + (y[t] - y[last]) * (j - last) / (t - last)
+      endloop
+    endif
+    last = t
+  endif
+endloop
+if k == &quot;log&quot;
+  r = exp(r)
+endif
+series out = r
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_pcomp" type="bundle">
+ <params count="4">
+  <param name="names" type="string">
+<description>Series, e.g. x1 x2 x3</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="cov" type="bool" default="0">
+<description>Use the covariance (default: correlation) matrix</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>strings tok = strsplit(names)
+scalar m = nelem(tok)
+set skip_missing off
+matrix X = {}
+series evp_o = obs
+loop i = 1..m
+  series evp_x = ev_gen(tok[i], vars)
+  X ~= {evp_x}
+endloop
+matrix okr = sumr(!ok(X)) .= 0
+X = selifr(X, okr)
+matrix tob = selifr({evp_o}, okr)
+scalar T = rows(X)
+matrix Xc = X .- meanc(X)
+matrix S = Xc'Xc / (T - 1)
+if !cov
+  matrix d = sqrt(diag(S))
+  S = S ./ (d * d')
+  Xc = Xc ./ d'
+endif
+matrix EV = {}
+matrix lam = eigensym(S, &amp;EV)
+# eigensym returns ascending order: reverse
+lam = mreverse(lam)
+EV = mreverse(EV')'
+# sign convention: largest loading of each vector positive
+loop j = 1..m
+  if EV[imaxc(abs(EV[, j])), j] &lt; 0
+    EV[, j] = -EV[, j]
+  endif
+endloop
+bundle r
+r.eigval = lam
+r.prop = lam / sumc(lam)
+r.cumprop = cum(r.prop)
+r.eigvec = EV
+r.scores = Xc * EV
+r.tobs = tob
+r.names = tok
+if !quiet
+  printf &quot;\nPrincipal Components Analysis\nComputed using: %s\nIncluded observations: %d\n\n&quot;, cov ? &quot;Covariance&quot; : &quot;Ordinary correlations&quot;, T
+  printf &quot;%-10s%14s%14s%14s\n&quot;, &quot;Number&quot;, &quot;Value&quot;, &quot;Proportion&quot;, &quot;Cumulative&quot;
+  loop j = 1..m
+    printf &quot;%-10d%14.6f%14.4f%14.4f\n&quot;, j, lam[j], r.prop[j], r.cumprop[j]
+  endloop
+  printf &quot;\nEigenvectors (loadings):\n%-12s&quot;, &quot;Variable&quot;
+  loop j = 1..m
+    printf &quot;%12s&quot;, sprintf(&quot;PC %d&quot;, j)
+  endloop
+  printf &quot;\n&quot;
+  loop i = 1..m
+    printf &quot;%-12s&quot;, toupper(tok[i])
+    loop j = 1..m
+      printf &quot;%12.6f&quot;, EV[i, j]
+    endloop
+    printf &quot;\n&quot;
+  endloop
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_pcscore" type="series">
+ <params count="2">
+  <param name="r" type="bundle">
+<description>ev_pcomp result</description>
+  </param>
+  <param name="j" type="int" min="1" default="1">
+<description>Component</description>
+  </param>
+ </params>
+<code>return ev__toseries(r.scores[, j], r.tobs)
+</code>
+</gretl-function>
+<gretl-function name="ev_kdplot" type="void">
+ <params count="2">
+  <param name="x" type="series">
+<description>Series</description>
+  </param>
+  <param name="out" type="string" optional="true">
+<description>Output file (default: display)</description>
+  </param>
+ </params>
+<code># kernel density estimate (Epanechnikov in EViews; gretl's default Gaussian kernel here)
+matrix K = kdensity(x)
+cnameset(K, defarray(&quot;x&quot;, &quot;Kernel density&quot;))
+string o = exists(out) ? out : &quot;display&quot;
+gnuplot 2 1 --matrix=K --with-lines --output=&quot;@o&quot;
+</code>
+</gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
  <params count="5">
   <param name="spec" type="string">
@@ -7505,6 +8041,151 @@ if accum
   R = cum(R)
 endif
 return R
+</code>
+</gretl-function>
+<gretl-function name="ev__glsdetrend" type="matrix" private="1">
+ <params count="3">
+  <param name="y" type="matrix" const="true"/>
+  <param name="trend" type="bool"/>
+  <param name="cbar" type="scalarref"/>
+ </params>
+<code># ERS quasi-differencing with c-bar = -7 (constant) or -13.5 (trend)
+scalar T = rows(y)
+cbar = trend ? -13.5 : -7
+scalar a = 1 + cbar / T
+matrix Z = ones(T, 1)
+if trend
+  Z ~= seq(1, T)'
+endif
+matrix yq = y[1] | (y[2:T] - a * y[1:T-1])
+matrix Zq = Z[1,] | (Z[2:T,] - a * Z[1:T-1,])
+matrix b = mols(yq, Zq)
+return y - Z * b
+</code>
+</gretl-function>
+<gretl-function name="ev__arspec" type="scalar" private="1">
+ <params count="3">
+  <param name="yd" type="matrix" const="true"/>
+  <param name="maxlag" type="int"/>
+  <param name="kopt" type="scalarref"/>
+ </params>
+<code># AR spectral density at frequency zero of GLS-detrended data, lag chosen by SIC
+scalar T = rows(yd)
+matrix dy = yd[2:T] - yd[1:T-1]
+scalar best = 1e300
+scalar f0 = NA
+loop k = 0..maxlag
+  matrix Z = yd[maxlag + 1:T - 1]
+  loop j = 1..k
+    Z ~= dy[maxlag + 1 - j:T - 1 - j]
+  endloop
+  matrix e = {}
+  matrix b = mols(dy[maxlag + 1:T - 1], Z, &amp;e)
+  scalar n = rows(e)
+  scalar s2 = e'e / n
+  scalar sic = log(s2) + cols(Z) * log(n) / n
+  if sic &lt; best
+    best = sic
+    kopt = k
+    scalar sb = 0
+    if k &gt; 0
+      sb = sumc(b[2:k+1])
+    endif
+    f0 = s2 / (1 - sb)^2
+  endif
+endloop
+return f0
+</code>
+</gretl-function>
+<gretl-function name="ev__smooth_ssr" type="scalar" private="1">
+ <params count="5">
+  <param name="th" type="matrix" const="true"/>
+  <param name="y" type="matrix" const="true"/>
+  <param name="m" type="string"/>
+  <param name="s" type="scalar"/>
+  <param name="fix" type="matrix" const="true"/>
+ </params>
+<code>matrix f = ev__smooth_run(th, y, m, s, fix)
+scalar r = sumc((y - f[, 1]).^2)
+return ok(r) ? r : 1e300
+</code>
+</gretl-function>
+<gretl-function name="ev__smooth_run" type="matrix" private="1">
+ <params count="5">
+  <param name="th" type="matrix" const="true"/>
+  <param name="y" type="matrix" const="true"/>
+  <param name="m" type="string"/>
+  <param name="s" type="scalar"/>
+  <param name="fix" type="matrix" const="true"/>
+ </params>
+<code># returns [one-step forecast, smoothed series]
+matrix par = 1 ./ (1 + exp(-th))
+loop i = 1..rows(par)
+  if ok(fix[i])
+    par[i] = fix[i]
+  endif
+endloop
+scalar T = rows(y)
+matrix F = zeros(T, 2)
+if m == &quot;s&quot;
+  scalar a = par[1]
+  scalar S = meanc(y[1:ceil((T + 1) / 2)])
+  loop t = 1..T
+    F[t, 1] = S
+    S = a * y[t] + (1 - a) * S
+    F[t, 2] = S
+  endloop
+elif m == &quot;d&quot;
+  scalar a = par[1]
+  scalar S = y[1]
+  scalar D = y[1]
+  loop t = 1..T
+    F[t, 1] = 2 * S - D + a / (1 - a) * (S - D)
+    S = a * y[t] + (1 - a) * S
+    D = a * S + (1 - a) * D
+    F[t, 2] = S
+  endloop
+else
+  scalar a = par[1]
+  scalar b = par[2]
+  scalar g = m == &quot;n&quot; ? 0 : par[3]
+  scalar L = y[1]
+  scalar Bt = 0
+  matrix Sc = m == &quot;m&quot; ? ones(s, 1) : zeros(s, 1)
+  if m != &quot;n&quot;
+    matrix y1 = y[1:s]
+    L = meanc(y1)
+    Bt = T &gt; 2 * s ? (meanc(y[s+1:2*s]) - L) / s : 0
+    Sc = m == &quot;m&quot; ? y1 / L : y1 - L
+  endif
+  loop t = 1..T
+    scalar k = (t - 1) % s + 1
+    if m == &quot;m&quot;
+      F[t, 1] = (L + Bt) * Sc[k]
+    elif m == &quot;a&quot;
+      F[t, 1] = L + Bt + Sc[k]
+    else
+      F[t, 1] = L + Bt
+    endif
+    scalar Lold = L
+    if m == &quot;m&quot;
+      L = a * y[t] / Sc[k] + (1 - a) * (L + Bt)
+      Bt = b * (L - Lold) + (1 - b) * Bt
+      Sc[k] = g * y[t] / L + (1 - g) * Sc[k]
+      F[t, 2] = (L + Bt) * Sc[k]
+    elif m == &quot;a&quot;
+      L = a * (y[t] - Sc[k]) + (1 - a) * (L + Bt)
+      Bt = b * (L - Lold) + (1 - b) * Bt
+      Sc[k] = g * (y[t] - L) + (1 - g) * Sc[k]
+      F[t, 2] = L + Bt + Sc[k]
+    else
+      L = a * y[t] + (1 - a) * (L + Bt)
+      Bt = b * (L - Lold) + (1 - b) * Bt
+      F[t, 2] = L + Bt
+    endif
+  endloop
+endif
+return F
 </code>
 </gretl-function>
 <sample-script>
