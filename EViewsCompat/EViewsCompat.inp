@@ -503,6 +503,525 @@ function series ev_fit (bundle b "ev_ls result")
 end function
 
 # -------------------------------------------------------------------
+# Forecast (eq.forecast), over the current sample as in EViews
+# -------------------------------------------------------------------
+
+function bundle ev_forecast (bundle b "ev_ls result",
+                             list vars "Series used (e.g. dataset)",
+                             bool dynamic[1] "Dynamic (1) or static (0)",
+                             bool quiet[0])
+    errorif(!inbundle(b, "spec") || !inbundle(b, "coeff"), "First argument must be an ev_ls result")
+    strings tok = strsplit(b.spec)
+    scalar k = b.k
+    series evf_y = ev_gen(tok[1], vars)
+    matrix X = {}
+    strings lab = array(0)
+    loop i = 2..nelem(tok)
+        if tolower(tok[i]) == "c"
+            series evf_r = 1
+        else
+            series evf_r = ev_gen(tok[i], vars)
+        endif
+        X ~= {evf_r}
+    endloop
+    errorif(cols(X) != k, "Could not rebuild the regressors of the equation")
+    matrix y = {evf_y}
+    series evf_o = obs
+    matrix tobs = {evf_o}
+    scalar T = rows(X)
+    matrix beta = b.coeff
+
+    # dynamic: lags of a plain dependent variable are replaced by forecasts
+    matrix lagcol = zeros(1, k)
+    if dynamic && regsub(tok[1], "^[A-Za-z_][A-Za-z0-9_]*$", "") == ""
+        loop i = 2..nelem(tok)
+            string tt = tolower(tok[i])
+            string pre = tolower(tok[1]) ~ "(-"
+            if strlen(tt) > strlen(pre) && substr(tt, 1, strlen(pre)) == pre
+                string num = regsub(substr(tt, strlen(pre) + 1, strlen(tt)), "\)$", "")
+                if regsub(num, "^[0-9]+$", "") == ""
+                    lagcol[i-1] = atof(num)
+                endif
+            endif
+        endloop
+    endif
+
+    matrix yf = mshape(NA, T, 1)
+    matrix se = mshape(NA, T, 1)
+    scalar s2 = b.sigma^2
+    loop t = 1..T
+        matrix x = X[t,]
+        loop j = 1..k
+            if lagcol[j] > 0 && t - lagcol[j] >= 1
+                if ok(yf[t - lagcol[j]])
+                    x[j] = yf[t - lagcol[j]]
+                endif
+            endif
+        endloop
+        if sum(!ok(x)) == 0
+            yf[t] = x * beta
+            se[t] = sqrt(s2 + qform(x, b.vcv))
+        endif
+    endloop
+
+    bundle f
+    f.depvar = b.depvar
+    f.dynamic = dynamic
+    f.yf = yf
+    f.se = se
+    f.actual = y
+    f.tobs = tobs
+    f.sample = sprintf("%s %s", obslabel($t1), obslabel($t2))
+    # evaluation where both actual and forecast exist
+    matrix m = ok(y) .* ok(yf)
+    f.nobs = sum(m)
+    if f.nobs > 0
+        matrix a = selifr(y, m)
+        matrix p = selifr(yf, m)
+        matrix e = p - a
+        scalar mse = meanc(e.^2)
+        f.rmse = sqrt(mse)
+        f.mae = meanc(abs(e))
+        f.mape = 100 * meanc(abs(e ./ a))
+        f.theil = f.rmse / (sqrt(meanc(a.^2)) + sqrt(meanc(p.^2)))
+        scalar sa = sqrt(meanc((a - meanc(a)).^2))
+        scalar sp = sqrt(meanc((p - meanc(p)).^2))
+        scalar r = (sa > 0 && sp > 0) ? meanc((a - meanc(a)) .* (p - meanc(p))) / (sa * sp) : 0
+        f.bias_prop = (meanc(p) - meanc(a))^2 / mse
+        f.var_prop = (sp - sa)^2 / mse
+        f.cov_prop = 2 * (1 - r) * sp * sa / mse
+    endif
+    if !quiet
+        ev_fprint(&f)
+    endif
+    return f
+end function
+
+function void ev_fprint (bundle *f)
+    printf "\nForecast: %sF\nActual: %s\n", f.depvar, f.depvar
+    printf "Forecast sample: %s\n", f.sample
+    printf "Method: %s\n", f.dynamic ? "Dynamic forecast" : "Static forecast"
+    printf "Included observations: %d\n", f.nobs
+    if f.nobs > 0
+        printf "%-34s%14.6f\n", "Root Mean Squared Error", f.rmse
+        printf "%-34s%14.6f\n", "Mean Absolute Error", f.mae
+        printf "%-34s%14.6f\n", "Mean Abs. Percent Error", f.mape
+        printf "%-34s%14.6f\n", "Theil Inequality Coef.", f.theil
+        printf "%-34s%14.6f\n", "     Bias Proportion", f.bias_prop
+        printf "%-34s%14.6f\n", "     Variance Proportion", f.var_prop
+        printf "%-34s%14.6f\n", "     Covariance Proportion", f.cov_prop
+    endif
+end function
+
+function series ev_fcast_series (bundle f "ev_forecast result")
+    return ev__toseries(f.yf, f.tobs)
+end function
+
+function series ev_fcast_se (bundle f "ev_forecast result")
+    return ev__toseries(f.se, f.tobs)
+end function
+
+function void ev_fplot (bundle *f, string fname[null])
+    # forecast with +/- 2 S.E. bands, and the actual series
+    matrix M = f.yf ~ (f.yf + 2 * f.se) ~ (f.yf - 2 * f.se) ~ f.actual
+    cnameset(M, defarray("Forecast", "+2 S.E.", "-2 S.E.", "Actual"))
+    string out = exists(fname) ? fname : "display"
+    gnuplot 1 2 3 4 --matrix=M --time-series --with-lines --single-yaxis --output="@out" \
+      {set title "Forecast with +/- 2 S.E."; set style line 2 dt 2; set style line 3 dt 2;}
+end function
+
+# -------------------------------------------------------------------
+# VAR objects:  ev_varest("1 2 y1 y2 @ c x", dataset)
+# -------------------------------------------------------------------
+
+function bundle ev_varest (string spec "Lag pairs, endogenous, then exogenous after the at-sign",
+                           list vars "Series used (e.g. dataset)",
+                           bool quiet[0],
+                           string names[null] "Display names for the variables, space separated")
+    # Plain series names are used directly, so lags reach before the sample start
+    # as in gretl's var. Expressions are evaluated inside this function, where
+    # pre-sample values are not available: create them as series first if that matters.
+    string AT = "@"
+    strings LB = exists(names) ? strsplit(names) : array(0)
+    scalar nexpr = 0
+    strings parts = strsplit(spec, AT)
+    errorif(nelem(parts) > 2, "Use the at-sign once, before the exogenous variables")
+    strings L = strsplit(parts[1])
+    # leading integers are lag pairs
+    matrix lagv = {}
+    scalar i0 = 1
+    loop while i0 + 1 <= nelem(L) && regsub(L[i0], "^[0-9]+$", "") == "" && regsub(L[i0+1], "^[0-9]+$", "") == ""
+        scalar a = atof(L[i0])
+        scalar z = atof(L[i0+1])
+        errorif(a < 1 || z < a, "Lag pairs must be like 1 2 (from 1 to 2)")
+        lagv ~= seq(a, z)
+        i0 += 2
+    endloop
+    errorif(cols(lagv) == 0, "Start the specification with lag pairs, e.g. 1 2")
+    lagv = values(lagv')'
+    errorif(nelem(L) - i0 + 1 < 1, "No endogenous variables")
+    list Y = null
+    strings ylab = array(0)
+    strings ytok = array(0)
+    strings xtok = array(0)
+    loop i = i0..nelem(L)
+        matrix pp = instrings(varnames(vars), L[i])
+        if rows(pp) > 0
+            list Y += vars[pp[1]]
+        else
+            string v = sprintf("evv_y%d", i)
+            series @v = ev_gen(L[i], vars)
+            list Y += @v
+            nexpr++
+        endif
+        scalar li = nelem(ytok) + 1
+        ylab += nelem(LB) >= li ? toupper(LB[li]) : toupper(L[i])
+        ytok += L[i]
+    endloop
+    list X = null
+    strings xlab = array(0)
+    scalar hasc = nelem(parts) == 1   # no exogenous part: constant by default
+    if nelem(parts) == 2
+        strings R = strsplit(parts[2])
+        loop i = 1..nelem(R)
+            if tolower(R[i]) == "c"
+                hasc = 1
+            else
+                matrix pp = instrings(varnames(vars), R[i])
+                if rows(pp) > 0
+                    list X += vars[pp[1]]
+                else
+                    string v = sprintf("evv_x%d", i)
+                    series @v = ev_gen(R[i], vars)
+                    list X += @v
+                    nexpr++
+                endif
+                scalar li = nelem(ytok) + nelem(xtok) + 1
+                xlab += nelem(LB) >= li ? toupper(LB[li]) : toupper(R[i])
+                xtok += R[i]
+            endif
+        endloop
+    endif
+    scalar n0 = $nobs
+    if nelem(X) > 0
+        if hasc
+            var lagv Y ; X --silent
+        else
+            var lagv Y ; X --silent --nc
+        endif
+    else
+        if hasc
+            var lagv Y --silent
+        else
+            var lagv Y --silent --nc
+        endif
+    endif
+    bundle sys = $system
+    if nexpr > 0 && !quiet
+        printf "Note: %d variable(s) given as expressions lose their pre-sample lags;\n", nexpr
+        printf "      create them as series first to use the full sample.\n"
+    endif
+
+    bundle b
+    b.spec = spec
+    b.sys = sys
+    b.ylab = ylab
+    b.xlab = xlab
+    b.ytok = ytok
+    b.xtok = xtok
+    b.lags = lagv
+    b.hasc = hasc
+    b.n = nelem(Y)
+    b.T = sys.T
+    b.k = sys.ncoeff
+    b.coeff = sys.coeff
+    b.adjusted = sys.T < n0
+    b.sample = sprintf("%s %s", obslabel(sys.t1), obslabel(sys.t2))
+    b.estdate = strftime($now[1], "%m/%d/%y   Time: %H:%M")
+    # coefficient labels in gretl's order: const, lagv of each endogenous, exogenous
+    strings clab = array(0)
+    if hasc
+        clab += "C"
+    endif
+    loop j = 1..b.n
+        loop l = 1..cols(lagv)
+            clab += sprintf("%s(-%d)", ylab[j], lagv[l])
+        endloop
+    endloop
+    loop j = 1..nelem(xlab)
+        clab += xlab[j]
+    endloop
+    errorif(nelem(clab) != b.k, "Internal error: coefficient labels do not match")
+    b.clab = clab
+
+    # per-equation statistics
+    scalar T = b.T
+    scalar k = b.k
+    matrix E = sys.uhat
+    matrix Ym = sys.Y
+    matrix ssr = sumc(E.^2)
+    matrix dev = Ym .- meanc(Ym)
+    matrix sst = sumc(dev.^2)
+    b.ssr = ssr
+    b.rsq = 1 - ssr ./ sst
+    b.adjrsq = 1 - (1 - b.rsq) * (T - 1) / (T - k)
+    b.seeq = sqrt(ssr / (T - k))
+    b.se = sqrt(diag(sys.xtxinv)) * b.seeq       # k x n
+    b.tstat = b.coeff ./ b.se
+    b.Fstat = hasc ? (b.rsq / (k - 1)) ./ ((1 - b.rsq) / (T - k)) : mshape(NA, 1, b.n)
+    b.lnl_eq = -T / 2 * (1 + log(2 * $pi) + log(ssr / T))
+    b.aic_eq = -2 * b.lnl_eq / T + 2 * k / T
+    b.sc_eq = -2 * b.lnl_eq / T + k * log(T) / T
+    b.meany = meanc(Ym)
+    b.sdy = sqrt(sst / (T - 1))
+    matrix S = E'E / T
+    b.det_adj = det(E'E / (T - k))
+    b.det = det(S)
+    b.lnl = sys.lnl
+    b.aic = -2 * b.lnl / T + 2 * b.n * k / T
+    b.sc = -2 * b.lnl / T + b.n * k * log(T) / T
+    if !quiet
+        ev_varprint(&b)
+    endif
+    return b
+end function
+
+function void ev_varprint (bundle *b)
+    errorif(!inbundle(b, "sys"), "Not an ev_varest result")
+    scalar n = b.n
+    printf "\nVector Autoregression Estimates\nDate: %s\n", b.estdate
+    printf "Sample%s: %s\n", b.adjusted ? " (adjusted)" : "", b.sample
+    printf "Included observations: %d%s\n", b.T, b.adjusted ? " after adjustments" : ""
+    printf "Standard errors in ( ) & t-statistics in [ ]\n\n"
+    scalar w = 22 + 16 * n
+    ev__line(w)
+    printf "%-22s", ""
+    loop j = 1..n
+        printf "%16s", b.ylab[j]
+    endloop
+    printf "\n"
+    ev__line(w)
+    # EViews order: lags first, then C, then exogenous
+    matrix ord = {}
+    scalar c0 = b.hasc ? 2 : 1
+    scalar nl = b.n * cols(b.lags)
+    ord ~= seq(c0, c0 + nl - 1)
+    if b.hasc
+        ord ~= 1
+    endif
+    if b.k > nl + b.hasc
+        ord ~= seq(c0 + nl, b.k)
+    endif
+    loop r = 1..cols(ord)
+        scalar i = ord[r]
+        printf "%-22s", b.clab[i]
+        loop j = 1..n
+            printf "%16.6f", b.coeff[i,j]
+        endloop
+        printf "\n%-22s", ""
+        loop j = 1..n
+            printf "%16s", sprintf("(%.5f)", b.se[i,j])
+        endloop
+        printf "\n%-22s", ""
+        loop j = 1..n
+            printf "%16s", sprintf("[%.5f]", b.tstat[i,j])
+        endloop
+        printf "\n\n"
+    endloop
+    ev__line(w)
+    strings nm = defarray("R-squared", "Adj. R-squared", "Sum sq. resids", "S.E. equation", \
+      "F-statistic", "Log likelihood", "Akaike AIC", "Schwarz SC", "Mean dependent", "S.D. dependent")
+    matrices st = defarray(b.rsq, b.adjrsq, b.ssr, b.seeq, b.Fstat, b.lnl_eq, b.aic_eq, b.sc_eq, b.meany, b.sdy)
+    loop r = 1..nelem(nm)
+        printf "%-22s", nm[r]
+        matrix v = st[r]
+        loop j = 1..n
+            printf "%16.6f", v[j]
+        endloop
+        printf "\n"
+    endloop
+    ev__line(w)
+    printf "%-44s%16.6g\n", "Determinant resid covariance (dof adj.)", b.det_adj
+    printf "%-44s%16.6g\n", "Determinant resid covariance", b.det
+    printf "%-44s%16.6f\n", "Log likelihood", b.lnl
+    printf "%-44s%16.6f\n", "Akaike information criterion", b.aic
+    printf "%-44s%16.6f\n", "Schwarz criterion", b.sc
+    ev__line(w)
+end function
+
+function matrix ev_vargranger (bundle b "ev_varest result", bool quiet[0])
+    # VAR Granger causality / block exogeneity Wald tests (chi-square), EViews style.
+    # Returns rows: dependent j, excluded i (0 = all), chi2, df, p
+    scalar n = b.n
+    scalar p = cols(b.lags)
+    scalar c0 = b.hasc ? 2 : 1
+    matrix V0 = b.sys.xtxinv
+    matrix out = {}
+    if !quiet
+        printf "\nVAR Granger Causality/Block Exogeneity Wald Tests\nSample: %s\nIncluded observations: %d\n", b.sample, b.T
+    endif
+    loop j = 1..n
+        if !quiet
+            printf "\nDependent variable: %s\n\n%-22s%14s%8s%10s\n", b.ylab[j], "Excluded", "Chi-sq", "df", "Prob."
+        endif
+        scalar s2 = b.seeq[j]^2
+        matrix allidx = {}
+        loop i = 1..n
+            if i != j
+                matrix idx = seq(c0 + (i - 1) * p, c0 + i * p - 1)
+                allidx ~= idx
+                matrix bb = b.coeff[idx, j]
+                scalar W = qform(bb', inv(s2 * V0[idx, idx]))
+                out |= {j, i, W, p, pvalue(X, p, W)}
+                if !quiet
+                    printf "%-22s%14.6f%8d%10.4f\n", b.ylab[i], W, p, pvalue(X, p, W)
+                endif
+            endif
+        endloop
+        if n > 1
+            matrix bb = b.coeff[allidx, j]
+            scalar W = qform(bb', inv(s2 * V0[allidx, allidx]))
+            out |= {j, 0, W, cols(allidx), pvalue(X, cols(allidx), W)}
+            if !quiet
+                printf "%-22s%14.6f%8d%10.4f\n", "All", W, cols(allidx), pvalue(X, cols(allidx), W)
+            endif
+        endif
+    endloop
+    return out
+end function
+
+function matrix ev_varirf (bundle b "ev_varest result", int h[1::10] "Horizon", bool quiet[0])
+    # Impulse responses (Cholesky, one S.D. innovations). Column (s-1)*n+t holds
+    # the response of variable t to a shock in variable s.
+    scalar n = b.n
+    set horizon h
+    matrix R = {}
+    loop s = 1..n
+        loop t = 1..n
+            matrix r = irf(t, s, 0, b.sys)
+            R ~= r[1:h, 1]
+        endloop
+    endloop
+    if !quiet
+        loop t = 1..n
+            printf "\nResponse of %s:\n%-8s", b.ylab[t], "Period"
+            loop s = 1..n
+                printf "%16s", b.ylab[s]
+            endloop
+            printf "\n"
+            loop i = 1..h
+                printf "%-8d", i
+                loop s = 1..n
+                    printf "%16.6f", R[i, (s - 1) * n + t]
+                endloop
+                printf "\n"
+            endloop
+        endloop
+        printf "\nCholesky ordering: "
+        loop s = 1..n
+            printf "%s ", b.ylab[s]
+        endloop
+        printf "\n"
+    endif
+    return R
+end function
+
+function void ev_varirfplot (bundle b "ev_varest result", int h[1::10], string fname[null])
+    # grid of impulse-response graphs: row = responding variable, column = shock
+    matrix R = ev_varirf(b, h, 1)
+    scalar n = b.n
+    strings plots = array(0)
+    loop t = 1..n
+        loop s = 1..n
+            matrix M = R[, (s - 1) * n + t]
+            string ttl = sprintf("Response of %s to %s", b.ylab[t], b.ylab[s])
+            string buf = ""
+            gnuplot 1 --matrix=M --time-series --with-lines --outbuf=buf \
+              {set title "@ttl" font ",9"; unset key; set xlabel ""; set ylabel ""; set xzeroaxis lt 1 lc rgb "#c0392b";}
+            plots += buf
+        endloop
+    endloop
+    string out = exists(fname) ? fname : "display"
+    gridplot plots --rows=n --width=900 --height=700 --fontsize=9 --output="@out"
+end function
+
+function matrix ev_vardecomp (bundle b "ev_varest result", int h[1::10], bool quiet[0])
+    # Variance decomposition in percent; block t holds rows 1..h for variable t
+    scalar n = b.n
+    set horizon h
+    matrix D = {}
+    loop t = 1..n
+        matrix d = fevd(t, 0, b.sys)
+        D |= 100 * d[1:h, 1:n]
+    endloop
+    if !quiet
+        matrix R = ev_varirf(b, h, 1)
+        loop t = 1..n
+            printf "\nVariance Decomposition of %s:\n%-8s%14s", b.ylab[t], "Period", "S.E."
+            loop s = 1..n
+                printf "%14s", b.ylab[s]
+            endloop
+            printf "\n"
+            loop i = 1..h
+                scalar v = 0
+                loop s = 1..n
+                    v += sumc(R[1:i, (s - 1) * n + t].^2)
+                endloop
+                printf "%-8d%14.6f", i, sqrt(v)
+                loop s = 1..n
+                    printf "%14.4f", D[(t - 1) * h + i, s]
+                endloop
+                printf "\n"
+            endloop
+        endloop
+        printf "\nCholesky ordering: "
+        loop s = 1..n
+            printf "%s ", b.ylab[s]
+        endloop
+        printf "\n"
+    endif
+    return D
+end function
+
+function void ev_varlaglen (bundle b "ev_varest result", list vars "Series used (e.g. dataset)",
+                            int maxlag[1::8])
+    # lag length criteria (gretl's var --lagselect)
+    list Y = null
+    loop i = 1..b.n
+        string v = sprintf("evl_y%d", i)
+        series @v = ev_gen(b.ytok[i], vars)
+        list Y += @v
+    endloop
+    list X = null
+    loop i = 1..nelem(b.xtok)
+        string v = sprintf("evl_x%d", i)
+        series @v = ev_gen(b.xtok[i], vars)
+        list X += @v
+    endloop
+    printf "\nVAR Lag Order Selection Criteria\nEndogenous variables: "
+    loop i = 1..b.n
+        printf "%s ", b.ylab[i]
+    endloop
+    printf "\n"
+    if nelem(X) > 0
+        if b.hasc
+            var maxlag Y ; X --lagselect
+        else
+            var maxlag Y ; X --lagselect --nc
+        endif
+    elif b.hasc
+        var maxlag Y --lagselect
+    else
+        var maxlag Y --lagselect --nc
+    endif
+end function
+
+function series ev_varresid (bundle b "ev_varest result", int i[1::1] "Equation number")
+    matrix t = seq(b.sys.t1, b.sys.t2)'
+    return ev__toseries(b.sys.uhat[, i], t)
+end function
+
+# -------------------------------------------------------------------
 # GUI entry (Model menu) and bundle roles
 # -------------------------------------------------------------------
 

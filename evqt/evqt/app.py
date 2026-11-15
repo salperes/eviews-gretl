@@ -8,7 +8,7 @@ import sys
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import (QAction, QColor, QPalette, QFont, QFontDatabase, QIcon, QKeySequence,
                            QPainter, QPen, QPixmap, QTextCursor)
-from PySide6.QtWidgets import (QApplication, QComboBox, QSizePolicy, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QApplication, QComboBox, QSizePolicy, QTabBar, QSplitter, QAbstractItemView, QDialog, QDialogButtonBox,
                                QDockWidget, QFileDialog, QFormLayout, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QMainWindow, QMdiArea, QMenu, QMessageBox,
@@ -34,7 +34,7 @@ def _icon(kind: str) -> QIcon:
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    colors = {"series": "#2e7d32", "equation": "#1565c0", "group": "#6a1b9a",
+    colors = {"series": "#2e7d32", "equation": "#1565c0", "group": "#6a1b9a", "var": "#ad1457",
               "scalar": "#ef6c00", "string": "#5d4037", "bundle": "#455a64", "workfile": "#00838f"}
     c = QColor(colors.get(kind, "#455a64"))
     p.setPen(QPen(c.darker(130), 1))
@@ -45,7 +45,7 @@ def _icon(kind: str) -> QIcon:
         p.drawPolyline([(QPixmapPoint(x, y)) for x, y in ((4, 12), (7, 7), (10, 10), (14, 4))])
     else:
         glyph = {"equation": "=", "group": "G", "scalar": "#", "string": "a", "bundle": "b",
-                 "workfile": "W"}.get(kind, "?")
+                 "workfile": "W", "var": "V", "forecast": "F"}.get(kind, "?")
         f = QFont()
         f.setBold(True)
         f.setPixelSize(12)
@@ -172,8 +172,14 @@ class ObjectWindow(QWidget):
         self.image.set_image(QPixmap(path))
         self.stack.setCurrentWidget(self._scroll)
 
-    def show_table(self, header: list[str], rows: list[list[str]]):
+    def show_table(self, header: list[str], rows: list[list[str]], obsno: list[int] | None = None):
         t = self.table
+        try:
+            t.itemChanged.disconnect(self._cell_changed)
+        except (RuntimeError, TypeError):
+            pass
+        self._obsno = obsno
+        self._header = header
         t.clear()
         t.setColumnCount(len(header) - 1)
         t.setRowCount(len(rows))
@@ -185,7 +191,33 @@ class ObjectWindow(QWidget):
                 it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 t.setItem(i, j, it)
         t.resizeColumnsToContents()
+        editable = bool(getattr(self, "editing", False) and obsno)
+        t.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+                          | QAbstractItemView.AnyKeyPressed if editable else QAbstractItemView.NoEditTriggers)
+        t.setStyleSheet("QTableWidget { background: #fffdf0; }" if editable else "")
+        if editable:
+            t.itemChanged.connect(self._cell_changed)
         self.stack.setCurrentWidget(t)
+
+    def _cell_changed(self, item: QTableWidgetItem):
+        """Write an edited cell back to gretl (Edit+/- mode)."""
+        name = self._header[item.column() + 1]
+        obs = self._obsno[item.row()]
+        try:
+            self.main.engine.set_value(name, obs, item.text())
+            self.main.log_append(f"> {name}[{self.table.verticalHeaderItem(item.row()).text()}] = {item.text()}")
+        except (GretlError, ValueError) as e:
+            self.main.error(f"Not a number: {item.text()!r}" if isinstance(e, ValueError) else str(e))
+            self.spreadsheet()
+            return
+        self.main.refresh_views(exclude=self)
+
+    def toggle_edit(self):
+        self.editing = not getattr(self, "editing", False)
+        self.spreadsheet()
+
+    def spreadsheet(self):
+        pass
 
     def run_text(self, cmd: str):
         try:
@@ -239,6 +271,7 @@ class SeriesWindow(ObjectWindow):
             ("|", None),
             ("Name", lambda: main.rename_object(name)),
             ("Freeze", self.freeze),
+            ("Edit+/-", self.toggle_edit),
             ("Sample", main.sample_dialog),
             ("Genr", lambda: main.genr_dialog()),
         ]))
@@ -246,8 +279,8 @@ class SeriesWindow(ObjectWindow):
 
     def spreadsheet(self):
         try:
-            h, rows = self.main.engine.series_values([self.name])
-            self.show_table(h, rows)
+            h, rows, obs = self.main.engine.series_values([self.name], with_obs=True)
+            self.show_table(h, rows, obs)
         except GretlError as e:
             self.main.error(str(e))
 
@@ -291,6 +324,7 @@ class GroupWindow(ObjectWindow):
             ("|", None),
             ("Name", lambda: main.rename_object(name)),
             ("Freeze", self.freeze),
+            ("Edit+/-", self.toggle_edit),
             ("Sample", main.sample_dialog),
         ]))
         self.spreadsheet()
@@ -301,8 +335,8 @@ class GroupWindow(ObjectWindow):
 
     def spreadsheet(self):
         try:
-            h, rows = self.main.engine.series_values([self.name])
-            self.show_table(h, rows)
+            h, rows, obs = self.main.engine.series_values([self.name], with_obs=True)
+            self.show_table(h, rows, obs)
         except GretlError as e:
             self.main.error(str(e))
 
@@ -328,7 +362,7 @@ class EquationWindow(ObjectWindow):
             ("Name", lambda: main.rename_object(name)),
             ("Freeze", self.freeze),
             ("Estimate", self.estimate),
-            ("Forecast", None),
+            ("Forecast", self.forecast),
             ("Stats", self.output),
             ("Resids", self.afr),
         ]))
@@ -367,6 +401,122 @@ class EquationWindow(ObjectWindow):
         spec = "".join(self.main.engine.run(f'printf "%s\\n", {self.name}.spec')).strip()
         self.main.equation_dialog(name=self.name, spec=spec, window=self)
 
+    def forecast(self):
+        """EViews Forecast dialog: series names, method and forecast sample."""
+        dep = "".join(self.main.engine.run(f'printf "%s\\n", {self.name}.depvar')).strip()
+        base = re.sub(r"\W+", "_", dep.lower()).strip("_") or "y"
+        wf = self.main.engine.wf
+        fname, sename = QLineEdit(base + "f"), QLineEdit()
+        sename.setPlaceholderText("optional")
+        method = QComboBox()
+        method.addItems(["Dynamic forecast", "Static forecast"])
+        smp = QLineEdit(f"{wf.sample_first} {wf.sample_last}")
+        d = _form_dialog(self, f"Forecast: {self.name.upper()}", [
+            (f"Series to forecast: {dep}", QLabel("")), ("Forecast name:", fname),
+            ("S.E. (optional):", sename), ("Method:", method), ("Forecast sample:", smp)])
+        if not d or not fname.text().strip():
+            return
+        m = self.main
+        if smp.text().strip() != f"{wf.sample_first} {wf.sample_last}":
+            m.execute("smpl " + m.eviews_dates(smp.text().strip()))
+        try:
+            text, png = m.engine.forecast(self.name, fname.text().strip(), sename.text().strip(),
+                                          method.currentIndex() == 0)
+        except GretlError as e:
+            m.error(str(e))
+            return
+        m.forecast_window(f"Forecast: {fname.text().strip()}", text, png)
+        m.refresh()
+
+
+class VarWindow(ObjectWindow):
+    def __init__(self, main, name):
+        super().__init__(main, f"Var: {name.upper()}   Workfile: {main.wf_title()}")
+        self.name = name
+        self.set_toolbar(_toolbar([
+            ("View", [("Estimation Output", self.output),
+                      ("Lag Structure: Granger Causality / Block Exogeneity Tests", self.granger),
+                      ("Lag Structure: Lag Length Criteria...", self.laglen),
+                      ("Impulse Response...", self.impulse),
+                      ("Variance Decomposition...", self.decomp),
+                      ("Residuals: Graphs", self.resid_graph)]),
+            ("Proc", [("Make Residuals", self.make_resids)]),
+            ("Object", [("Delete", lambda: main.delete_object(name))]),
+            ("|", None),
+            ("Name", lambda: main.rename_object(name)),
+            ("Freeze", self.freeze),
+            ("Estimate", self.estimate),
+            ("Stats", self.output),
+            ("Impulse", self.impulse),
+            ("Resids", self.resid_graph),
+        ]))
+        self.output()
+
+    def output(self):
+        self.run_text(f"ev_varprint(&{self.name})")
+
+    def granger(self):
+        self.run_text(f"ev_vargranger({self.name})")
+
+    def laglen(self):
+        k, ok = QInputDialog.getInt(self, "Lag Specification", "Lags to include:", 8, 1, 40)
+        if ok:
+            self.run_text(f"ev_varlaglen({self.name}, dataset, {k})")
+
+    def _horizon(self, title):
+        return QInputDialog.getInt(self, title, "Periods:", 10, 1, 200)
+
+    def impulse(self):
+        h, ok = self._horizon("Impulse Responses")
+        if ok:
+            path = self.main.engine.tmp_png()
+            try:
+                self.main.engine.run(f'ev_varirfplot({self.name}, {h}, "{path}")', check=True)
+                self.show_image(path)
+            except GretlError as e:
+                self.main.error(str(e))
+
+    def decomp(self):
+        h, ok = self._horizon("Variance Decomposition")
+        if ok:
+            self.run_text(f"ev_vardecomp({self.name}, {h})")
+
+    def resid_graph(self):
+        e = self.main.engine
+        try:
+            e.run(f"matrix ev_M = {self.name}.sys.uhat\ncnameset(ev_M, {self.name}.ylab)", check=True)
+            self.run_plot("gnuplot --matrix=ev_M --time-series --with-lines")
+        except GretlError as ex:
+            self.main.error(str(ex))
+
+    def make_resids(self):
+        e = self.main.engine
+        n = int(float("".join(e.run(f'printf "%d\\n", {self.name}.n')).strip() or 0))
+        cmds = [f"series resid{k:02d} = ev_varresid({self.name}, {k})" for k in range(1, n + 1)]
+        self.main.execute("\n".join(cmds), hansl=True)
+
+    def estimate(self):
+        spec = "".join(self.main.engine.run(f'printf "%s\\n", {self.name}.spec')).strip()
+        self.main.var_dialog(name=self.name, spec=spec)
+
+
+class ForecastWindow(ObjectWindow):
+    """Forecast graph with +/- 2 S.E. bands above the evaluation table."""
+
+    def __init__(self, main, title, text, png):
+        super().__init__(main, title)
+        self.set_toolbar(_toolbar([("Freeze", self.freeze)]))
+        split = QSplitter(Qt.Vertical)
+        split.addWidget(self.image)
+        split.addWidget(self.text)
+        self.image.show()      # they were hidden while inside the stacked widget
+        self.text.show()
+        split.setSizes([360, 200])
+        self.stack.addWidget(split)
+        self.stack.setCurrentWidget(split)
+        self.image.set_image(QPixmap(png))
+        self.text.setPlainText(text)
+
 
 # ---------------------------------------------------------------------------
 # Workfile window
@@ -392,8 +542,8 @@ class WorkfileWindow(QWidget):
             ("Freeze", None),
             ("Details+/-", self.toggle_details),
             ("Show", main.show_dialog),
-            ("Fetch", None),
-            ("Store", None),
+            ("Fetch", main.fetch_dialog),
+            ("Store", self.store_selected),
             ("Delete", self.delete_selected),
             ("Genr", main.genr_dialog),
             ("Sample", main.sample_dialog),
@@ -421,18 +571,26 @@ class WorkfileWindow(QWidget):
         self.list.customContextMenuRequested.connect(self.context_menu)
         lay.addWidget(self.list, 1)
         self.details = False
-        self.tab_lbl = QLabel("  Untitled  /  New Page")
-        self.tab_lbl.setObjectName("wftab")
-        lay.addWidget(self.tab_lbl)
+        # page tabs, as at the bottom of an EViews workfile window
+        self.tabs = QTabBar()
+        self.tabs.setObjectName("wftabs")
+        self.tabs.setShape(QTabBar.RoundedSouth)
+        self.tabs.setExpanding(False)
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBarClicked.connect(self._tab_clicked)
+        self.tabs.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tabs.customContextMenuRequested.connect(self._tab_menu)
+        lay.addWidget(self.tabs)
 
     def populate(self):
         wf = self.main.engine.wf
         self.range_lbl.setText(f"Range:  {wf.first} {wf.last}  --  {wf.nobs_full} obs")
         self.sample_lbl.setText(f"Sample: {wf.sample_first} {wf.sample_last}  --  {wf.sample_nobs} obs")
         self.list.clear()
+        objs = [(b, wf.kinds.get(b, "bundle")) for b in wf.bundles
+                if wf.kinds.get(b) in ("equation", "var") and wf.obj_page.get(b, wf.page) == wf.page]
         items = [(n, "series") for n in wf.series] + [(n, "group") for n in wf.lists] \
-            + [(n, "equation") for n in wf.bundles] + [(n, "scalar") for n in wf.scalars] \
-            + [(n, "string") for n in wf.strings]
+            + objs + [(n, "scalar") for n in wf.scalars] + [(n, "string") for n in wf.strings]
         for name, kind in sorted(items, key=lambda x: x[0].lower()):
             label = name.lower()
             if self.details and kind == "scalar":
@@ -443,7 +601,45 @@ class WorkfileWindow(QWidget):
             it.setData(Qt.UserRole, (name, kind))
             it.setToolTip(f"{kind}: {name}")
             self.list.addItem(it)
-        self.tab_lbl.setText(f"  {os.path.basename(wf.path) if wf.path else 'Untitled'}  ")
+        self._fill_tabs()
+
+    def _fill_tabs(self):
+        wf = self.main.engine.wf
+        self.tabs.blockSignals(True)
+        while self.tabs.count():
+            self.tabs.removeTab(0)
+        for p in wf.pages:
+            self.tabs.addTab(p)
+        self.tabs.addTab("New Page")
+        self.tabs.setCurrentIndex(wf.pages.index(wf.page))
+        self.tabs.blockSignals(False)
+
+    def _tab_clicked(self, i):
+        wf = self.main.engine.wf
+        if i < 0:
+            return
+        if i == len(wf.pages):
+            self.main.new_page_dialog()
+        else:
+            self.main.select_page(wf.pages[i])
+
+    def _tab_menu(self, pos):
+        i = self.tabs.tabAt(pos)
+        wf = self.main.engine.wf
+        if i < 0 or i >= len(wf.pages):
+            return
+        page = wf.pages[i]
+        m = QMenu(self)
+        m.addAction("Rename Page...", lambda: self.main.rename_page_dialog(page))
+        m.addAction("Delete Page", lambda: self.main.delete_page(page))
+        m.exec(self.tabs.mapToGlobal(pos))
+
+    def store_selected(self):
+        names = [n for n, k in self.selected() if k == "series"]
+        if not names:
+            QMessageBox.information(self, "Store", "Select one or more series in the workfile first.")
+            return
+        self.main.store_dialog(names)
 
     def toggle_details(self):
         self.details = not self.details
@@ -589,6 +785,9 @@ class MainWindow(QMainWindow):
         a.setShortcut(QKeySequence.Open)
         f.addAction("Save As (.gdt)...", self.save_as)
         f.addSeparator()
+        f.addAction("Fetch from Database...", self.fetch_dialog)
+        f.addAction("New Page...", self.new_page_dialog)
+        f.addSeparator()
         f.addAction("Run Program (.prg)...", self.run_program_dialog)
         f.addSeparator()
         f.addAction("Exit", self.close)
@@ -600,6 +799,7 @@ class MainWindow(QMainWindow):
         q.addAction("Series Statistics...", self.stats_dialog)
         q.addSeparator()
         q.addAction("Estimate Equation...", lambda: self.equation_dialog())
+        q.addAction("Estimate VAR...", lambda: self.var_dialog())
         w = mb.addMenu("&Window")
         w.addAction("Cascade", self.mdi.cascadeSubWindows)
         w.addAction("Tile", self.mdi.tileSubWindows)
@@ -675,6 +875,8 @@ class MainWindow(QMainWindow):
         if not hansl:
             line = self.fix_case(line)
         before = set(self.engine.wf.bundles)
+        if not hansl and self._native_command(line):
+            return
         if hansl:
             cmds = [line]
         else:
@@ -697,7 +899,20 @@ class MainWindow(QMainWindow):
                     self.graph_window(c, "Graph: " + " ".join(c.split()[1:3]))
                 rest = [c for c in cmds if not c.startswith("gnuplot")]
                 text = "\n".join(rest)
+            # graphs drawn by package functions (VAR impulse, forecast) go to temp files
+            pngs = []
+
+            def _png(m):
+                pngs.append(self.engine.tmp_png())
+                return f'"{pngs[-1]}"'
+            text = re.sub(r'"plot\d+\.png"', _png, text)
             out = self.engine.run(text) if text.strip() else []
+            for pth in pngs:
+                if os.path.exists(pth):
+                    w = ObjectWindow(self, "Graph")
+                    w.set_toolbar(_toolbar([("Freeze", w.freeze)]))
+                    w.show_image(pth)
+                    self.add_window(pth, w, (760, 560))
             if out:
                 self.log_append("\n".join(out))
             if self.engine.is_error(out):
@@ -710,6 +925,186 @@ class MainWindow(QMainWindow):
         for b in new:
             if b.startswith("eq_untitled"):
                 self.open_object((b, "equation"))
+        self.refresh_views()
+
+    def _native_command(self, line: str) -> bool:
+        """Commands handled by the interface itself (workfile pages, opening files)."""
+        mo = re.match(r"(\w+)(?:\(([^)]*)\))?\s*(.*)", line.strip())
+        if not mo:
+            return False
+        cmd, opts, rest = mo.group(1).lower(), mo.group(2) or "", mo.group(3).split()
+        try:
+            if cmd == "wfopen" and rest:
+                self.open_file(os.path.expanduser(" ".join(rest).strip('"')))
+            elif cmd == "pagecreate":
+                name = tr._opts(opts).get("page") or f"untitled{len(self.engine.wf.pages) + 1}"
+                if rest and rest[0].lower() == "u":
+                    self.engine.new_page(name, "u", "", rest[1])
+                else:
+                    self.engine.new_page(name, rest[0].lower(), rest[1], rest[2])
+            elif cmd == "pageselect" and rest:
+                self.select_page(rest[0])
+                return True
+            elif cmd == "pagedelete":
+                self.delete_page(rest[0] if rest else self.engine.wf.page, ask=False)
+                return True
+            elif cmd == "pagerename" and len(rest) >= 2:
+                self.engine.rename_page(rest[0], rest[1])
+            else:
+                return False
+        except (GretlError, IndexError, ValueError) as e:
+            self.error(str(e))
+            return True
+        self.show_workfile()
+        return True
+
+    def refresh_views(self, exclude=None):
+        """Re-read open spreadsheets after data changed."""
+        for w in list(self.windows.values()):
+            if w is exclude or not isinstance(w, (SeriesWindow, GroupWindow)):
+                continue
+            try:
+                if w.stack.currentWidget() is w.table:
+                    w.spreadsheet()
+            except RuntimeError:
+                pass
+
+    def eviews_dates(self, txt: str) -> str:
+        pd = self.engine.wf.pd
+        return txt.replace(":", "q" if pd == 4 else ("m" if pd == 12 else ":"))
+
+    def forecast_window(self, title, text, png):
+        self.add_window(title, ForecastWindow(self, title, text, png), (720, 600), "forecast")
+
+    # -- pages --------------------------------------------------------------
+    def _close_object_windows(self):
+        for k in list(self.windows):
+            try:
+                self.windows.pop(k).parentWidget().close()
+            except RuntimeError:
+                pass
+
+    def select_page(self, page: str):
+        if page == self.engine.wf.page:
+            return
+        try:
+            self.engine.select_page(page)
+        except GretlError as e:
+            self.error(str(e))
+            return
+        self._close_object_windows()
+        self.log_append(f"Page: {page}")
+        self.show_workfile()
+
+    def new_page_dialog(self):
+        name = QLineEdit(f"untitled{len(self.engine.wf.pages) + 1}")
+        freq = QComboBox()
+        freq.addItems(["Annual", "Quarterly", "Monthly", "Daily - 5 day week", "Undated",
+                       "Copy of the current page"])
+        start, end = QLineEdit("1990"), QLineEdit("2024")
+        d = _form_dialog(self, "Page Create", [("Page name:", name), ("Frequency:", freq),
+                                               ("Start date:", start), ("End date (or obs):", end)])
+        if not d:
+            self._fill_tabs_later()
+            return
+        code = {"Annual": "a", "Quarterly": "q", "Monthly": "m", "Daily - 5 day week": "d5",
+                "Undated": "u", "Copy of the current page": "copy"}[freq.currentText()]
+        try:
+            self.engine.new_page(name.text().strip(), code, start.text().strip(), end.text().strip())
+        except (GretlError, ValueError) as e:
+            self.error(str(e))
+        self._close_object_windows()
+        self.show_workfile()
+
+    def _fill_tabs_later(self):
+        if self.wf_window:
+            self.wf_window._fill_tabs()
+
+    def rename_page_dialog(self, page):
+        new, ok = QInputDialog.getText(self, "Rename Page", "New page name:", text=page)
+        if ok and new.strip() and new.strip() != page:
+            try:
+                self.engine.rename_page(page, new.strip())
+            except GretlError as e:
+                self.error(str(e))
+            self.show_workfile()
+
+    def delete_page(self, page, ask=True):
+        if ask and QMessageBox.question(self, "Delete Page",
+                                        f"Delete page {page} and the objects on it?") != QMessageBox.Yes:
+            return
+        try:
+            self.engine.delete_page(page)
+        except GretlError as e:
+            self.error(str(e))
+            return
+        self._close_object_windows()
+        self.show_workfile()
+
+    # -- databases ----------------------------------------------------------
+    def _db_path(self, save: bool) -> str:
+        start = getattr(self, "_last_db", os.path.expanduser("~/evqt.bin"))
+        if save:
+            path, _ = QFileDialog.getSaveFileName(self, "Store to database", start,
+                                                  "gretl database (*.bin)",
+                                                  options=QFileDialog.Option.DontConfirmOverwrite)
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, "Fetch from database", os.path.dirname(start),
+                                                  "gretl database (*.bin)")
+        if path and not path.endswith(".bin"):
+            path += ".bin"
+        if path:
+            self._last_db = path
+        return path
+
+    def store_dialog(self, names: list[str], path: str | None = None):
+        path = path or self._db_path(save=True)
+        if not path:
+            return
+        try:
+            self.engine.db_store(path, names)
+            self.log_append(f"Stored {' '.join(names)} in {path}")
+            self.statusBar().showMessage(f"Stored {len(names)} series in {os.path.basename(path)}")
+        except GretlError as e:
+            self.error(str(e))
+
+    def fetch_dialog(self, path: str | None = None, choose=None):
+        path = path or self._db_path(save=False)
+        if not path:
+            return
+        try:
+            contents = self.engine.db_contents(path)
+        except OSError as e:
+            self.error(f"Cannot read the database index: {e}")
+            return
+        if choose is None:
+            d = QDialog(self)
+            d.setWindowTitle(f"Fetch from {os.path.basename(path)}")
+            lay = QVBoxLayout(d)
+            lay.addWidget(QLabel("Series to fetch (frequency is converted to this page's by averaging):"))
+            lst = QListWidget()
+            lst.setSelectionMode(QListWidget.ExtendedSelection)
+            for name, desc, rng in contents:
+                it = QListWidgetItem(f"{name}    {rng}    {desc}")
+                it.setData(Qt.UserRole, name)
+                lst.addItem(it)
+            lay.addWidget(lst)
+            bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            bb.accepted.connect(d.accept)
+            bb.rejected.connect(d.reject)
+            lay.addWidget(bb)
+            d.resize(560, 360)
+            if d.exec() != QDialog.Accepted:
+                return
+            choose = [it.data(Qt.UserRole) for it in lst.selectedItems()]
+        if not choose:
+            return
+        try:
+            self.engine.db_fetch(path, choose)
+            self.log_append(f"Fetched {' '.join(choose)} from {path}")
+        except GretlError as e:
+            self.error(str(e))
+        self.show_workfile()
 
     # -- objects ----------------------------------------------------------
     def open_object(self, obj):
@@ -720,6 +1115,8 @@ class MainWindow(QMainWindow):
             self.add_window(name, GroupWindow(self, name), (520, 420), "group")
         elif kind == "equation":
             self.add_window(name, EquationWindow(self, name), (700, 520), "equation")
+        elif kind == "var":
+            self.add_window(name, VarWindow(self, name), (760, 560), "var")
         elif kind == "scalar":
             self.statusBar().showMessage(f"{name} = {self.engine.wf.scalars.get(name)}")
         elif kind == "string":
@@ -813,7 +1210,9 @@ class MainWindow(QMainWindow):
         with open(path, encoding="utf-8", errors="replace") as f:
             hansl, todos, ignored = tr.translate_full(f.read(), plot_files=True)
         tmp = self.engine.tmpdir
-        hansl = re.sub(r'--output="(plot\d+\.png)"', lambda m: f'--output="{os.path.join(tmp, "prg_" + m.group(1))}"', hansl)
+        hansl = re.sub(r'"(plot\d+\.png)"', lambda m: f'"{os.path.join(tmp, "prg_" + m.group(1))}"', hansl)
+        # in an interactive session gretl asks before replacing data: clear it first
+        hansl = re.sub(r'(?m)^(\s*)open "(?![^"]*\.bin")', r'\1clear --dataset\n\1open "', hansl)
         inp = os.path.join(tmp, "program.inp")
         with open(inp, "w") as f:
             f.write(hansl)
@@ -929,6 +1328,48 @@ class MainWindow(QMainWindow):
         self.execute(f"equation {name}.ls{opt} {s}")
         if name in self.engine.wf.bundles:
             self.open_object((name, "equation"))
+
+    def var_dialog(self, name: str | None = None, spec: str = ""):
+        """VAR Specification dialog (unrestricted VAR)."""
+        lags, endo, exo = "1 2", "", "c"
+        if spec:
+            left, _, right = spec.partition("@")
+            toks = left.split()
+            i = 0
+            while i + 1 < len(toks) and toks[i].isdigit() and toks[i + 1].isdigit():
+                i += 2
+            lags, endo, exo = " ".join(toks[:i]), " ".join(toks[i:]), right.strip()
+            if name:
+                # show the user's own expressions rather than helper series names
+                labels = self.engine.strings(f"{name}.ylab")
+                if labels:
+                    endo = " ".join(x.lower() for x in labels)
+                xl = self.engine.strings(f"{name}.xlab")
+                if xl or "c" in exo.split():
+                    exo = " ".join((["c"] if "c" in exo.split() else []) + [x.lower() for x in xl])
+        e_endo, e_lags, e_exo = QPlainTextEdit(endo), QLineEdit(lags), QLineEdit(exo)
+        e_endo.setFont(MONO)
+        e_endo.setFixedHeight(70)
+        wf = self.engine.wf
+        smp = QLineEdit(f"{wf.sample_first} {wf.sample_last}")
+        d = _form_dialog(self, "VAR Specification", [
+            ("Endogenous variables:", e_endo), ("Lag intervals for endogenous:", e_lags),
+            ("Exogenous variables:", e_exo), ("Estimation sample:", smp)])
+        if not d or not e_endo.toPlainText().split():
+            return
+        if name is None:
+            k = 1
+            while f"var{k:02d}" in wf.bundles:
+                k += 1
+            name = f"var{k:02d}"
+        if smp.text().strip() != f"{wf.sample_first} {wf.sample_last}":
+            self.execute("smpl " + self.eviews_dates(smp.text().strip()))
+        s = f"{e_lags.text().strip()} {' '.join(e_endo.toPlainText().split())}"
+        if e_exo.text().strip():
+            s += " @ " + e_exo.text().strip()
+        self.execute(f"var {name}.ls {s}")
+        if name in self.engine.wf.bundles:
+            self.open_object((name, "var"))
 
     def closeEvent(self, e):
         self.engine.close()

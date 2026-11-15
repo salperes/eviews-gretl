@@ -33,8 +33,25 @@ of iCloud-synced folders on purpose.
 - File: open gdt/csv/xlsx/dta/wf1..., save as .gdt, run EViews programs.
 - Freeze saves the current view to a file (txt, csv or png).
 
-Not yet: Forecast, Fetch/Store (databases), multiple workfile pages, VAR/system
-objects, editing cells in the spreadsheet, the explicit `y=c(1)+c(2)*x` form.
+- Forecast button: forecast name, S.E. series, dynamic/static, forecast sample;
+  opens a window with the forecast and +/- 2 S.E. bands and the evaluation table
+  (RMSE, MAE, MAPE, Theil, bias/variance/covariance proportions).
+- VAR objects: Quick > Estimate VAR (or `var v1.ls 1 2 y1 y2 @ c x`); output with
+  coefficient, (s.e.), [t]; Granger / block exogeneity tests; lag length criteria;
+  impulse responses (grid of graphs); variance decomposition; residual graphs and series.
+- Fetch / Store: gretl databases (`.bin`). Store writes the selected series (whole range);
+  Fetch lists a database and imports the chosen series, converting frequency by averaging.
+- Workfile pages: tabs at the bottom of the workfile window, New Page (annual, quarterly,
+  monthly, daily, undated, or a copy), right-click to rename or delete;
+  `pagecreate`/`pageselect`/`pagedelete` in the command window. Each page keeps its own
+  sample, groups, equations and VARs.
+- Edit+/- in series and group spreadsheets: edited cells are written straight to gretl
+  (the data file on disk changes only when you save).
+
+Not yet: the explicit `y=c(1)+c(2)*x` form, ARMA terms, system objects (SUR, 2SLS
+systems), VEC models, structural VAR restrictions, EViews `.edb` databases (gretl
+`.bin` databases are used instead). Dynamic forecasts use lags of a plain dependent
+variable only, and their S.E. is the one-step formula.
 
 ## Tests
 ```bash

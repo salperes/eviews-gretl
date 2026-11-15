@@ -1,0 +1,58 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+# workfile pages are kept as .gdtb files in gretl's dot directory (ev_pagedir)
+
+# EViews program exercising forecasts, VARs, databases and workfile pages
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+
+# --- forecast: estimate to 2015, forecast 2016-2019
+smpl full
+smpl 1985:1 2015:4
+bundle EQ_FFR = ev_ls("FFR c FFR(-1) dlog(GDP)", dataset)
+smpl full
+smpl 2016:1 2019:4
+bundle EQ_FFR_fc = ev_forecast(EQ_FFR, dataset, 1, 0)
+series FFR_DYN = ev_fcast_series(EQ_FFR_fc)
+series FFR_SE = ev_fcast_se(EQ_FFR_fc)
+bundle EQ_FFR_fc = ev_forecast(EQ_FFR, dataset, 0, 1)
+series FFR_STAT = ev_fcast_series(EQ_FFR_fc)
+
+# --- VAR with lags 1-2
+smpl full
+smpl 1985:1 2019:4
+scalar ev_s1 = $t1
+scalar ev_s2 = $t2
+smpl full
+series ev_v1 = ldiff(CONS)
+series ev_v2 = ldiff(GDP)
+smpl ev_s1 ev_s2
+bundle V1 = ev_varest("1 2 ev_v1 ev_v2 FFR @ c", dataset, 0, "dlog(cons) dlog(gdp) ffr")
+matrix V1_granger = ev_vargranger(V1)
+matrix V1_decomp = ev_vardecomp(V1, 8)
+ev_varirfplot(V1, 10, "plot01.png")
+series R_CONS = ev_varresid(V1, 1)
+series R_GDP = ev_varresid(V1, 2)
+series R_FFR = ev_varresid(V1, 3)
+
+# --- database: store two series, fetch one back under a new page
+store "macro.bin" GDP FFR --database --overwrite
+string ev_pagedir = $dotdir
+smpl full
+store "@ev_pagedir/usmacro.gdtb"
+nulldata 30 --preserve
+setobs 1 1990 --time-series
+scalar ev_N = $nobs
+open "macro.bin" --quiet
+data GDP --quiet
+print GDP
+string ev_pagedir = $dotdir
+smpl full
+store "@ev_pagedir/annual.gdtb"
+open "@ev_pagedir/usmacro.gdtb" --quiet --preserve
+scalar ev_N = $nobs
+smpl full
+scalar n_q = $nobs
+

@@ -28,8 +28,15 @@ Also: `eq.fit` / `eq.makeresid` / `resid`, `@coefs(k)`, `equation e.arch(p,q)` (
 styling lines are ignored), `sort`, daily workfiles and dates, `@first+!i` sample
 arithmetic, `{%x}` / `x_!i` program variables, group elements `g(!i)`.
 
-Not yet: `forecast`, TGARCH/EGARCH, panel pages (`pagestruct`, `pageunstack`), IPS test,
-subroutines/`call`, `include`, matrices/vectors, system/VAR objects.
+Forecasts: `eq.forecast(s|d, e, g) yf yf_se` (dynamic by default) and `eq.fit yf` (static).
+VARs: `var v.ls 1 2 y1 y2 @ c x` with `.impulse`, `.decomp`, `.testexog`, `.laglen`,
+`.makeresids`, `.output`; expressions become helper series built over the whole workfile.
+Databases: `store(d=db)`, `fetch(d=db)`, `dbopen`/`db` (gretl `.bin` files).
+Pages: `pagecreate(page=x) freq start end`, `pageselect`, `pagedelete`, `pagerename`
+(pages are kept as `.gdtb` files in gretl's dot directory; groups are redefined on return).
+
+Not yet: TGARCH/EGARCH, panel pages (`pagestruct`, `pageunstack`), IPS test,
+subroutines/`call`, `include`, matrices/vectors, system objects, VEC models.
 
 Use `--plot-files` to write graphs as PNG files when running with gretlcli.
 

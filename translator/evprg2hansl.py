@@ -56,6 +56,12 @@ class Ctx:
     need_N: bool = False
     plot_files: bool = False
     plot_counter: int = 0
+    default_db: str | None = None
+    page: str = "page1"
+    pages: set = field(default_factory=lambda: {"page1"})
+    group_page: dict = field(default_factory=dict)    # group -> page it lives on
+    need_pages: bool = False
+    var_counter: int = 0
 
 
 def safe_name(name: str, prefix: str) -> str:
@@ -172,13 +178,27 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
         if condition:
             p = re.sub(r"(?<![<>!=])=(?!=)", "==", p)
         if ctx.case != "keep":
-            p = re.sub(r"(?<![A-Za-z0-9_$@.])([A-Za-z][A-Za-z0-9_]*)(?![A-Za-z0-9_])(?!\s*[(\[])",
-                       lambda m: _case_ident(m.group(1), ctx), p)
+            p = case_names(p, ctx)
         out.append(p)
     return "".join(out)
 
 
 _KEEP_CASE = {"NA", "obs", "const", "ev_N", "z"}
+# names that are functions (not series lags) when followed by "("
+_FUNC_NAMES = {src.lstrip("@").lower() for src, _ in FUNC_MAP} | {
+    "ldiff", "diff", "log", "exp", "abs", "sqrt", "invcdf", "cnorm", "dnorm", "cum", "round",
+    "floor", "ceil", "sum", "min", "max", "median", "mean", "sd", "uniform", "normal",
+    "hpfilt", "movavg", "lag", "ok", "missing", "nobs"}
+
+
+def case_names(p: str, ctx: Ctx) -> str:
+    """Apply --case to series names, including lagged ones like x(-1), but not to functions."""
+    def fix(m):
+        name, paren = m.group(1), m.group(2)
+        if paren and (name.lower() in _FUNC_NAMES or name.startswith("ev_")):
+            return m.group(0)
+        return _case_ident(name, ctx) + paren
+    return re.sub(r"(?<![A-Za-z0-9_$@.])([A-Za-z][A-Za-z0-9_]*)(?![A-Za-z0-9_])(\s*\(?)", fix, p)
 
 
 def _case_ident(name: str, ctx: Ctx) -> str:
@@ -311,8 +331,7 @@ def _ls_cov(opts: str | None) -> str | None:
 def _spec(spec: str, ctx: Ctx) -> str:
     spec = program_vars(spec.strip(), ctx)
     if ctx.case != "keep":
-        spec = " ".join(apply_case(t, ctx) if re.fullmatch(r"[A-Za-z]\w*", t) and t.lower() != "c" else t
-                        for t in spec.split())
+        spec = " ".join(t if t.lower() == "c" else case_names(t, ctx) for t in spec.split())
     return spec
 
 
@@ -406,6 +425,82 @@ def _strip_comment(line: str) -> str:
     return "".join(out).rstrip()
 
 
+def _opts(text: str | None) -> dict:
+    """EViews option list "d=mydb, page=q, e" -> {"d": "mydb", "page": "q", "e": ""}."""
+    out = {}
+    for x in (text or "").split(","):
+        k, _, v = x.strip().partition("=")
+        if k:
+            out[k.strip().lower()] = v.strip().strip('"')
+    return out
+
+
+def _plot_file_arg(ctx: Ctx) -> str:
+    if not ctx.plot_files:
+        return ""
+    ctx.plot_counter += 1
+    return f', "plot{ctx.plot_counter:02d}.png"'
+
+
+def _forecast_call(o: str, opts: str | None, args: str, ctx: Ctx, dynamic: bool) -> list[str]:
+    names = args.split()
+    if not names:
+        raise ValueError("forecast needs a name for the forecast series")
+    op = _opts(opts)
+    if "s" in op:
+        dynamic = False
+    if "d" in op:
+        dynamic = True
+    quiet = 0 if "e" in op else 1
+    res = [f"bundle {o}_fc = ev_forecast({o}, dataset, {int(dynamic)}, {quiet})",
+           f"series {translate_name(names[0], ctx)} = ev_fcast_series({o}_fc)"]
+    if len(names) > 1:
+        res.append(f"series {translate_name(names[1], ctx)} = ev_fcast_se({o}_fc)")
+    if "g" in op:
+        res.append(f"ev_fplot(&{o}_fc{_plot_file_arg(ctx)})")
+    return res
+
+
+def _var_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    """var v.ls 1 2 y1 y2 @ c x: expressions become top-level series first,
+    so that the VAR's lags can use pre-sample observations."""
+    name = translate_name(name, ctx)
+    ctx.equations[name] = "var"
+    ctx.last_eq = name
+    left, _, right = program_vars(spec, ctx).partition("@")
+    toks = left.split()
+    i = 0
+    lagp = []
+    while i + 1 < len(toks) and toks[i].isdigit() and toks[i + 1].isdigit():
+        lagp += toks[i:i + 2]
+        i += 2
+    if not lagp:
+        raise ValueError("VAR needs lag pairs, e.g. 1 2")
+    endo, exo = toks[i:], right.split()
+    pre, names, spec_t = [], [], []
+    for t in endo + exo:
+        if t.lower() == "c":
+            continue
+        names.append(t)
+        if re.fullmatch(r"[A-Za-z_]\w*", t):
+            spec_t.append(apply_case(t, ctx))
+        else:
+            ctx.var_counter += 1
+            v = f"ev_v{ctx.var_counter}"
+            pre.append(f"series {v} = {translate_expr(t, ctx)}")
+            spec_t.append(v)
+    if pre:
+        # build them over the whole workfile so that lags can use pre-sample data
+        pre = ["scalar ev_s1 = $t1", "scalar ev_s2 = $t2", "smpl full"] + pre + ["smpl ev_s1 ev_s2"]
+    ne = len(endo)
+    out_spec = " ".join(lagp + spec_t[:ne])
+    if right or "@" in spec:
+        out_spec += " @ " + " ".join((["c"] if any(t.lower() == "c" for t in exo) else []) + spec_t[ne:])
+    if "noconst" in _opts(opts) and "@" not in out_spec:
+        out_spec += " @"
+    return pre + [f'bundle {name} = ev_varest("{out_spec.strip()}", dataset, 0, "{" ".join(names)}")']
+
+
 def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -> list[str]:
     ml = meth.lower()
     o = translate_name(obj, ctx)
@@ -423,8 +518,31 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return [f"ev_print(&{o})"]
     if ml == "resids":
         return [f"ev_plot(&{o})"]
-    if ml == "fit" and ctx.equations.get(o) == "ls":
-        return [f"series {translate_name(args.split()[0], ctx)} = ev_fit({o})"]
+    if ml in ("fit", "forecast") and ctx.equations.get(o, "ls") == "ls":
+        # EViews: forecast = dynamic, fit = static, both over the current sample
+        return _forecast_call(o, opts, args, ctx, dynamic=(ml == "forecast"))
+    if ctx.equations.get(o) == "var":
+        h = (re.match(r"\s*(\d+)", opts or "") or re.match(r"\s*(\d+)", args or ""))
+        h = h.group(1) if h else "10"
+        if ml in ("output", "results", "display", "spec"):
+            return [f"ev_varprint(&{o})"]
+        if ml == "impulse":
+            if "t" in _opts(opts):
+                return [f"matrix {o}_irf = ev_varirf({o}, {h})"]
+            return [f"ev_varirfplot({o}, {h}{_plot_file_arg(ctx)})"]
+        if ml == "decomp":
+            return [f"matrix {o}_decomp = ev_vardecomp({o}, {h})"]
+        if ml == "testexog":
+            return [f"matrix {o}_granger = ev_vargranger({o})"]
+        if ml == "laglen":
+            m = re.match(r"\s*(\d+)", opts or args or "")
+            return [f"ev_varlaglen({o}, dataset, {m.group(1) if m else 8})"]
+        if ml in ("makeresids", "makeresid"):
+            return [f"series {translate_name(n, ctx)} = ev_varresid({o}, {k})"
+                    for k, n in enumerate(args.split(), 1)]
+        if ml == "ls":
+            return _var_call(obj, opts, args, ctx)
+        raise ValueError(f"VAR view .{meth} not supported")
     if ml in ("makeresid", "makeresids") and ctx.equations.get(o) == "ls":
         return [f"series {translate_name(args.split()[0], ctx)} = ev_resid({o})"]
     if ml in ("makeresid", "makeresids") and ctx.equations.get(o) == "arch":
@@ -460,23 +578,101 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
     s = line.strip()
     if not s:
         return [""]
-    first = s.split()[0]
+    mo = re.match(r"([A-Za-z_]\w*)\(([^)]*)\)", s)     # command(options) may contain spaces
+    if mo:
+        first = mo.group(0)
+        cmd_opts = mo.group(2)
+    else:
+        first = s.split()[0]
+        cmd_opts = ""
     word = re.sub(r"\(.*", "", first.lower())          # command without (options)
     rest = s[len(first):].strip()
 
     # --- session / files
-    if word in ("cd", "close", "output", "logmode", "mode", "wfclose", "pageselect"):
+    if word in ("cd", "close", "output", "logmode", "mode", "wfclose"):
         raise Ignored(word)
+
+    # --- databases: EViews .edb -> gretl .bin
+    if word in ("dbopen", "db", "dbcreate"):
+        name = re.sub(r"\.edb$", "", rest.split()[0].strip('"'), flags=re.IGNORECASE)
+        ctx.default_db = name
+        raise Ignored(f"default database is now {name}.bin")
+    if word in ("store", "fetch"):
+        op = _opts(cmd_opts)
+        db = re.sub(r"\.edb$", "", op.get("d", "") or (ctx.default_db or ""), flags=re.IGNORECASE)
+        names = [translate_name(n, ctx) for n in rest.split()]
+        if not names:
+            raise ValueError(f"{word} needs series names")
+        if not db:
+            raise ValueError(f"{word} needs a database: use {word}(d=name) or dbopen name")
+        if word == "store":
+            return [f'store "{db}.bin" {" ".join(names)} --database --overwrite']
+        return [f'open "{db}.bin" --quiet', f'data {" ".join(names)} --quiet']
+
+    # --- workfile pages (each page is kept as a .gdtb file in gretl's dot directory)
+    if word in ("pagecreate", "pageselect", "pagedelete", "pagerename"):
+        ctx.need_pages = True
+        # the folder name is set again each time: opening data clears string variables
+        save_cur = ["string ev_pagedir = $dotdir", "smpl full", f'store "@ev_pagedir/{ctx.page}.gdtb"']
+        if word == "pagecreate":
+            op = _opts(cmd_opts)
+            new = op.get("page") or f"untitled{len(ctx.pages) + 1}"
+            toks = rest.split()
+            if toks and toks[0].lower() == "u":
+                body = [f"nulldata {toks[1]} --preserve"]
+            elif len(toks) >= 3:
+                body = [ln + (" --preserve" if ln.startswith("nulldata") else "") for ln in workfile(*toks[:3])]
+            else:
+                raise ValueError("pagecreate needs frequency, start and end")
+            ctx.pages.add(new)
+            ctx.page = new
+            return save_cur + body + ["scalar ev_N = $nobs"]
+        if word == "pageselect":
+            new = rest.split()[0]
+            if new not in ctx.pages:
+                raise ValueError(f"unknown page {new}")
+            ctx.page = new
+            relist = [f"list {g} = {' '.join(m)}" for g, m in ctx.groups.items()
+                      if ctx.group_page.get(g) == new]
+            return save_cur + [f'open "@ev_pagedir/{new}.gdtb" --quiet --preserve', "scalar ev_N = $nobs"] + relist
+        if word == "pagedelete":
+            name = rest.split()[0] if rest else ctx.page
+            ctx.pages.discard(name)
+            return ["string ev_pagedir = $dotdir", f'catch remove("@ev_pagedir/{name}.gdtb")']
+        old, new = rest.split()[:2]
+        ctx.pages.discard(old)
+        ctx.pages.add(new)
+        if ctx.page == old:
+            ctx.page = new
+            raise Ignored("renamed the current page")
+        return ["string ev_pagedir = $dotdir", f'catch remove("@ev_pagedir/{new}.gdtb")',
+                f'# page {old} renamed to {new}: next pageselect uses the new name']
+
+    if word == "var":
+        m = re.fullmatch(r"var\s+([\w{}!%$]+)(?:\.ls(?:\(([^)]*)\))?\s+(.+))?", s, flags=re.IGNORECASE)
+        if not m:
+            raise ValueError("unsupported var statement")
+        name, opts, spec = m.groups()
+        if spec is None:
+            ctx.equations[translate_name(name, ctx)] = "var"
+            return [f"# VAR {name} declared (estimated later)"]
+        return _var_call(name, opts, spec, ctx)
     if word in ("stop", "exit"):
         return ["quit"]
     if word in ("wfopen", "load", "import"):
         f = re.sub(r"\s.*$", "", rest.strip()) if not rest.startswith('"') else rest.split('"')[1]
+        ctx.page = re.sub(r"\.\w+$", "", re.split(r"[\\/]", f)[-1]).lower() or "page1"
+        ctx.pages = {ctx.page}
         return [f'open "{f}"', "scalar ev_N = $nobs"]
     if word == "read":
         f = rest.split('"')[1] if rest.startswith('"') else rest.split()[0]
         # EViews read adds series to the current workfile, like gretl append
         return [f'append "{f}"  # EViews read: check that the series names match']
     if word == "wfcreate":
+        page = _opts(cmd_opts).get("page")
+        if page:
+            ctx.pages = {page}
+            ctx.page = page
         toks = rest.split()
         if toks and toks[0].lower() == "u":
             return [f"nulldata {toks[1]}", "scalar ev_N = $nobs"]
@@ -547,6 +743,7 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         name = translate_name(toks[0], ctx)
         members = [translate_name(t, ctx) for t in toks[1:]]
         ctx.groups[name] = members
+        ctx.group_page[name] = ctx.page
         return [f"list {name} = {' '.join(members)}"]
     if word == "delete":
         return [f"catch delete {translate_name(n, ctx)}" for n in rest.split()]
@@ -688,6 +885,8 @@ def translate_full(text: str, case: str = "keep", plot_files: bool = False):
             "include EViewsCompat.gfn"]
     if ctx.need_N and not has_wf:
         head.append("scalar ev_N = $nobs    # size of the workfile (EViews @last)")
+    if ctx.need_pages:
+        head.append("# workfile pages are kept as .gdtb files in gretl's dot directory (ev_pagedir)")
     return "\n".join(head + [""] + body) + "\n", ctx.todos, ctx.ignored
 
 

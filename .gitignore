@@ -21,5 +21,10 @@ screenshots/
 .DS_Store
 
 # test outputs of the gretl package
-EViewsCompat/evtest.*
-EViewsCompat/usmacro_cons.csv
+evtest.*
+usmacro_cons.csv
+irf_test.png
+
+# example program outputs
+translator/examples/macro.bin
+translator/examples/macro.idx

@@ -1,0 +1,99 @@
+# ev_forecast and ev_varest checked against gretl's fcast, var, ols, restrict, irf
+set verbose off
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-44s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dg = ldiff(GDP)
+series dc = ldiff(CONS)
+
+# --- 1. static and dynamic forecasts of an equation with a lagged dependent
+smpl 1985:1 2015:4
+bundle eq = ev_ls("FFR c FFR(-1) dlog(GDP)", dataset, null, 1)
+ols FFR const FFR(-1) dg --quiet
+smpl 2016:1 2019:4
+bundle fs = ev_forecast(eq, dataset, 0, 1)
+bundle fd = ev_forecast(eq, dataset, 1)
+smpl 1985:1 2015:4
+ols FFR const FFR(-1) dg --quiet
+fcast 2016:1 2019:4 nat_s --static --quiet
+matrix nse = $fcse
+fcast 2016:1 2019:4 nat_d --dynamic --quiet
+smpl 2016:1 2019:4
+series ev_s = ev_fcast_series(fs)
+series ev_d = ev_fcast_series(fd)
+series ev_se = ev_fcast_se(fs)
+check("static forecast 2016:1", ev_s[2016:1], nat_s[2016:1])
+check("static forecast 2019:4", ev_s[2019:4], nat_s[2019:4])
+check("static forecast S.E. 2017:2", ev_se[2017:2], nse[6])
+check("dynamic forecast 2016:2", ev_d[2016:2], nat_d[2016:2])
+check("dynamic forecast 2019:4", ev_d[2019:4], nat_d[2019:4])
+check("dynamic differs from static", abs(ev_d[2019:4] - ev_s[2019:4]) > 1e-6, 1)
+series e = nat_s - FFR
+check("RMSE", fs.rmse, sqrt(mean(e^2)))
+check("Theil U", fs.theil, sqrt(mean(e^2)) / (sqrt(mean(FFR^2)) + sqrt(mean(nat_s^2))))
+check("bias+var+cov proportions = 1", fs.bias_prop + fs.var_prop + fs.cov_prop, 1)
+
+# --- 2. VAR with constant, lags 1-2
+smpl 1985:1 2019:4
+bundle v = ev_varest("1 2 dc dg FFR @ c", dataset, 0, "dlog(CONS) dlog(GDP) FFR")
+var 2 dc dg FFR --silent
+matrix C = $coeff
+check("VAR coeff [3,2]", v.coeff[3,2], C[3,2])
+check("VAR coeff [7,3]", v.coeff[7,3], C[7,3])
+check("VAR T", v.T, $T)
+check("VAR log likelihood", v.lnl, $lnl)
+check("VAR AIC (EViews scale)", v.aic, -2 * $lnl / $T + 2 * 3 * 7 / $T)
+check("VAR labels from argument", v.ylab[1] == "DLOG(CONS)", 1)
+# equation 2 by OLS: same coefficients and standard errors
+ols dg const dc(-1) dc(-2) dg(-1) dg(-2) FFR(-1) FFR(-2) --quiet
+check("VAR eq2 coeff vs OLS", v.coeff[4,2], $coeff[4])
+check("VAR eq2 S.E. vs OLS", v.se[4,2], $stderr[4])
+check("VAR eq2 R-squared vs OLS", v.rsq[2], $rsq)
+# Granger: dependent dg, excluded FFR  ==  OLS Wald (q * F)
+restrict --quiet
+  b[6] = 0
+  b[7] = 0
+end restrict
+scalar Fnat = $test
+matrix G = ev_vargranger(v, 1)
+matrix row = selifr(G, (G[,1] .= 2) .* (G[,2] .= 3))
+check("Granger chi2 (dg <- FFR)", row[3], 2 * Fnat)
+# impulse responses vs gretl irf
+var 2 dc dg FFR --silent
+set horizon 10
+matrix r = irf(2, 3)
+matrix R = ev_varirf(v, 10, 1)
+check("IRF dg to FFR, period 1", R[1, 8], r[1])
+check("IRF dg to FFR, period 5", R[5, 8], r[5])
+matrix r2 = irf(3, 1)
+check("IRF FFR to dc, period 3", R[3, 3], r2[3])
+matrix D = ev_vardecomp(v, 10, 1)
+check("FEVD rows sum to 100", sumr(D[15,]), 100)
+
+# --- 3. VAR with an exogenous variable and no constant
+bundle v2 = ev_varest("1 1 dc dg @ FFR", dataset, 1)
+var 1 dc dg ; FFR --silent --nc
+check("VAR no-const, exog: coeff [3,1]", v2.coeff[3,1], $coeff[3,1])
+check("VAR labels", v2.clab[3] == "FFR", 1)
+
+# --- 4. printed views run
+ev_varprint(&v)
+ev_vargranger(v)
+ev_vardecomp(v, 4)
+ev_varlaglen(v, dataset, 4)
+string tmp = $workdir ~ "/irf_test.png"
+ev_varirfplot(v, 10, tmp)
+printf "IRF plot: %s\n", tmp
+# expressions still work (with a note about pre-sample lags)
+bundle v3 = ev_varest("1 2 dlog(CONS) dlog(GDP) FFR", dataset, 1)
+check("VAR from expressions loses 2 pre-sample obs", v3.T, 138)
+series r1 = ev_varresid(v, 1)
+check("VAR residual series", nobs(r1), v.T)

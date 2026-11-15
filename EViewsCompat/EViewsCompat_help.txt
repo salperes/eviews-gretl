@@ -40,3 +40,27 @@ Functions (CLI / console). "dataset" means: all series in the dataset.
   ev_trend(), ev_seas(k), ev_pch(x), ev_pc(x), ev_pchy(x), ev_pcy(x),
   ev_movav(x,n), ev_movsum(x,n), ev_mean(x), ev_stdev(x) (n-1),
   ev_var(x) (population, n), ev_obs(x), ev_elem(x, "1990:1")
+
+Forecasts (eq.forecast). The forecast sample is the current sample.
+
+  ev_forecast(eq, dataset [, dynamic=1] [, quiet])   -> bundle
+      Static (0) or dynamic (1). Dynamic forecasts replace lags of a plain
+      dependent variable, y(-k), by earlier forecasts. Bundle: yf, se,
+      actual, rmse, mae, mape, theil, bias_prop, var_prop, cov_prop.
+  series f = ev_fcast_series(fc)     series s = ev_fcast_se(fc)
+  ev_fplot(&fc [, "file.png"])       forecast with +/- 2 S.E. and actual
+
+VAR objects (var v.ls 1 2 y1 y2 @ c x)
+
+  ev_varest("1 2 y1 y2 @ c x", dataset [, quiet] [, "names"])  -> bundle
+      Lag pairs (1 2 = lags 1 to 2), endogenous variables, then exogenous
+      after the at-sign; c = constant (included by default when there is no
+      exogenous part). Use series names so lags can use pre-sample data;
+      "names" gives display names, e.g. "dlog(cons) dlog(gdp)".
+  ev_varprint(&v)               EViews-style estimates: coef, (s.e.), [t]
+  ev_vargranger(v)              Granger causality / block exogeneity Wald
+  ev_varirf(v, 10)              impulse responses (Cholesky)
+  ev_varirfplot(v, 10 [, "file.png"])   grid of response graphs
+  ev_vardecomp(v, 10)           variance decomposition (percent)
+  ev_varlaglen(v, dataset, 8)   lag length criteria
+  series r = ev_varresid(v, 1)  residuals of equation 1

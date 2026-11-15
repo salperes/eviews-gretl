@@ -1,6 +1,8 @@
 # EViewsCompat (gretl package)
 
-EViews-style `ls`, Wald test, residual diagnostics, freeze and @-functions for gretl.
+EViews-style `ls`, forecasts (static/dynamic with evaluation statistics), VAR objects
+(estimates, Granger tests, impulse responses, variance decomposition, lag length
+criteria), Wald test, residual diagnostics, freeze and @-functions for gretl.
 Usage: see `EViewsCompat_help.txt` and `EViewsCompat_sample.inp`.
 
 ## Build / test / install
@@ -12,7 +14,7 @@ export GRETL_HOME=/Applications/Gretl.app/Contents/Resources/share/gretl/
 ```
 
 ```bash
-/Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/test_evcompat.inp" | grep -E '^(ok|FAIL)'
+for t in test_evcompat test_usmacro test_forecast_var; do /Applications/Gretl.app/Contents/Resources/bin/gretlcli -b "$PWD/tests/$t.inp" | grep -E '^(ok|FAIL)'; done
 ```
 
 ```bash
@@ -28,7 +30,13 @@ GUI: gretl string fields hold at most 31 characters, so the dialog has three
 equation fields that are joined with spaces.
 
 ## hansl gotchas found while writing this
-- Functions end with `end function`; `data`, `lags` are reserved words.
+- Functions end with `end function`; `data`, `lags`, `labels` are reserved words.
+- Functions cannot widen the sample or write outside it, and a series made inside a
+  function has only in-sample values; pass dataset series (list members) to `var`
+  so lags can use pre-sample data.
+- `{}` cannot be assigned to a variable named like a command; matrix minus row
+  vector needs `.-`.
+- In interactive gretlcli, `open` asks before replacing data: run `clear --dataset` first.
 - Dataset series are not visible inside functions: pass them as a list (`dataset`).
 - The at-sign is string substitution, so the source never writes it literally.
 - `catch` must not wrap calls to user-defined functions.

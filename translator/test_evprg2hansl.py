@@ -96,7 +96,7 @@ class Statements(unittest.TestCase):
 
     def test_unsupported(self):
         with self.assertRaises(ValueError):
-            tl("eq1.forecast yf")
+            tl("sys1.fiml")
 
 
 class RealPrograms(unittest.TestCase):
@@ -117,7 +117,8 @@ class RealPrograms(unittest.TestCase):
     def test_fit_resid(self):
         c = Ctx()
         translate_line("equation eq1.ls f10 c t10", c)
-        self.assertEqual(translate_line("eq1.fit f10_fit", c), ["series f10_fit = ev_fit(eq1)"])
+        self.assertEqual(translate_line("eq1.fit f10_fit", c),
+                         ["bundle eq1_fc = ev_forecast(eq1, dataset, 0, 1)", "series f10_fit = ev_fcast_series(eq1_fc)"])
         self.assertEqual(translate_line("eq1.makeresid r1", c), ["series r1 = ev_resid(eq1)"])
         self.assertEqual(translate_line("genr u = resid", c), ["series u = ev_resid(eq1)"])
         with self.assertRaises(Ignored):
@@ -171,6 +172,56 @@ class RealPrograms(unittest.TestCase):
             tl('cd "U:\\x"')
 
 
+class NewFeatures(unittest.TestCase):
+    def test_forecast(self):
+        c = Ctx()
+        translate_line("equation eq1.ls y c y(-1) x", c)
+        self.assertEqual(translate_line("eq1.forecast yf yf_se", c),
+                         ["bundle eq1_fc = ev_forecast(eq1, dataset, 1, 1)",
+                          "series yf = ev_fcast_series(eq1_fc)", "series yf_se = ev_fcast_se(eq1_fc)"])
+        out = translate_line("eq1.forecast(s, e, g) yf", c)
+        self.assertEqual(out[0], "bundle eq1_fc = ev_forecast(eq1, dataset, 0, 0)")
+        self.assertEqual(out[-1], "ev_fplot(&eq1_fc)")
+
+    def test_var(self):
+        c = Ctx()
+        out = translate_line("var v1.ls 1 2 dlog(cons) gdp @ c ffr", c)
+        self.assertEqual(out, ["scalar ev_s1 = $t1", "scalar ev_s2 = $t2", "smpl full",
+                               "series ev_v1 = ldiff(cons)", "smpl ev_s1 ev_s2",
+                               'bundle v1 = ev_varest("1 2 ev_v1 gdp @ c ffr", dataset, 0, "dlog(cons) gdp ffr")'])
+        self.assertEqual(translate_line("var v2.ls 1 4 y1 y2", c),
+                         ['bundle v2 = ev_varest("1 4 y1 y2", dataset, 0, "y1 y2")'])
+        self.assertEqual(translate_line("v1.impulse(12)", c), ["ev_varirfplot(v1, 12)"])
+        self.assertEqual(translate_line("v1.decomp(8)", c), ["matrix v1_decomp = ev_vardecomp(v1, 8)"])
+        self.assertEqual(translate_line("v1.testexog", c), ["matrix v1_granger = ev_vargranger(v1)"])
+        self.assertEqual(translate_line("v1.laglen(6)", c), ["ev_varlaglen(v1, dataset, 6)"])
+        self.assertEqual(translate_line("v1.makeresids r1 r2", c),
+                         ["series r1 = ev_varresid(v1, 1)", "series r2 = ev_varresid(v1, 2)"])
+
+    def test_databases(self):
+        c = Ctx()
+        self.assertEqual(translate_line("store(d=macro) gdp cons", c),
+                         ['store "macro.bin" gdp cons --database --overwrite'])
+        with self.assertRaises(Ignored):
+            translate_line("dbopen other.edb", c)
+        self.assertEqual(translate_line("fetch gdp", c), ['open "other.bin" --quiet', "data gdp --quiet"])
+        with self.assertRaises(ValueError):
+            translate_line("fetch gdp", Ctx())
+
+    def test_pages(self):
+        c = Ctx()
+        translate_line("wfcreate(wf=w, page=quarterly) q 1990 1999", c)
+        translate_line("group g1 a b", c)
+        out = translate_line("pagecreate(page=annual) a 1990 1999", c)
+        self.assertEqual(out, ["string ev_pagedir = $dotdir", "smpl full", 'store "@ev_pagedir/quarterly.gdtb"', "nulldata 10 --preserve",
+                               "setobs 1 1990 --time-series", "scalar ev_N = $nobs"])
+        out = translate_line("pageselect quarterly", c)
+        self.assertEqual(out, ["string ev_pagedir = $dotdir", "smpl full", 'store "@ev_pagedir/annual.gdtb"',
+                               'open "@ev_pagedir/quarterly.gdtb" --quiet --preserve', "scalar ev_N = $nobs",
+                               "list g1 = a b"])
+        self.assertTrue(c.need_pages)
+
+
 class Program(unittest.TestCase):
     def test_loop_and_if_blocks(self):
         prg = "for !i = 1 to 3\n series x{!i} = !i\nnext\nif !i = 3 then\n !a = 1\nendif\n"
@@ -186,8 +237,8 @@ class Program(unittest.TestCase):
         self.assertIn('bundle e = ev_ls("y c   x", dataset)', out)
 
     def test_todo_reported(self):
-        out, todos = translate("eq1.forecast r\n")
-        self.assertEqual(todos, [(1, "eq1.forecast r")])
+        out, todos = translate("sys1.fiml\n")
+        self.assertEqual(todos, [(1, "sys1.fiml")])
         self.assertIn("# TODO(EViews line 1", out)
 
 

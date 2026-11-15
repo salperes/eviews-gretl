@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import os
+import queue
 import re
 import subprocess
 import tempfile
@@ -40,6 +41,13 @@ class Workfile:
     lists: list = field(default_factory=list)
     scalars: dict = field(default_factory=dict)
     strings: list = field(default_factory=list)
+    kinds: dict = field(default_factory=dict)       # bundle name -> "equation" | "var" | "bundle"
+    # workfile pages: each page is a dataset kept as a .gdtb file while not shown
+    page: str = "page1"
+    pages: list = field(default_factory=lambda: ["page1"])
+    obj_page: dict = field(default_factory=dict)    # equation/VAR name -> page
+    page_lists: dict = field(default_factory=dict)  # page -> {list name: members}
+    page_sample: dict = field(default_factory=dict) # page -> (first, last)
 
 
 _ERR_PATTERNS = re.compile(
@@ -57,6 +65,8 @@ class GretlEngine:
             [gretlcli], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1, env=env, cwd=self.tmpdir)
         self.lock = threading.Lock()
+        self._lines: queue.Queue = queue.Queue()
+        threading.Thread(target=self._reader, daemon=True).start()
         self.wf = Workfile()
         self.plot_counter = 0
         self.run("set messages off")
@@ -64,20 +74,34 @@ class GretlEngine:
         self.has_compat = not any("rror" in ln for ln in out)
 
     # -- low level --------------------------------------------------------
-    def run(self, commands: str, check: bool = False) -> list[str]:
-        """Send one or more hansl lines; return output lines (echo removed)."""
+    def _reader(self):
+        for line in self.proc.stdout:
+            self._lines.put(line)
+        self._lines.put(None)
+
+    def run(self, commands: str, check: bool = False, timeout: float = 120) -> list[str]:
+        """Send one or more hansl lines; return output lines (echo removed).
+
+        If gretl does not finish within `timeout` seconds (for example because it
+        is waiting at a question), an empty answer is sent and GretlError raised.
+        """
         with self.lock:
             self.proc.stdin.write(commands.rstrip("\n") + f'\nprint "{_MARK}"\n')
             self.proc.stdin.flush()
             out, in_echo = [], False
             while True:
-                line = self.proc.stdout.readline()
-                if not line:
+                try:
+                    line = self._lines.get(timeout=timeout)
+                except queue.Empty:
+                    self.proc.stdin.write("\n")
+                    self.proc.stdin.flush()
+                    raise GretlError(f"gretl did not answer within {timeout:.0f} s")
+                if line is None:
                     raise GretlError("gretl process ended unexpectedly")
                 line = line.rstrip("\n")
                 if line == _MARK:
                     break
-                if line.startswith("? ") or line.startswith("> "):
+                if line.startswith("? ") or line.startswith("> ") or line.startswith("<"):
                     in_echo = line.endswith("\\")
                     continue
                 if in_echo:
@@ -106,21 +130,23 @@ class GretlEngine:
 
     # -- workfile ---------------------------------------------------------
     def open(self, path: str) -> list[str]:
-        out = self.run(f'open "{path}" --quiet --preserve', check=True)
-        self.wf = Workfile(path=path)
+        out = self.run(f'clear --dataset\nopen "{path}" --quiet --preserve', check=True)
+        page = re.sub(r"\W", "_", os.path.splitext(os.path.basename(path))[0].lower()) or "page1"
+        self.wf = Workfile(path=path, page=page, pages=[page])
+        self._read_range()
+        self.refresh()
+        return out
+
+    def _read_range(self):
         info = self._query('printf "%s|%s|%d|%d\\n", obslabel(1), obslabel($nobs), $nobs, $pd')
         self.wf.first, self.wf.last, n, pd = info.split("|")
         self.wf.nobs_full, self.wf.pd = int(n), int(pd)
-        self.refresh()
-        return out
 
     def new_workfile(self, freq: str, start: str, end: str) -> None:
         from evprg2hansl import workfile  # translator helper
         self.run("\n".join(workfile(freq, start, end)), check=True)
         self.wf = Workfile(path=None)
-        info = self._query('printf "%s|%s|%d|%d\\n", obslabel(1), obslabel($nobs), $nobs, $pd')
-        self.wf.first, self.wf.last, n, pd = info.split("|")
-        self.wf.nobs_full, self.wf.pd = int(n), int(pd)
+        self._read_range()
         self.refresh()
 
     def _query(self, cmd: str) -> str:
@@ -137,7 +163,8 @@ class GretlEngine:
             self.wf.sample_nobs = int(n)
         except GretlError:
             return self.wf
-        self.wf.series = self._names_from_varlist(self.run("varlist --type=series"))
+        self.wf.series = [n for n in self._names_from_varlist(self.run("varlist --type=series"))
+                          if not n.startswith("ev_")]
         self.wf.bundles = self._names_typed(self.run("varlist --type=bundle"))
         self.wf.lists = self._names_typed(self.run("varlist --type=list"))
         self.wf.strings = self._names_typed(self.run("varlist --type=string"))
@@ -148,7 +175,127 @@ class GretlEngine:
                 self.wf.scalars[m.group(1)] = m.group(2)
         self.wf.bundles = [b for b in self.wf.bundles if not b.startswith("ev_")]
         self.wf.lists = [b for b in self.wf.lists if not b.startswith("ev_")]
+        new = [b for b in self.wf.bundles if b not in self.wf.kinds]
+        if new:
+            q = "\n".join(f'printf "%s|%d|%d\\n", "{b}", inbundle({b}, "sys"), inbundle({b}, "uhat")' for b in new)
+            for ln in self.run(q):
+                parts = ln.strip().split("|")
+                if len(parts) == 3:
+                    b, sys_, uh = parts
+                    self.wf.kinds[b] = "var" if sys_ != "0" else ("equation" if uh != "0" else "bundle")
+        for b in self.wf.bundles:
+            self.wf.obj_page.setdefault(b, self.wf.page)
+        for gone in [b for b in self.wf.kinds if b not in self.wf.bundles]:
+            self.wf.kinds.pop(gone)
+            self.wf.obj_page.pop(gone, None)
         return self.wf
+
+    # -- pages --------------------------------------------------------------
+    def _page_file(self, name: str) -> str:
+        return os.path.join(self.tmpdir, f"page_{name}.gdtb")
+
+    def _save_page(self):
+        wf = self.wf
+        lists = {}
+        for L in wf.lists:
+            out = "".join(self.run(f'printf "%s\\n", varname({L})')).strip()
+            lists[L] = [x for x in out.split(",") if x]
+        wf.page_lists[wf.page] = lists
+        wf.page_sample[wf.page] = (wf.sample_first, wf.sample_last)
+        self.run(f'smpl full\nstore "{self._page_file(wf.page)}"', check=True)
+
+    def _enter_page(self, name: str):
+        wf = self.wf
+        wf.page = name
+        self._read_range()
+        for L, members in wf.page_lists.get(name, {}).items():
+            if members:
+                self.run(f"list {L} = {' '.join(members)}")
+        smp = wf.page_sample.get(name)
+        if smp and smp[0]:
+            self.run(f"smpl {smp[0]} {smp[1]}")
+        self.refresh()
+
+    def new_page(self, name: str, freq: str, start: str = "", end: str = ""):
+        from evprg2hansl import workfile
+        if name in self.wf.pages:
+            raise GretlError(f"page {name} already exists")
+        self._save_page()
+        if freq == "u":
+            cmds = [f"nulldata {int(end)} --preserve"]
+        elif freq == "copy":
+            cmds = []                       # the saved file of the current page is reopened below
+        else:
+            cmds = [c + (" --preserve" if c.startswith("nulldata") else "") for c in workfile(freq, start, end)]
+        if freq == "copy":
+            self.run(f'clear --dataset\nopen "{self._page_file(self.wf.page)}" --quiet --preserve', check=True)
+        else:
+            self.run("\n".join(cmds), check=True)
+        self.wf.pages.append(name)
+        self.wf.page_lists[name] = {}
+        self._enter_page(name)
+
+    def select_page(self, name: str):
+        if name == self.wf.page:
+            return
+        if name not in self.wf.pages:
+            raise GretlError(f"no page called {name}")
+        self._save_page()
+        self.run(f'clear --dataset\nopen "{self._page_file(name)}" --quiet --preserve', check=True)
+        self._enter_page(name)
+
+    def delete_page(self, name: str):
+        if len(self.wf.pages) == 1:
+            raise GretlError("a workfile needs at least one page")
+        if name == self.wf.page:
+            other = next(p for p in self.wf.pages if p != name)
+            self.select_page(other)
+        self.wf.pages.remove(name)
+        for b in [b for b, p in self.wf.obj_page.items() if p == name]:
+            self.run(f"catch delete {b}")
+        try:
+            os.remove(self._page_file(name))
+        except OSError:
+            pass
+        self.refresh()
+
+    def rename_page(self, old: str, new: str):
+        if new in self.wf.pages or not re.fullmatch(r"[A-Za-z]\w*", new):
+            raise GretlError(f"cannot use {new!r} as a page name")
+        wf = self.wf
+        wf.pages[wf.pages.index(old)] = new
+        for b, p in wf.obj_page.items():
+            if p == old:
+                wf.obj_page[b] = new
+        for d in (wf.page_lists, wf.page_sample):
+            if old in d:
+                d[new] = d.pop(old)
+        if os.path.exists(self._page_file(old)):
+            os.replace(self._page_file(old), self._page_file(new))
+        if wf.page == old:
+            wf.page = new
+
+    # -- databases (gretl .bin format) ----------------------------------------
+    @staticmethod
+    def db_contents(path: str) -> list[tuple[str, str, str]]:
+        """(name, description, frequency and range) for each series in a .bin database."""
+        idx = os.path.splitext(path)[0] + ".idx"
+        out = []
+        with open(idx, encoding="utf-8", errors="replace") as f:
+            lines = [ln.rstrip("\n") for ln in f if not ln.startswith("#")]
+        for i in range(0, len(lines) - 1, 2):
+            name, _, desc = lines[i].partition("  ")
+            out.append((name.strip(), desc.strip(), lines[i + 1].strip()))
+        return out
+
+    def db_store(self, path: str, names: list[str]):
+        """Store whole series (like EViews), whatever the current sample."""
+        self.run(f'scalar ev_s1 = $t1\nscalar ev_s2 = $t2\nsmpl full\n'
+                 f'store "{path}" {" ".join(names)} --database --overwrite\nsmpl ev_s1 ev_s2', check=True)
+
+    def db_fetch(self, path: str, names: list[str]):
+        self.run(f'open "{path}" --quiet\ndata {" ".join(names)} --quiet', check=True)
+        self.refresh()
 
     @staticmethod
     def _names_from_varlist(out: list[str]) -> list[str]:
@@ -163,13 +310,42 @@ class GretlEngine:
                 if ln.startswith("  ") and re.fullmatch(r"\s+\w+", ln)]
 
     # -- data access ------------------------------------------------------
-    def series_values(self, names: list[str]) -> tuple[list[str], list[list[str]]]:
-        """Current-sample values via a temporary CSV."""
+    def series_values(self, names: list[str], with_obs: bool = False):
+        """Current-sample values via a temporary CSV. With with_obs, also the
+        observation numbers (1-based, whole workfile) of the rows."""
         path = os.path.join(self.tmpdir, "view.csv")
-        self.run(f'store "{path}" {" ".join(names)}', check=True)
+        extra = ""
+        if with_obs:
+            self.run("series ev_obsno = obs")
+            extra = " ev_obsno"
+        self.run(f'store "{path}" {" ".join(names)}{extra}', check=True)
         with open(path, newline="") as f:
             rows = list(csv.reader(f))
-        return rows[0], rows[1:]
+        if not with_obs:
+            return rows[0], rows[1:]
+        obsno = [int(float(r[-1])) for r in rows[1:]]
+        return rows[0][:-1], [r[:-1] for r in rows[1:]], obsno
+
+    def set_value(self, name: str, obsno: int, value: str):
+        v = value.strip()
+        if v.upper() in ("", "NA", "NAN"):
+            v = "NA"
+        else:
+            float(v)                       # raises ValueError for non-numbers
+        self.run(f"{name}[{obsno}] = {v}", check=True)
+
+    def forecast(self, eq: str, fname: str, sename: str, dynamic: bool) -> tuple[str, str]:
+        """EViews Forecast: series fname (and sename), evaluation text and graph."""
+        self.run(f"bundle ev_fc = ev_forecast({eq}, dataset, {int(dynamic)}, 1)", check=True)
+        cmds = [f"series {fname} = ev_fcast_series(ev_fc)"]
+        if sename:
+            cmds.append(f"series {sename} = ev_fcast_se(ev_fc)")
+        self.run("\n".join(cmds), check=True)
+        text = "\n".join(self.run("ev_fprint(&ev_fc)", check=True)).strip("\n")
+        png = self.tmp_png()
+        self.run(f'ev_fplot(&ev_fc, "{png}")', check=True)
+        self.refresh()
+        return text, png
 
     def tmp_png(self) -> str:
         self.plot_counter += 1
@@ -182,6 +358,11 @@ class GretlEngine:
         if not os.path.exists(path):
             raise GretlError("graph was not produced")
         return path
+
+    def strings(self, expr: str) -> list[str]:
+        """Elements of a gretl array of strings."""
+        out = self.run(f"eval {expr}")
+        return [m.group(1) for ln in out for m in [re.match(r'\[\d+\] "(.*)"$', ln.strip())] if m]
 
     def equation_text(self, name: str) -> str:
         return "\n".join(self.run(f"ev_print(&{name})", check=True)).strip("\n")

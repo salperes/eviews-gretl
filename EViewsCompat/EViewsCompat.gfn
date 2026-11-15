@@ -2,9 +2,9 @@
 <gretl-functions>
 <gretl-function-package name="EViewsCompat" minver="2026a">
 <author>EViewsCompat contributors</author>
-<version>0.1</version>
+<version>0.2</version>
 <date>2026-11-15</date>
-<description>EViews-style least squares, Wald, residual diagnostics, freeze and at-functions</description>
+<description>EViews-style LS, forecasts, VARs, Wald, residual diagnostics, freeze and at-functions</description>
 <tags>C10 C20 C51</tags>
 <label>EViews-style equation (LS)</label>
 <menu-attachment>MAINWIN/Model/LinearModels</menu-attachment>
@@ -51,6 +51,30 @@ Functions (CLI / console). &quot;dataset&quot; means: all series in the dataset.
   ev_trend(), ev_seas(k), ev_pch(x), ev_pc(x), ev_pchy(x), ev_pcy(x),
   ev_movav(x,n), ev_movsum(x,n), ev_mean(x), ev_stdev(x) (n-1),
   ev_var(x) (population, n), ev_obs(x), ev_elem(x, &quot;1990:1&quot;)
+
+Forecasts (eq.forecast). The forecast sample is the current sample.
+
+  ev_forecast(eq, dataset [, dynamic=1] [, quiet])   -&gt; bundle
+      Static (0) or dynamic (1). Dynamic forecasts replace lags of a plain
+      dependent variable, y(-k), by earlier forecasts. Bundle: yf, se,
+      actual, rmse, mae, mape, theil, bias_prop, var_prop, cov_prop.
+  series f = ev_fcast_series(fc)     series s = ev_fcast_se(fc)
+  ev_fplot(&amp;fc [, &quot;file.png&quot;])       forecast with +/- 2 S.E. and actual
+
+VAR objects (var v.ls 1 2 y1 y2 @ c x)
+
+  ev_varest(&quot;1 2 y1 y2 @ c x&quot;, dataset [, quiet] [, &quot;names&quot;])  -&gt; bundle
+      Lag pairs (1 2 = lags 1 to 2), endogenous variables, then exogenous
+      after the at-sign; c = constant (included by default when there is no
+      exogenous part). Use series names so lags can use pre-sample data;
+      &quot;names&quot; gives display names, e.g. &quot;dlog(cons) dlog(gdp)&quot;.
+  ev_varprint(&amp;v)               EViews-style estimates: coef, (s.e.), [t]
+  ev_vargranger(v)              Granger causality / block exogeneity Wald
+  ev_varirf(v, 10)              impulse responses (Cholesky)
+  ev_varirfplot(v, 10 [, &quot;file.png&quot;])   grid of response graphs
+  ev_vardecomp(v, 10)           variance decomposition (percent)
+  ev_varlaglen(v, dataset, 8)   lag length criteria
+  series r = ev_varresid(v, 1)  residuals of equation 1
 </help>
 <gretl-function name="ev_gen" type="series">
  <params count="2">
@@ -554,6 +578,597 @@ return ev__toseries(b.yhat, b.tobs)
  </params>
 <code>errorif(!inbundle(b, &quot;tobs&quot;), &quot;Not an ev_ls result (or estimated with an older EViewsCompat)&quot;)
 return ev__toseries(b.uhat, b.tobs)
+</code>
+</gretl-function>
+<gretl-function name="ev_forecast" type="bundle">
+ <params count="4">
+  <param name="b" type="bundle">
+<description>ev_ls result</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="dynamic" type="bool" default="1">
+<description>Dynamic (1) or static (0)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code>errorif(!inbundle(b, &quot;spec&quot;) || !inbundle(b, &quot;coeff&quot;), &quot;First argument must be an ev_ls result&quot;)
+strings tok = strsplit(b.spec)
+scalar k = b.k
+series evf_y = ev_gen(tok[1], vars)
+matrix X = {}
+strings lab = array(0)
+loop i = 2..nelem(tok)
+  if tolower(tok[i]) == &quot;c&quot;
+    series evf_r = 1
+  else
+    series evf_r = ev_gen(tok[i], vars)
+  endif
+  X ~= {evf_r}
+endloop
+errorif(cols(X) != k, &quot;Could not rebuild the regressors of the equation&quot;)
+matrix y = {evf_y}
+series evf_o = obs
+matrix tobs = {evf_o}
+scalar T = rows(X)
+matrix beta = b.coeff
+
+# dynamic: lags of a plain dependent variable are replaced by forecasts
+matrix lagcol = zeros(1, k)
+if dynamic &amp;&amp; regsub(tok[1], &quot;^[A-Za-z_][A-Za-z0-9_]*$&quot;, &quot;&quot;) == &quot;&quot;
+  loop i = 2..nelem(tok)
+    string tt = tolower(tok[i])
+    string pre = tolower(tok[1]) ~ &quot;(-&quot;
+    if strlen(tt) &gt; strlen(pre) &amp;&amp; substr(tt, 1, strlen(pre)) == pre
+      string num = regsub(substr(tt, strlen(pre) + 1, strlen(tt)), &quot;\)$&quot;, &quot;&quot;)
+      if regsub(num, &quot;^[0-9]+$&quot;, &quot;&quot;) == &quot;&quot;
+        lagcol[i-1] = atof(num)
+      endif
+    endif
+  endloop
+endif
+
+matrix yf = mshape(NA, T, 1)
+matrix se = mshape(NA, T, 1)
+scalar s2 = b.sigma^2
+loop t = 1..T
+  matrix x = X[t,]
+  loop j = 1..k
+    if lagcol[j] &gt; 0 &amp;&amp; t - lagcol[j] &gt;= 1
+      if ok(yf[t - lagcol[j]])
+        x[j] = yf[t - lagcol[j]]
+      endif
+    endif
+  endloop
+  if sum(!ok(x)) == 0
+    yf[t] = x * beta
+    se[t] = sqrt(s2 + qform(x, b.vcv))
+  endif
+endloop
+
+bundle f
+f.depvar = b.depvar
+f.dynamic = dynamic
+f.yf = yf
+f.se = se
+f.actual = y
+f.tobs = tobs
+f.sample = sprintf(&quot;%s %s&quot;, obslabel($t1), obslabel($t2))
+# evaluation where both actual and forecast exist
+matrix m = ok(y) .* ok(yf)
+f.nobs = sum(m)
+if f.nobs &gt; 0
+  matrix a = selifr(y, m)
+  matrix p = selifr(yf, m)
+  matrix e = p - a
+  scalar mse = meanc(e.^2)
+  f.rmse = sqrt(mse)
+  f.mae = meanc(abs(e))
+  f.mape = 100 * meanc(abs(e ./ a))
+  f.theil = f.rmse / (sqrt(meanc(a.^2)) + sqrt(meanc(p.^2)))
+  scalar sa = sqrt(meanc((a - meanc(a)).^2))
+  scalar sp = sqrt(meanc((p - meanc(p)).^2))
+  scalar r = (sa &gt; 0 &amp;&amp; sp &gt; 0) ? meanc((a - meanc(a)) .* (p - meanc(p))) / (sa * sp) : 0
+  f.bias_prop = (meanc(p) - meanc(a))^2 / mse
+  f.var_prop = (sp - sa)^2 / mse
+  f.cov_prop = 2 * (1 - r) * sp * sa / mse
+endif
+if !quiet
+  ev_fprint(&amp;f)
+endif
+return f
+</code>
+</gretl-function>
+<gretl-function name="ev_fprint" type="void">
+ <params count="1">
+  <param name="f" type="bundleref"/>
+ </params>
+<code>printf &quot;\nForecast: %sF\nActual: %s\n&quot;, f.depvar, f.depvar
+printf &quot;Forecast sample: %s\n&quot;, f.sample
+printf &quot;Method: %s\n&quot;, f.dynamic ? &quot;Dynamic forecast&quot; : &quot;Static forecast&quot;
+printf &quot;Included observations: %d\n&quot;, f.nobs
+if f.nobs &gt; 0
+  printf &quot;%-34s%14.6f\n&quot;, &quot;Root Mean Squared Error&quot;, f.rmse
+  printf &quot;%-34s%14.6f\n&quot;, &quot;Mean Absolute Error&quot;, f.mae
+  printf &quot;%-34s%14.6f\n&quot;, &quot;Mean Abs. Percent Error&quot;, f.mape
+  printf &quot;%-34s%14.6f\n&quot;, &quot;Theil Inequality Coef.&quot;, f.theil
+  printf &quot;%-34s%14.6f\n&quot;, &quot;     Bias Proportion&quot;, f.bias_prop
+  printf &quot;%-34s%14.6f\n&quot;, &quot;     Variance Proportion&quot;, f.var_prop
+  printf &quot;%-34s%14.6f\n&quot;, &quot;     Covariance Proportion&quot;, f.cov_prop
+endif
+</code>
+</gretl-function>
+<gretl-function name="ev_fcast_series" type="series">
+ <params count="1">
+  <param name="f" type="bundle">
+<description>ev_forecast result</description>
+  </param>
+ </params>
+<code>return ev__toseries(f.yf, f.tobs)
+</code>
+</gretl-function>
+<gretl-function name="ev_fcast_se" type="series">
+ <params count="1">
+  <param name="f" type="bundle">
+<description>ev_forecast result</description>
+  </param>
+ </params>
+<code>return ev__toseries(f.se, f.tobs)
+</code>
+</gretl-function>
+<gretl-function name="ev_fplot" type="void">
+ <params count="2">
+  <param name="f" type="bundleref"/>
+  <param name="fname" type="string" optional="true"/>
+ </params>
+<code># forecast with +/- 2 S.E. bands, and the actual series
+matrix M = f.yf ~ (f.yf + 2 * f.se) ~ (f.yf - 2 * f.se) ~ f.actual
+cnameset(M, defarray(&quot;Forecast&quot;, &quot;+2 S.E.&quot;, &quot;-2 S.E.&quot;, &quot;Actual&quot;))
+string out = exists(fname) ? fname : &quot;display&quot;
+gnuplot 1 2 3 4 --matrix=M --time-series --with-lines --single-yaxis --output=&quot;@out&quot; {set title &quot;Forecast with +/- 2 S.E.&quot;; set style line 2 dt 2; set style line 3 dt 2;}
+</code>
+</gretl-function>
+<gretl-function name="ev_varest" type="bundle">
+ <params count="4">
+  <param name="spec" type="string">
+<description>Lag pairs, endogenous, then exogenous after the at-sign</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+  <param name="names" type="string" optional="true">
+<description>Display names for the variables, space separated</description>
+  </param>
+ </params>
+<code># Plain series names are used directly, so lags reach before the sample start
+# as in gretl's var. Expressions are evaluated inside this function, where
+# pre-sample values are not available: create them as series first if that matters.
+string AT = &quot;@&quot;
+strings LB = exists(names) ? strsplit(names) : array(0)
+scalar nexpr = 0
+strings parts = strsplit(spec, AT)
+errorif(nelem(parts) &gt; 2, &quot;Use the at-sign once, before the exogenous variables&quot;)
+strings L = strsplit(parts[1])
+# leading integers are lag pairs
+matrix lagv = {}
+scalar i0 = 1
+loop while i0 + 1 &lt;= nelem(L) &amp;&amp; regsub(L[i0], &quot;^[0-9]+$&quot;, &quot;&quot;) == &quot;&quot; &amp;&amp; regsub(L[i0+1], &quot;^[0-9]+$&quot;, &quot;&quot;) == &quot;&quot;
+  scalar a = atof(L[i0])
+  scalar z = atof(L[i0+1])
+  errorif(a &lt; 1 || z &lt; a, &quot;Lag pairs must be like 1 2 (from 1 to 2)&quot;)
+  lagv ~= seq(a, z)
+  i0 += 2
+endloop
+errorif(cols(lagv) == 0, &quot;Start the specification with lag pairs, e.g. 1 2&quot;)
+lagv = values(lagv')'
+errorif(nelem(L) - i0 + 1 &lt; 1, &quot;No endogenous variables&quot;)
+list Y = null
+strings ylab = array(0)
+strings ytok = array(0)
+strings xtok = array(0)
+loop i = i0..nelem(L)
+  matrix pp = instrings(varnames(vars), L[i])
+  if rows(pp) &gt; 0
+    list Y += vars[pp[1]]
+  else
+    string v = sprintf(&quot;evv_y%d&quot;, i)
+    series @v = ev_gen(L[i], vars)
+    list Y += @v
+    nexpr++
+  endif
+  scalar li = nelem(ytok) + 1
+  ylab += nelem(LB) &gt;= li ? toupper(LB[li]) : toupper(L[i])
+  ytok += L[i]
+endloop
+list X = null
+strings xlab = array(0)
+scalar hasc = nelem(parts) == 1   # no exogenous part: constant by default
+if nelem(parts) == 2
+  strings R = strsplit(parts[2])
+  loop i = 1..nelem(R)
+    if tolower(R[i]) == &quot;c&quot;
+      hasc = 1
+    else
+      matrix pp = instrings(varnames(vars), R[i])
+      if rows(pp) &gt; 0
+        list X += vars[pp[1]]
+      else
+        string v = sprintf(&quot;evv_x%d&quot;, i)
+        series @v = ev_gen(R[i], vars)
+        list X += @v
+        nexpr++
+      endif
+      scalar li = nelem(ytok) + nelem(xtok) + 1
+      xlab += nelem(LB) &gt;= li ? toupper(LB[li]) : toupper(R[i])
+      xtok += R[i]
+    endif
+  endloop
+endif
+scalar n0 = $nobs
+if nelem(X) &gt; 0
+  if hasc
+    var lagv Y ; X --silent
+  else
+    var lagv Y ; X --silent --nc
+  endif
+else
+  if hasc
+    var lagv Y --silent
+  else
+    var lagv Y --silent --nc
+  endif
+endif
+bundle sys = $system
+if nexpr &gt; 0 &amp;&amp; !quiet
+  printf &quot;Note: %d variable(s) given as expressions lose their pre-sample lags;\n&quot;, nexpr
+  printf &quot;      create them as series first to use the full sample.\n&quot;
+endif
+
+bundle b
+b.spec = spec
+b.sys = sys
+b.ylab = ylab
+b.xlab = xlab
+b.ytok = ytok
+b.xtok = xtok
+b.lags = lagv
+b.hasc = hasc
+b.n = nelem(Y)
+b.T = sys.T
+b.k = sys.ncoeff
+b.coeff = sys.coeff
+b.adjusted = sys.T &lt; n0
+b.sample = sprintf(&quot;%s %s&quot;, obslabel(sys.t1), obslabel(sys.t2))
+b.estdate = strftime($now[1], &quot;%m/%d/%y   Time: %H:%M&quot;)
+# coefficient labels in gretl's order: const, lagv of each endogenous, exogenous
+strings clab = array(0)
+if hasc
+  clab += &quot;C&quot;
+endif
+loop j = 1..b.n
+  loop l = 1..cols(lagv)
+    clab += sprintf(&quot;%s(-%d)&quot;, ylab[j], lagv[l])
+  endloop
+endloop
+loop j = 1..nelem(xlab)
+  clab += xlab[j]
+endloop
+errorif(nelem(clab) != b.k, &quot;Internal error: coefficient labels do not match&quot;)
+b.clab = clab
+
+# per-equation statistics
+scalar T = b.T
+scalar k = b.k
+matrix E = sys.uhat
+matrix Ym = sys.Y
+matrix ssr = sumc(E.^2)
+matrix dev = Ym .- meanc(Ym)
+matrix sst = sumc(dev.^2)
+b.ssr = ssr
+b.rsq = 1 - ssr ./ sst
+b.adjrsq = 1 - (1 - b.rsq) * (T - 1) / (T - k)
+b.seeq = sqrt(ssr / (T - k))
+b.se = sqrt(diag(sys.xtxinv)) * b.seeq       # k x n
+b.tstat = b.coeff ./ b.se
+b.Fstat = hasc ? (b.rsq / (k - 1)) ./ ((1 - b.rsq) / (T - k)) : mshape(NA, 1, b.n)
+b.lnl_eq = -T / 2 * (1 + log(2 * $pi) + log(ssr / T))
+b.aic_eq = -2 * b.lnl_eq / T + 2 * k / T
+b.sc_eq = -2 * b.lnl_eq / T + k * log(T) / T
+b.meany = meanc(Ym)
+b.sdy = sqrt(sst / (T - 1))
+matrix S = E'E / T
+b.det_adj = det(E'E / (T - k))
+b.det = det(S)
+b.lnl = sys.lnl
+b.aic = -2 * b.lnl / T + 2 * b.n * k / T
+b.sc = -2 * b.lnl / T + b.n * k * log(T) / T
+if !quiet
+  ev_varprint(&amp;b)
+endif
+return b
+</code>
+</gretl-function>
+<gretl-function name="ev_varprint" type="void">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code>errorif(!inbundle(b, &quot;sys&quot;), &quot;Not an ev_varest result&quot;)
+scalar n = b.n
+printf &quot;\nVector Autoregression Estimates\nDate: %s\n&quot;, b.estdate
+printf &quot;Sample%s: %s\n&quot;, b.adjusted ? &quot; (adjusted)&quot; : &quot;&quot;, b.sample
+printf &quot;Included observations: %d%s\n&quot;, b.T, b.adjusted ? &quot; after adjustments&quot; : &quot;&quot;
+printf &quot;Standard errors in ( ) &amp; t-statistics in [ ]\n\n&quot;
+scalar w = 22 + 16 * n
+ev__line(w)
+printf &quot;%-22s&quot;, &quot;&quot;
+loop j = 1..n
+  printf &quot;%16s&quot;, b.ylab[j]
+endloop
+printf &quot;\n&quot;
+ev__line(w)
+# EViews order: lags first, then C, then exogenous
+matrix ord = {}
+scalar c0 = b.hasc ? 2 : 1
+scalar nl = b.n * cols(b.lags)
+ord ~= seq(c0, c0 + nl - 1)
+if b.hasc
+  ord ~= 1
+endif
+if b.k &gt; nl + b.hasc
+  ord ~= seq(c0 + nl, b.k)
+endif
+loop r = 1..cols(ord)
+  scalar i = ord[r]
+  printf &quot;%-22s&quot;, b.clab[i]
+  loop j = 1..n
+    printf &quot;%16.6f&quot;, b.coeff[i,j]
+  endloop
+  printf &quot;\n%-22s&quot;, &quot;&quot;
+  loop j = 1..n
+    printf &quot;%16s&quot;, sprintf(&quot;(%.5f)&quot;, b.se[i,j])
+  endloop
+  printf &quot;\n%-22s&quot;, &quot;&quot;
+  loop j = 1..n
+    printf &quot;%16s&quot;, sprintf(&quot;[%.5f]&quot;, b.tstat[i,j])
+  endloop
+  printf &quot;\n\n&quot;
+endloop
+ev__line(w)
+strings nm = defarray(&quot;R-squared&quot;, &quot;Adj. R-squared&quot;, &quot;Sum sq. resids&quot;, &quot;S.E. equation&quot;, &quot;F-statistic&quot;, &quot;Log likelihood&quot;, &quot;Akaike AIC&quot;, &quot;Schwarz SC&quot;, &quot;Mean dependent&quot;, &quot;S.D. dependent&quot;)
+matrices st = defarray(b.rsq, b.adjrsq, b.ssr, b.seeq, b.Fstat, b.lnl_eq, b.aic_eq, b.sc_eq, b.meany, b.sdy)
+loop r = 1..nelem(nm)
+  printf &quot;%-22s&quot;, nm[r]
+  matrix v = st[r]
+  loop j = 1..n
+    printf &quot;%16.6f&quot;, v[j]
+  endloop
+  printf &quot;\n&quot;
+endloop
+ev__line(w)
+printf &quot;%-44s%16.6g\n&quot;, &quot;Determinant resid covariance (dof adj.)&quot;, b.det_adj
+printf &quot;%-44s%16.6g\n&quot;, &quot;Determinant resid covariance&quot;, b.det
+printf &quot;%-44s%16.6f\n&quot;, &quot;Log likelihood&quot;, b.lnl
+printf &quot;%-44s%16.6f\n&quot;, &quot;Akaike information criterion&quot;, b.aic
+printf &quot;%-44s%16.6f\n&quot;, &quot;Schwarz criterion&quot;, b.sc
+ev__line(w)
+</code>
+</gretl-function>
+<gretl-function name="ev_vargranger" type="matrix">
+ <params count="2">
+  <param name="b" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># VAR Granger causality / block exogeneity Wald tests (chi-square), EViews style.
+# Returns rows: dependent j, excluded i (0 = all), chi2, df, p
+scalar n = b.n
+scalar p = cols(b.lags)
+scalar c0 = b.hasc ? 2 : 1
+matrix V0 = b.sys.xtxinv
+matrix out = {}
+if !quiet
+  printf &quot;\nVAR Granger Causality/Block Exogeneity Wald Tests\nSample: %s\nIncluded observations: %d\n&quot;, b.sample, b.T
+endif
+loop j = 1..n
+  if !quiet
+    printf &quot;\nDependent variable: %s\n\n%-22s%14s%8s%10s\n&quot;, b.ylab[j], &quot;Excluded&quot;, &quot;Chi-sq&quot;, &quot;df&quot;, &quot;Prob.&quot;
+  endif
+  scalar s2 = b.seeq[j]^2
+  matrix allidx = {}
+  loop i = 1..n
+    if i != j
+      matrix idx = seq(c0 + (i - 1) * p, c0 + i * p - 1)
+      allidx ~= idx
+      matrix bb = b.coeff[idx, j]
+      scalar W = qform(bb', inv(s2 * V0[idx, idx]))
+      out |= {j, i, W, p, pvalue(X, p, W)}
+      if !quiet
+        printf &quot;%-22s%14.6f%8d%10.4f\n&quot;, b.ylab[i], W, p, pvalue(X, p, W)
+      endif
+    endif
+  endloop
+  if n &gt; 1
+    matrix bb = b.coeff[allidx, j]
+    scalar W = qform(bb', inv(s2 * V0[allidx, allidx]))
+    out |= {j, 0, W, cols(allidx), pvalue(X, cols(allidx), W)}
+    if !quiet
+      printf &quot;%-22s%14.6f%8d%10.4f\n&quot;, &quot;All&quot;, W, cols(allidx), pvalue(X, cols(allidx), W)
+    endif
+  endif
+endloop
+return out
+</code>
+</gretl-function>
+<gretl-function name="ev_varirf" type="matrix">
+ <params count="3">
+  <param name="b" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="h" type="int" min="1" default="10">
+<description>Horizon</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># Impulse responses (Cholesky, one S.D. innovations). Column (s-1)*n+t holds
+# the response of variable t to a shock in variable s.
+scalar n = b.n
+set horizon h
+matrix R = {}
+loop s = 1..n
+  loop t = 1..n
+    matrix r = irf(t, s, 0, b.sys)
+    R ~= r[1:h, 1]
+  endloop
+endloop
+if !quiet
+  loop t = 1..n
+    printf &quot;\nResponse of %s:\n%-8s&quot;, b.ylab[t], &quot;Period&quot;
+    loop s = 1..n
+      printf &quot;%16s&quot;, b.ylab[s]
+    endloop
+    printf &quot;\n&quot;
+    loop i = 1..h
+      printf &quot;%-8d&quot;, i
+      loop s = 1..n
+        printf &quot;%16.6f&quot;, R[i, (s - 1) * n + t]
+      endloop
+      printf &quot;\n&quot;
+    endloop
+  endloop
+  printf &quot;\nCholesky ordering: &quot;
+  loop s = 1..n
+    printf &quot;%s &quot;, b.ylab[s]
+  endloop
+  printf &quot;\n&quot;
+endif
+return R
+</code>
+</gretl-function>
+<gretl-function name="ev_varirfplot" type="void">
+ <params count="3">
+  <param name="b" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="h" type="int" min="1" default="10"/>
+  <param name="fname" type="string" optional="true"/>
+ </params>
+<code># grid of impulse-response graphs: row = responding variable, column = shock
+matrix R = ev_varirf(b, h, 1)
+scalar n = b.n
+strings plots = array(0)
+loop t = 1..n
+  loop s = 1..n
+    matrix M = R[, (s - 1) * n + t]
+    string ttl = sprintf(&quot;Response of %s to %s&quot;, b.ylab[t], b.ylab[s])
+    string buf = &quot;&quot;
+    gnuplot 1 --matrix=M --time-series --with-lines --outbuf=buf {set title &quot;@ttl&quot; font &quot;,9&quot;; unset key; set xlabel &quot;&quot;; set ylabel &quot;&quot;; set xzeroaxis lt 1 lc rgb &quot;#c0392b&quot;;}
+    plots += buf
+  endloop
+endloop
+string out = exists(fname) ? fname : &quot;display&quot;
+gridplot plots --rows=n --width=900 --height=700 --fontsize=9 --output=&quot;@out&quot;
+</code>
+</gretl-function>
+<gretl-function name="ev_vardecomp" type="matrix">
+ <params count="3">
+  <param name="b" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="h" type="int" min="1" default="10"/>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># Variance decomposition in percent; block t holds rows 1..h for variable t
+scalar n = b.n
+set horizon h
+matrix D = {}
+loop t = 1..n
+  matrix d = fevd(t, 0, b.sys)
+  D |= 100 * d[1:h, 1:n]
+endloop
+if !quiet
+  matrix R = ev_varirf(b, h, 1)
+  loop t = 1..n
+    printf &quot;\nVariance Decomposition of %s:\n%-8s%14s&quot;, b.ylab[t], &quot;Period&quot;, &quot;S.E.&quot;
+    loop s = 1..n
+      printf &quot;%14s&quot;, b.ylab[s]
+    endloop
+    printf &quot;\n&quot;
+    loop i = 1..h
+      scalar v = 0
+      loop s = 1..n
+        v += sumc(R[1:i, (s - 1) * n + t].^2)
+      endloop
+      printf &quot;%-8d%14.6f&quot;, i, sqrt(v)
+      loop s = 1..n
+        printf &quot;%14.4f&quot;, D[(t - 1) * h + i, s]
+      endloop
+      printf &quot;\n&quot;
+    endloop
+  endloop
+  printf &quot;\nCholesky ordering: &quot;
+  loop s = 1..n
+    printf &quot;%s &quot;, b.ylab[s]
+  endloop
+  printf &quot;\n&quot;
+endif
+return D
+</code>
+</gretl-function>
+<gretl-function name="ev_varlaglen" type="void">
+ <params count="3">
+  <param name="b" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="maxlag" type="int" min="1" default="8"/>
+ </params>
+<code># lag length criteria (gretl's var --lagselect)
+list Y = null
+loop i = 1..b.n
+  string v = sprintf(&quot;evl_y%d&quot;, i)
+  series @v = ev_gen(b.ytok[i], vars)
+  list Y += @v
+endloop
+list X = null
+loop i = 1..nelem(b.xtok)
+  string v = sprintf(&quot;evl_x%d&quot;, i)
+  series @v = ev_gen(b.xtok[i], vars)
+  list X += @v
+endloop
+printf &quot;\nVAR Lag Order Selection Criteria\nEndogenous variables: &quot;
+loop i = 1..b.n
+  printf &quot;%s &quot;, b.ylab[i]
+endloop
+printf &quot;\n&quot;
+if nelem(X) &gt; 0
+  if b.hasc
+    var maxlag Y ; X --lagselect
+  else
+    var maxlag Y ; X --lagselect --nc
+  endif
+elif b.hasc
+  var maxlag Y --lagselect
+else
+  var maxlag Y --lagselect --nc
+endif
+</code>
+</gretl-function>
+<gretl-function name="ev_varresid" type="series">
+ <params count="2">
+  <param name="b" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="i" type="int" min="1" default="1">
+<description>Equation number</description>
+  </param>
+ </params>
+<code>matrix t = seq(b.sys.t1, b.sys.t2)'
+return ev__toseries(b.sys.uhat[, i], t)
 </code>
 </gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
