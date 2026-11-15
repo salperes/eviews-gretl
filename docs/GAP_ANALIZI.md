@@ -147,7 +147,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | S7 | Panel birim kök: Breitung, Hadri, Fisher-ADF/PP | ❌ | | adf (Choi zaten basıyor), kendi kodu | M | P2 |
 | S8 | HP filtresi | ✅ | | hpfilt | – | – |
 | S9 | Bant geçiren filtreler BK, CF | ❌ | | bkfilt, kendi kodu (CF) | S | P2 |
-| S10 | **Mevsimsel düzeltme** X-13 / TRAMO-SEATS, `seas` (hareketli ortalama) | ✅ | `seas(m|a)` (hareketli ortalama) ve `x13` (gretl `deseas`, x13as programıyla; save=d10/d11; d12/d13 yok); TRAMO-SEATS programı kurulu değil |a)`) var; X-13/TRAMO-SEATS için x13as programı gerekir (gretl macOS paketinde yok) | x13a (gretl ile gelir) | M | **P1** |
+| S10 | **Mevsimsel düzeltme** X-13 / TRAMO-SEATS, `seas` (hareketli ortalama) | ✅ | `seas(m/a)` (hareketli ortalama) ve `x13` (gretl `deseas`, x13as programıyla; save=d10/d11; d12/d13 yok); TRAMO-SEATS programı kurulu değil |a)`) var; X-13/TRAMO-SEATS için x13as programı gerekir (gretl macOS paketinde yok) | x13a (gretl ile gelir) | M | **P1** |
 | S11 | Üstel düzeltme / ETS (`smooth`, `ets`) | ❌ | | kendi kodu | M | P2 |
 | S12 | Ara değer doldurma (`ipolate`) | ❌ | | kendi kodu | S | P2 |
 | S13 | Eşitlik testleri, tek yönlü tablolama | ❌ | | difftest, freq | S | P3 |
