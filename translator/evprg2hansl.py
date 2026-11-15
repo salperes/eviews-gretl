@@ -230,7 +230,7 @@ def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
                 raise ValueError("@coefs/resid used before any equation")
             eq = ctx.last_eq
             p = re.sub(r"@coefs\s*\(\s*([^()]+?)\s*\)", rf"{eq}.coeff[\1]", p, flags=re.IGNORECASE)
-            res = f"ev_resid({eq})" if ctx.equations.get(eq) in ("ls", "panel") \
+            res = f"ev_resid({eq})" if ctx.equations.get(eq) in ("ls", "panel", "tsls", "binary", "ardl") \
                 else apply_case(f"{eq}_resid", ctx)
             p = re.sub(r"(?<![A-Za-z0-9_])resid(?![A-Za-z0-9_])", res, p, flags=re.IGNORECASE)
         # matrix element m(i,j) -> m[i,j]
@@ -436,6 +436,51 @@ def _ls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
     cov = _ls_cov(opts)
     args = f'"{_spec(spec, ctx)}", dataset' + (f', "{cov}"' if cov else "")
     return [f"bundle {name} = ev_ls({args})"]
+
+
+def _new_eq(name: str, kind: str, spec: str, ctx: Ctx) -> tuple[str, str]:
+    name = translate_name(name, ctx)
+    ctx.equations[name] = kind
+    ctx.last_eq = name
+    sp = _spec(spec, ctx)
+    ctx.eq_dep[name] = sp.split()[0]
+    return name, sp
+
+
+def _tsls_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    if "@" not in spec:
+        raise ValueError("tsls: give the instruments after @")
+    if "=" in spec.split("@")[0]:
+        raise ValueError("nonlinear TSLS (explicit equations) is not supported")
+    name, sp = _new_eq(name, "tsls", spec.replace("@", " @ "), ctx)
+    sp = re.sub(r"\s+", " ", sp)
+    cov = _ls_cov(opts)
+    return [f'bundle {name} = ev_tsls("{sp}", dataset' + (', "white"' if cov == "white" else "") + ")"]
+
+
+def _binary_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    d = _opts(opts).get("d", "l").lower()[:1]
+    if d not in ("l", "p", "n"):
+        raise ValueError("binary: only d=l (logit) and d=p (probit) are supported")
+    name, sp = _new_eq(name, "binary", spec, ctx)
+    return [f'bundle {name} = ev_binary("{sp}", dataset, "{"logit" if d == "l" else "probit"}")']
+
+
+def _ardl_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
+    op = _opts(opts)
+    unknown = set(op) - {"deplags", "reglags", "ic", "trend"}
+    if unknown:
+        raise ValueError(f"ardl option {sorted(unknown)[0]}= not supported")
+    ic = {"bic": "sic", "schwarz": "sic"}.get(op.get("ic", "aic").lower(), op.get("ic", "aic").lower())
+    tr = {"c": "const", "none": "none", "const": "const", "linear": "linear", "trend": "linear"}.get(
+        op.get("trend", "const").lower(), "const")
+    name, sp = _new_eq(name, "ardl", spec.replace("@", " @ "), ctx)
+    sp = re.sub(r"\s+", " ", sp)
+    return [f'bundle {name} = ev_ardl("{sp}", dataset, {op.get("deplags", "4")}, {op.get("reglags", "4")}, '
+            f'"{ic}", "{tr}")']
+
+
+EQ_METHODS = {"ls": None, "arch": None, "tsls": _tsls_call, "binary": _binary_call, "ardl": _ardl_call}
 
 
 def _arch_call(name: str, opts: str | None, spec: str, ctx: Ctx) -> list[str]:
@@ -1023,17 +1068,49 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return _ls_call(obj, opts, args, ctx)
     if ml == "arch":
         return _arch_call(obj, opts, args, ctx)
+    if EQ_METHODS.get(ml) and ctx.equations.get(o) not in ("var", "vecm", "system", "model"):
+        return EQ_METHODS[ml](obj, opts, args, ctx)
+    # equation tests (least squares equations)
+    if ml in ("hettest", "white", "archtest") and ctx.equations.get(o, "ls") == "ls":
+        op = _opts(opts)
+        ty = "white" if ml == "white" else ("arch" if ml == "archtest" else op.get("type", "bpg").lower())
+        nl = op.get("lags") or (opts.strip() if ml == "archtest" and opts and opts.strip().isdigit() else "1")
+        if ty not in ("bpg", "harvey", "glejser", "arch", "white"):
+            raise ValueError(f"hettest type {ty} not supported")
+        return [f'bundle {o}_het = ev_hettest({o}, "{ty}", {nl})']
+    if ml == "reset" and ctx.equations.get(o, "ls") == "ls":
+        n = (opts or "1").strip() or "1"
+        return [f"bundle {o}_reset = ev_reset({o}, {n})"]
+    if ml == "chow" and ctx.equations.get(o, "ls") == "ls":
+        f = 1 if "f" in [x.strip().lower() for x in (opts or "").split(",")] else 0
+        dates = " ".join(translate_date(d) or d for d in args.split())
+        if not dates:
+            raise ValueError("chow needs a breakpoint date")
+        return [f'bundle {o}_chow = ev_chow({o}, "{dates}", {f})']
+    if ml in ("testadd", "testdrop") and ctx.equations.get(o, "ls") == "ls":
+        names = _spec(args, ctx)
+        if ml == "testadd":
+            return [f'bundle {o}_test = ev_testadd({o}, dataset, "{names}")']
+        return [f'bundle {o}_test = ev_testdrop({o}, "{names}")']
+    if ml == "rls" and ctx.equations.get(o, "ls") == "ls":
+        what = (opts or "c").strip().lower()[:1] or "c"
+        if what not in ("c", "q", "r"):
+            raise ValueError("rls: c (CUSUM), q (CUSUM of squares) or r (recursive residuals)")
+        return [f"bundle {o}_rls = ev_rls({o})", f'ev_rlsplot({o}_rls, "{what}"{_plot_file_arg(ctx)})']
+    if ml in ("boundstest", "cointrep") and ctx.equations.get(o) == "ardl":
+        return [f"ev_boundsprint(&{o})"]
     if ml == "wald":
         return [f'bundle {o}_wald = ev_wald({o}, "{args.strip()}")']
     if ml == "auto":
         return [f"bundle {o}_diag = ev_diag({o}, {(opts or '2').strip()})"]
-    if ml in ("white", "hettest", "jbera"):
+    if ml == "jbera":
         return [f"bundle {o}_diag = ev_diag({o})"]
     if ml in ("output", "results", "display", "spec"):
         kind = ctx.equations.get(o)
         if kind == "arch":
             raise ValueError("output of a GARCH(p,q) equation: estimated with gretl's garch command")
         return [{"vecm": f"ev_vecprint(&{o})", "var": f"ev_varprint(&{o})", "panel": f"ev_panelprint(&{o})",
+                 "binary": f"ev_binaryprint(&{o})", "ardl": f"ev_ardlprint(&{o})",
                  "garch": f"ev_garchprint(&{o})"}.get(kind, f"ev_print(&{o})")]
     if ml == "resids":
         return [f"ev_plot(&{o})"]
@@ -1064,7 +1141,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if ml == "ls":
             return _var_call(obj, opts, args, ctx)
         raise ValueError(f"VAR view .{meth} not supported")
-    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("ls", "panel"):
+    if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("ls", "panel", "tsls", "binary", "ardl"):
         return [f"series {translate_name(args.split()[0], ctx)} = ev_resid({o})"]
     if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("arch", "garch"):
         return [f"series {translate_name(args.split()[0], ctx)} = {apply_case(o + '_resid', ctx)}"]
@@ -1364,11 +1441,14 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             return _ls_call(name, opts, spec, ctx)
         if meth.lower() == "arch":
             return _arch_call(name, opts, spec, ctx)
+        if EQ_METHODS.get(meth.lower()):
+            return EQ_METHODS[meth.lower()](name, opts, spec, ctx)
         raise ValueError(f"estimation method {meth} not supported")
-    m = re.fullmatch(r"ls(?:\(([^)]*)\))?\s+(.+)", s, flags=re.IGNORECASE)
+    m = re.fullmatch(r"(ls|tsls|binary|ardl)(?:\(([^)]*)\))?\s+(.+)", s, flags=re.IGNORECASE)
     if m:
         ctx.eq_counter += 1
-        return _ls_call(f"eq_untitled{ctx.eq_counter}", m.group(1), m.group(2), ctx)
+        fn = EQ_METHODS.get(m.group(1).lower()) or _ls_call
+        return fn(f"eq_untitled{ctx.eq_counter}", m.group(2), m.group(3), ctx)
 
     # freeze(name) obj[.view(opts)]
     m = re.fullmatch(r"freeze\(([^)]*)\)\s+([\w{}!%$]+)(?:\.(\w+)(?:\(([^)]*)\))?)?\s*(.*)", s, flags=re.IGNORECASE)

@@ -1,0 +1,43 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: Phase 1 of the gap analysis (docs/GAP_ANALIZI.md)
+# TSLS, logit/probit, ARDL with bounds test, equation tests
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+smpl full
+smpl 1970:1 2019:4
+
+# E6: two-stage least squares
+bundle EIV = ev_tsls("dlog(CONS) c dlog(GDP) @ c FFR(-1) dlog(GDP(-1)) dlog(CONS(-1))", dataset)
+ev_print(&EIV)
+
+# E8: logit and probit of a growth indicator
+series UP = ldiff(GDP) > 0.0075
+bundle ELOG = ev_binary("UP c FFR dlog(CONS)", dataset, "logit")
+bundle EPRO = ev_binary("UP c FFR dlog(CONS)", dataset, "probit")
+ev_binaryprint(&ELOG)
+
+# E15: ARDL with automatic lag selection and the bounds test
+smpl full
+smpl 1960:1 2019:4
+bundle EARDL = ev_ardl("log(CONS) log(GDP)", dataset, 4, 4, "aic", "const")
+ev_ardlprint(&EARDL)
+
+# T4-T9: tests on a least squares equation
+smpl full
+smpl 1970:1 2019:4
+bundle E1 = ev_ls("dlog(CONS) c dlog(GDP) FFR", dataset)
+bundle E1_het = ev_hettest(E1, "bpg", 1)
+bundle E1_het = ev_hettest(E1, "arch", 2)
+bundle E1_het = ev_hettest(E1, "white", 1)
+bundle E1_reset = ev_reset(E1, 1)
+bundle E1_chow = ev_chow(E1, "1990:1", 0)
+bundle E1_chow = ev_chow(E1, "2015:1", 1)
+bundle E1_test = ev_testadd(E1, dataset, "dlog(CONS(-1))")
+bundle E1_test = ev_testdrop(E1, "FFR")
+bundle E1_rls = ev_rls(E1)
+ev_rlsplot(E1_rls, "c")
+

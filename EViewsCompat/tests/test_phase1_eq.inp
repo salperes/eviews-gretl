@@ -1,0 +1,120 @@
+# Phase 1 equation tools against gretl's own commands
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series dc = ldiff(CONS)
+series dg = ldiff(GDP)
+series di = ldiff(INV)
+series dg1 = dg(-1)
+series dc1 = dc(-1)
+series ffr1 = FFR(-1)
+smpl 1970:1 2019:4
+
+# --- E6 TSLS
+bundle t1 = ev_tsls("dlog(CONS) c dlog(GDP) @ c FFR(-1) dlog(GDP(-1)) dlog(CONS(-1))", dataset, null, 1)
+tsls dc const dg ; const ffr1 dg1 dc1 --quiet
+check("TSLS coefficient = gretl tsls", t1.coeff[2], $coeff[2])
+check("TSLS s.e. = gretl tsls", t1.stderr[2], $stderr[2])
+matrix u = $uhat
+list Z = const ffr1 dg1 dc1
+matrix Zm = {Z}
+check("TSLS J-statistic (n x uncentered R2 of u on Z)", t1.J, rows(u) * qform(u', Zm * inv(Zm'Zm) * Zm') / (u'u))
+check("TSLS instrument rank", t1.instrank, 4)
+
+# --- E8 logit / probit
+series up = dg > 0.0075
+bundle l1 = ev_binary("up c FFR dlog(CONS)", dataset, "l", 1)
+logit up const FFR dc --quiet
+check("logit coefficient = gretl logit", l1.coeff[2], $coeff[2], 1e-5)
+check("logit log likelihood", l1.lnl, $lnl, 1e-8)
+check("logit fitted probabilities sum to the 1s", sumc(l1.yhat), l1.n1, 1e-5)
+bundle p1 = ev_binary("up c FFR dlog(CONS)", dataset, "p", 1)
+probit up const FFR dc --quiet
+check("probit coefficient = gretl probit", p1.coeff[3], $coeff[3], 1e-5)
+check("McFadden R2 = 1 - lnL/lnL0", p1.mcfadden, 1 - p1.lnl / p1.lnl0)
+ev_binaryprint(&l1)
+
+# --- E15 ARDL
+smpl 1960:1 2019:4
+bundle a1 = ev_ardl("log(CONS) log(GDP)", dataset, 4, 4, "aic", null, 1)
+check("ARDL: chosen model has the smallest AIC", minc(a1.models[, cols(a1.models)]) == \
+  a1.models[imaxc(-a1.models[, cols(a1.models)]), cols(a1.models)], 1)
+check("ARDL: number of models = 4 x 5", a1.ncomb, 20)
+matrix W = a1.X
+matrix bo = mols(a1.y, W)
+check("ARDL: final coefficients = OLS on the same columns", a1.coeff[1], bo[1])
+scalar sphi = sumc(a1.coeff[1:a1.p])
+scalar sb = sumc(a1.coeff[a1.p + 1:a1.p + 1 + a1.q[1]])
+check("ARDL: long-run coefficient = sum(beta)/(1-sum(phi))", a1.lr[1], sb / (1 - sphi))
+printf "Selected %s\n", a1.selected
+# bounds F = Wald F on y(-1), x(-1) in the conditional ECM (here ARDL(4,2) on usmacro)
+smpl full
+series ly = log(CONS)
+series lg = log(GDP)
+series dly = diff(ly)
+series dlg = diff(lg)
+smpl minc(a1.tobs) maxc(a1.tobs)
+ols dly const ly(-1) lg(-1) dly(-1 to -3) dlg dlg(-1) --quiet
+omit ly_1 lg_1 --test-only --quiet
+check("ARDL bounds F = Wald F in the conditional ECM", a1.bounds_F, $test)
+smpl 1960:1 2019:4
+ev_ardlprint(&a1)
+
+# --- tests on an LS equation
+smpl 1970:1 2019:4
+bundle e = ev_ls("dlog(CONS) c dlog(GDP) FFR", dataset, null, 1)
+ols dc const dg FFR --quiet
+modtest --breusch-pagan --robust --quiet
+bundle h1 = ev_hettest(e, "bpg", 1, 1)
+check("T4 BPG Obs*R2 = gretl Koenker LM", h1.obsr2, $test)
+ols dc const dg FFR --quiet
+modtest --breusch-pagan --quiet
+check("T4 BPG scaled explained SS = gretl Breusch-Pagan LM", h1.sess, $test)
+ols dc const dg FFR --quiet
+modtest 2 --arch --quiet
+bundle h2 = ev_hettest(e, "arch", 2, 1)
+check("T4 ARCH LM(2) = gretl modtest --arch", h2.obsr2, $test)
+ols dc const dg FFR --quiet
+modtest --white --quiet
+bundle h3 = ev_hettest(e, "white", 1, 1)
+check("T4 White = gretl modtest --white", h3.obsr2, $test)
+bundle h4 = ev_hettest(e, "glejser", 1, 1)
+check("T4 Glejser computed", ok(h4.F), 1)
+ols dc const dg FFR --quiet
+reset --squares-only --quiet
+bundle r1 = ev_reset(e, 1, 1)
+check("T6 RESET F = gretl reset --squares-only", r1.F, $test)
+check("T6 RESET t^2 = F", r1.t^2, r1.F)
+ols dc const dg FFR --quiet
+chow 1990:1 --quiet
+bundle c1 = ev_chow(e, "1990:1", 0, 1)
+check("T7 Chow breakpoint F = gretl chow", c1.F, $test)
+bundle c2 = ev_chow(e, "1990:1 2005:1", 0, 1)
+check("T7 Chow with two breakpoints: 2k restrictions", c2.Fdf1, 6)
+bundle c3 = ev_chow(e, "2015:1", 1, 1)
+check("T7 Chow forecast test F > 0", c3.F > 0, 1)
+ols dc const dg FFR --quiet
+add dc1 --quiet
+bundle o1 = ev_testadd(e, dataset, "dlog(CONS(-1))", 1)
+check("T8 omitted variables F = gretl add", o1.F, $test)
+ols dc const dg FFR --quiet
+omit FFR --test-only --quiet
+bundle o2 = ev_testdrop(e, "FFR", 1)
+check("T8 redundant variables F = gretl omit", o2.F, $test)
+ols dc const dg FFR --quiet
+cusum --quiet
+bundle rr = ev_rls(e, 1)
+check("T9 Harvey-Collier t = gretl cusum", rr.hc, $test)
+check("T9 last recursive coefficients = full OLS", rr.coefs[rows(rr.coefs), 2], e.coeff[2])
+ev_reset(e, 2)
+ev_chow(e, "1990:1")

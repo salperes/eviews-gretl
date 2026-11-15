@@ -222,6 +222,36 @@ class RealPrograms(unittest.TestCase):
         self.assertEqual(translate_line("m(1,1) = 5", c), ["m[1,1] = 5"])
 
 
+class Phase1Equations(unittest.TestCase):
+    def test_estimators(self):
+        c = Ctx()
+        self.assertEqual(translate_line("equation e1.tsls y c x @ c z1 z2", c),
+                         ['bundle e1 = ev_tsls("y c x @ c z1 z2", dataset)'])
+        self.assertEqual(translate_line("tsls(cov=white) y c x @ c z", c)[0],
+                         'bundle eq_untitled1 = ev_tsls("y c x @ c z", dataset, "white")')
+        self.assertEqual(translate_line("equation e2.binary(d=p) d c x", c),
+                         ['bundle e2 = ev_binary("d c x", dataset, "probit")'])
+        self.assertEqual(translate_line("equation e3.ardl(deplags=2, reglags=3, ic=bic) y x1 x2", c),
+                         ['bundle e3 = ev_ardl("y x1 x2", dataset, 2, 3, "sic", "const")'])
+        self.assertEqual(translate_line("e3.output", c), ["ev_ardlprint(&e3)"])
+        self.assertEqual(translate_line("e3.boundstest", c), ["ev_boundsprint(&e3)"])
+        self.assertEqual(translate_line("u = resid", c), ["series u = ev_resid(e3)"])
+        with self.assertRaises(ValueError):
+            translate_line("equation e4.binary(d=x) d c x", c)
+
+    def test_views(self):
+        c = Ctx()
+        translate_line("equation e.ls y c x", c)
+        self.assertEqual(translate_line("e.hettest(type=glejser)", c), ['bundle e_het = ev_hettest(e, "glejser", 1)'])
+        self.assertEqual(translate_line("e.white", c), ['bundle e_het = ev_hettest(e, "white", 1)'])
+        self.assertEqual(translate_line("e.reset(2)", c), ["bundle e_reset = ev_reset(e, 2)"])
+        self.assertEqual(translate_line("e.chow 1990q1 2000q1", c), ['bundle e_chow = ev_chow(e, "1990:1 2000:1", 0)'])
+        self.assertEqual(translate_line("e.chow(f) 2010q1", c), ['bundle e_chow = ev_chow(e, "2010:1", 1)'])
+        self.assertEqual(translate_line("e.testadd z w", c), ['bundle e_test = ev_testadd(e, dataset, "z w")'])
+        self.assertEqual(translate_line("e.testdrop x", c), ['bundle e_test = ev_testdrop(e, "x")'])
+        self.assertEqual(translate_line("e.rls(q)", c), ["bundle e_rls = ev_rls(e)", 'ev_rlsplot(e_rls, "q")'])
+
+
 class Structure(unittest.TestCase):
     def test_subroutine_and_call(self):
         prg = """call twice(gdp, 3, "out")
