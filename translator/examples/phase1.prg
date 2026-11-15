@@ -41,3 +41,14 @@ gc.coint(method=eg)
 gc.coint(method=po)
 smpl @all
 cons.seas(m) cons_sa cons_sf
+
+' V8-V10: VAR stability, residual tests and forecasts
+series dc = dlog(cons)
+series dg = dlog(gdp)
+smpl 1985q1 2015q4
+var v1.ls 1 2 dc dg ffr @ c
+v1.arroots
+v1.arlm(4)
+v1.jbera
+smpl 2016q1 2019q4
+v1.forecast _f

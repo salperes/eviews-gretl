@@ -268,6 +268,19 @@ class Phase1Series(unittest.TestCase):
             translate_line("x.x13", c)
 
 
+class Phase1Var(unittest.TestCase):
+    def test_var_views(self):
+        c = Ctx()
+        translate_line("var v1.ls 1 2 dc dg @ c", c)
+        self.assertEqual(translate_line("v1.arroots", c), ["matrix v1_roots = ev_varroots(v1)"])
+        self.assertEqual(translate_line("v1.arlm(4)", c), ["matrix v1_lm = ev_varlm(v1, 4)"])
+        self.assertEqual(translate_line("v1.jbera(factor=chol)", c), ["bundle v1_norm = ev_varnorm(v1)"])
+        self.assertEqual(translate_line("v1.forecast _f", c),
+                         ["bundle v1_fc = ev_varfcast(v1, dataset, 1)",
+                          "series dc_f = ev_varfseries(v1_fc, 1)", "series dg_f = ev_varfseries(v1_fc, 2)"])
+        self.assertEqual(translate_line("v1.forecast(s)", c)[0], "bundle v1_fc = ev_varfcast(v1, dataset, 0)")
+
+
 class Structure(unittest.TestCase):
     def test_subroutine_and_call(self):
         prg = """call twice(gdp, 3, "out")

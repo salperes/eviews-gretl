@@ -54,3 +54,19 @@ smpl full
 series CONS_SF = NA
 series CONS_SA = ev_seasadj(CONS, "m", &CONS_SF)
 
+# V8-V10: VAR stability, residual tests and forecasts
+series DC = ldiff(CONS)
+series DG = ldiff(GDP)
+smpl full
+smpl 1985:1 2015:4
+bundle V1 = ev_varest("1 2 DC DG FFR @ c", dataset, 0, "dc dg ffr")
+matrix V1_roots = ev_varroots(V1)
+matrix V1_lm = ev_varlm(V1, 4)
+bundle V1_norm = ev_varnorm(V1)
+smpl full
+smpl 2016:1 2019:4
+bundle V1_fc = ev_varfcast(V1, dataset, 1)
+series DC_f = ev_varfseries(V1_fc, 1)
+series DG_f = ev_varfseries(V1_fc, 2)
+series FFR_f = ev_varfseries(V1_fc, 3)
+

@@ -1135,7 +1135,7 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return [f'bundle {o}_wald = ev_wald({o}, "{args.strip()}")']
     if ml == "auto":
         return [f"bundle {o}_diag = ev_diag({o}, {(opts or '2').strip()})"]
-    if ml == "jbera":
+    if ml == "jbera" and ctx.equations.get(o) not in ("var", "vecm"):
         return [f"bundle {o}_diag = ev_diag({o})"]
     if ml in ("output", "results", "display", "spec"):
         kind = ctx.equations.get(o)
@@ -1172,6 +1172,26 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
                     for k, n in enumerate(args.split(), 1)]
         if ml == "ls":
             return _var_call(obj, opts, args, ctx)
+        if ctx.equations.get(o) == "var":
+            if ml == "arroots":
+                return [f"matrix {o}_roots = ev_varroots({o})"]
+            if ml == "arlm":
+                m = re.match(r"\s*(\d+)", opts or args or "")
+                return [f"matrix {o}_lm = ev_varlm({o}, {m.group(1) if m else 2})"]
+            if ml == "jbera":
+                f = _opts(opts).get("factor", "chol").lower()
+                if not f.startswith("chol"):
+                    raise ValueError("jbera: only factor=chol (Lutkepohl) is supported")
+                return [f"bundle {o}_norm = ev_varnorm({o})"]
+            if ml == "forecast":
+                op = [x.strip().lower() for x in (opts or "").split(",") if x.strip()]
+                dyn = 0 if ("s" in op or "static" in op) else 1
+                suf = args.strip() or "_f"
+                out = [f"bundle {o}_fc = ev_varfcast({o}, dataset, {dyn})"]
+                for k, nm in enumerate(ctx.var_endo.get(o, []), 1):
+                    base = re.sub(r"\W+", "_", nm).strip("_")
+                    out.append(f"series {base}{suf} = ev_varfseries({o}_fc, {k})")
+                return out
         raise ValueError(f"VAR view .{meth} not supported")
     if ml in ("makeresid", "makeresids") and ctx.equations.get(o) in ("ls", "panel", "tsls", "binary", "ardl"):
         return [f"series {translate_name(args.split()[0], ctx)} = ev_resid({o})"]

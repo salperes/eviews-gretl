@@ -4644,6 +4644,281 @@ endif
 return k == &quot;m&quot; ? x / sf : x - sf
 </code>
 </gretl-function>
+<gretl-function name="ev_varroots" type="matrix">
+ <params count="2">
+  <param name="v" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># roots of the characteristic polynomial = eigenvalues of the companion matrix
+matrix A = v.sys.A
+matrix ev = eigen(A)
+matrix re = Re(ev)
+matrix im = Im(ev)
+matrix md = sqrt(re.^2 + im.^2)
+# sort by modulus, largest first
+matrix o = msortby(seq(1, rows(md))' ~ -md, 2)
+matrix S = zeros(rows(md), 3)
+loop i = 1..rows(md)
+  scalar j = o[i, 1]
+  S[i,] = re[j] ~ im[j] ~ md[j]
+endloop
+if !quiet
+  printf &quot;\nRoots of Characteristic Polynomial\nEndogenous variables:&quot;
+  loop i = 1..nelem(v.ylab)
+    printf &quot; %s&quot;, v.ylab[i]
+  endloop
+  printf &quot;\nLag specification: %d %d\n\n&quot;, v.lags[1], v.lags[2]
+  printf &quot;%-36s%14s\n&quot;, &quot;Root&quot;, &quot;Modulus&quot;
+  ev__line(52)
+  loop i = 1..rows(S)
+    if abs(S[i, 2]) &lt; 1e-12
+      printf &quot;%-36.6f%14.6f\n&quot;, S[i, 1], S[i, 3]
+    else
+      printf &quot;%-36s%14.6f\n&quot;, sprintf(&quot;%.6f %s %.6fi&quot;, S[i, 1], S[i, 2] &lt; 0 ? &quot;-&quot; : &quot;+&quot;, abs(S[i, 2])), S[i, 3]
+    endif
+  endloop
+  ev__line(52)
+  if maxc(S[, 3]) &lt; 1
+    printf &quot;No root lies outside the unit circle.\nVAR satisfies the stability condition.\n&quot;
+  else
+    printf &quot;Warning: at least one root lies outside the unit circle.\nVAR does not satisfy the stability condition.\n&quot;
+  endif
+endif
+return S
+</code>
+</gretl-function>
+<gretl-function name="ev_varlm" type="matrix">
+ <params count="3">
+  <param name="v" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="h" type="int" min="1" default="4">
+<description>Number of lags to test</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># Breusch-Godfrey LM tests for residual serial correlation (Lutkepohl):
+# LM = T (n - tr(inv(S_u) S_e)), chi-square(n^2 m); rows: lag j alone and lags 1..j
+matrix U = v.sys.uhat
+matrix X = v.sys.X
+scalar T = rows(U)
+scalar n = cols(U)
+matrix Su = U'U / T
+matrix R = {}
+loop j = 1..h
+  loop kind = 1..2
+    matrix Z = X
+    scalar m = 0
+    loop l = 1..j
+      if kind == 2 || l == j
+        Z ~= mlag(U, l, 0)
+        m++
+      endif
+    endloop
+    matrix E = U - Z * mols(U, Z)
+    matrix Se = E'E / T
+    scalar lm = T * (n - tr(inv(Su) * Se))
+    scalar df = n^2 * m
+    R |= {j, kind, lm, df, pvalue(c, df, lm)}
+  endloop
+endloop
+if !quiet
+  printf &quot;\nVAR Residual Serial Correlation LM Tests\nSample: %s\nIncluded observations: %d\n&quot;, v.sample, T
+  printf &quot;\nNull hypothesis: No serial correlation at lag h\n&quot;
+  printf &quot;%6s%14s%8s%10s\n&quot;, &quot;Lag&quot;, &quot;LM-Stat&quot;, &quot;df&quot;, &quot;Prob.&quot;
+  loop i = 1..rows(R)
+    if R[i, 2] == 1
+      printf &quot;%6d%14.6f%8d%10.4f\n&quot;, R[i, 1], R[i, 3], R[i, 4], R[i, 5]
+    endif
+  endloop
+  printf &quot;\nNull hypothesis: No serial correlation at lags 1 to h\n&quot;
+  printf &quot;%6s%14s%8s%10s\n&quot;, &quot;Lag&quot;, &quot;LM-Stat&quot;, &quot;df&quot;, &quot;Prob.&quot;
+  loop i = 1..rows(R)
+    if R[i, 2] == 2
+      printf &quot;%6d%14.6f%8d%10.4f\n&quot;, R[i, 1], R[i, 3], R[i, 4], R[i, 5]
+    endif
+  endloop
+  printf &quot;*LM statistic, chi-square distribution\n&quot;
+endif
+return R
+</code>
+</gretl-function>
+<gretl-function name="ev_varnorm" type="bundle">
+ <params count="2">
+  <param name="v" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># Jarque-Bera normality tests on Cholesky-orthogonalised residuals (Lutkepohl)
+matrix U = v.sys.uhat
+scalar T = rows(U)
+scalar n = cols(U)
+matrix Uc = U .- meanc(U)
+matrix S = Uc'Uc / T
+matrix P = cholesky(S)
+matrix W = Uc * inv(P')
+matrix sk = meanc(W.^3)
+matrix ku = meanc(W.^4)
+matrix ls = T * sk.^2 / 6
+matrix lk = T * (ku - 3).^2 / 24
+bundle r
+r.skew = sk'
+r.kurt = ku'
+r.skew_chi = ls'
+r.kurt_chi = lk'
+r.jb = ls' + lk'
+r.skew_joint = sumr(ls)
+r.kurt_joint = sumr(lk)
+r.jb_joint = r.skew_joint + r.kurt_joint
+r.skew_p = pvalue(c, n, r.skew_joint)
+r.kurt_p = pvalue(c, n, r.kurt_joint)
+r.jb_p = pvalue(c, 2 * n, r.jb_joint)
+if !quiet
+  printf &quot;\nVAR Residual Normality Tests\nOrthogonalization: Cholesky (Lutkepohl)\n&quot;
+  printf &quot;Null Hypothesis: Residuals are multivariate normal\nIncluded observations: %d\n\n&quot;, T
+  printf &quot;%-12s%14s%14s%8s%10s\n&quot;, &quot;Component&quot;, &quot;Skewness&quot;, &quot;Chi-sq&quot;, &quot;df&quot;, &quot;Prob.&quot;
+  loop i = 1..n
+    printf &quot;%-12d%14.6f%14.6f%8d%10.4f\n&quot;, i, sk[i], ls[i], 1, pvalue(c, 1, ls[i])
+  endloop
+  printf &quot;%-12s%14s%14.6f%8d%10.4f\n\n&quot;, &quot;Joint&quot;, &quot;&quot;, r.skew_joint, n, r.skew_p
+  printf &quot;%-12s%14s%14s%8s%10s\n&quot;, &quot;Component&quot;, &quot;Kurtosis&quot;, &quot;Chi-sq&quot;, &quot;df&quot;, &quot;Prob.&quot;
+  loop i = 1..n
+    printf &quot;%-12d%14.6f%14.6f%8d%10.4f\n&quot;, i, ku[i], lk[i], 1, pvalue(c, 1, lk[i])
+  endloop
+  printf &quot;%-12s%14s%14.6f%8d%10.4f\n\n&quot;, &quot;Joint&quot;, &quot;&quot;, r.kurt_joint, n, r.kurt_p
+  printf &quot;%-12s%14s%8s%10s\n&quot;, &quot;Component&quot;, &quot;Jarque-Bera&quot;, &quot;df&quot;, &quot;Prob.&quot;
+  loop i = 1..n
+    printf &quot;%-12d%14.6f%8d%10.4f\n&quot;, i, r.jb[i], 2, pvalue(c, 2, r.jb[i])
+  endloop
+  printf &quot;%-12s%14.6f%8d%10.4f\n&quot;, &quot;Joint&quot;, r.jb_joint, 2 * n, r.jb_p
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_varfcast" type="bundle">
+ <params count="4">
+  <param name="v" type="bundle">
+<description>ev_varest result</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="dynamic" type="bool" default="1">
+<description>Dynamic (1) or static (0)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># forecasts of every endogenous variable over the current sample, with S.E.
+scalar n = v.n
+matrix lg = v.lags
+scalar p = maxr(lg)
+matrix C = v.coeff                     # k x n, rows as in v.clab
+set skip_missing off
+series evf_o = obs
+matrix tob = {evf_o}
+scalar T = rows(tob)
+# actual values and actual lags (pre-sample data included)
+matrix Ya = {}
+matrices YL = array(p)
+loop j = 1..p
+  YL[j] = {}
+endloop
+loop i = 1..n
+  series evf_y = ev_gen(v.ytok[i], vars)
+  Ya ~= {evf_y}
+  loop j = 1..p
+    series evf_l = ev_gen(ev__lagx(v.ytok[i], j, vars), vars)
+    matrix M = YL[j]
+    YL[j] = M ~ {evf_l}
+  endloop
+endloop
+matrix XE = {}
+loop i = 1..nelem(v.xtok)
+  if tolower(v.xtok[i]) != &quot;c&quot;
+    series evf_x = ev_gen(v.xtok[i], vars)
+    XE ~= {evf_x}
+  endif
+endloop
+matrix F = zeros(T, n)
+loop t = 1..T
+  # regressor row in the order of v.clab: C, then each variable with its lags, then exogenous
+  matrix row = {}
+  if v.hasc
+    row ~= 1
+  endif
+  loop i = 1..n
+    loop jj = 1..cols(lg)
+      scalar j = lg[jj]
+      if dynamic &amp;&amp; t - j &gt;= 1
+        row ~= F[t - j, i]
+      else
+        matrix M = YL[j]
+        row ~= M[t, i]
+      endif
+    endloop
+  endloop
+  if cols(XE) &gt; 0
+    row ~= XE[t,]
+  endif
+  F[t,] = row * C
+endloop
+# forecast standard errors from the MA representation (dynamic) or one step (static)
+matrix A = v.sys.A
+matrix Sg = v.sys.sigma
+scalar np = rows(A)
+matrix J = I(n) ~ zeros(n, np - n)
+matrix SE = zeros(T, n)
+matrix Mse = zeros(n, n)
+matrix Ap = I(np)
+loop h = 1..T
+  matrix Phi = J * Ap * J'
+  Mse += Phi * Sg * Phi'
+  SE[h,] = sqrt(diag(dynamic ? Mse : Sg))'
+  Ap = Ap * A
+endloop
+bundle r
+r.fcast = F
+r.se = SE
+r.actual = Ya
+r.tobs = tob
+r.names = v.ylab
+r.dynamic = dynamic
+if !quiet
+  printf &quot;\nVAR %s forecast, %s - %s\n&quot;, dynamic ? &quot;dynamic&quot; : &quot;static&quot;, obslabel(minc(tob)), obslabel(maxc(tob))
+  printf &quot;%-12s&quot;, &quot;obs&quot;
+  loop i = 1..n
+    printf &quot;%16s%12s&quot;, v.ylab[i], &quot;S.E.&quot;
+  endloop
+  printf &quot;\n&quot;
+  loop t = 1..T
+    printf &quot;%-12s&quot;, obslabel(tob[t])
+    loop i = 1..n
+      printf &quot;%16.6f%12.6f&quot;, F[t, i], SE[t, i]
+    endloop
+    printf &quot;\n&quot;
+  endloop
+endif
+return r
+</code>
+</gretl-function>
+<gretl-function name="ev_varfseries" type="series">
+ <params count="3">
+  <param name="r" type="bundle">
+<description>ev_varfcast result</description>
+  </param>
+  <param name="i" type="int" min="1" default="1">
+<description>Variable number</description>
+  </param>
+  <param name="se" type="bool" default="0">
+<description>Return the S.E. instead of the forecast</description>
+  </param>
+ </params>
+<code>return ev__toseries(se ? r.se[, i] : r.fcast[, i], r.tobs)
+</code>
+</gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
  <params count="5">
   <param name="spec" type="string">

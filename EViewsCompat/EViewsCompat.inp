@@ -4620,6 +4620,245 @@ function series ev_seasadj (series x "Monthly or quarterly series",
 end function
 
 # -------------------------------------------------------------------
+# VAR views: AR roots, residual serial correlation LM, normality; VAR forecast
+# -------------------------------------------------------------------
+
+function matrix ev_varroots (bundle v "ev_varest result", bool quiet[0])
+    # roots of the characteristic polynomial = eigenvalues of the companion matrix
+    matrix A = v.sys.A
+    matrix ev = eigen(A)
+    matrix re = Re(ev)
+    matrix im = Im(ev)
+    matrix md = sqrt(re.^2 + im.^2)
+    # sort by modulus, largest first
+    matrix o = msortby(seq(1, rows(md))' ~ -md, 2)
+    matrix S = zeros(rows(md), 3)
+    loop i = 1..rows(md)
+        scalar j = o[i, 1]
+        S[i,] = re[j] ~ im[j] ~ md[j]
+    endloop
+    if !quiet
+        printf "\nRoots of Characteristic Polynomial\nEndogenous variables:"
+        loop i = 1..nelem(v.ylab)
+            printf " %s", v.ylab[i]
+        endloop
+        printf "\nLag specification: %d %d\n\n", v.lags[1], v.lags[2]
+        printf "%-36s%14s\n", "Root", "Modulus"
+        ev__line(52)
+        loop i = 1..rows(S)
+            if abs(S[i, 2]) < 1e-12
+                printf "%-36.6f%14.6f\n", S[i, 1], S[i, 3]
+            else
+                printf "%-36s%14.6f\n", sprintf("%.6f %s %.6fi", S[i, 1], S[i, 2] < 0 ? "-" : "+", abs(S[i, 2])), S[i, 3]
+            endif
+        endloop
+        ev__line(52)
+        if maxc(S[, 3]) < 1
+            printf "No root lies outside the unit circle.\nVAR satisfies the stability condition.\n"
+        else
+            printf "Warning: at least one root lies outside the unit circle.\nVAR does not satisfy the stability condition.\n"
+        endif
+    endif
+    return S
+end function
+
+function matrix ev_varlm (bundle v "ev_varest result", int h[1::4] "Number of lags to test", bool quiet[0])
+    # Breusch-Godfrey LM tests for residual serial correlation (Lutkepohl):
+    # LM = T (n - tr(inv(S_u) S_e)), chi-square(n^2 m); rows: lag j alone and lags 1..j
+    matrix U = v.sys.uhat
+    matrix X = v.sys.X
+    scalar T = rows(U)
+    scalar n = cols(U)
+    matrix Su = U'U / T
+    matrix R = {}
+    loop j = 1..h
+        loop kind = 1..2
+            matrix Z = X
+            scalar m = 0
+            loop l = 1..j
+                if kind == 2 || l == j
+                    Z ~= mlag(U, l, 0)
+                    m++
+                endif
+            endloop
+            matrix E = U - Z * mols(U, Z)
+            matrix Se = E'E / T
+            scalar lm = T * (n - tr(inv(Su) * Se))
+            scalar df = n^2 * m
+            R |= {j, kind, lm, df, pvalue(c, df, lm)}
+        endloop
+    endloop
+    if !quiet
+        printf "\nVAR Residual Serial Correlation LM Tests\nSample: %s\nIncluded observations: %d\n", v.sample, T
+        printf "\nNull hypothesis: No serial correlation at lag h\n"
+        printf "%6s%14s%8s%10s\n", "Lag", "LM-Stat", "df", "Prob."
+        loop i = 1..rows(R)
+            if R[i, 2] == 1
+                printf "%6d%14.6f%8d%10.4f\n", R[i, 1], R[i, 3], R[i, 4], R[i, 5]
+            endif
+        endloop
+        printf "\nNull hypothesis: No serial correlation at lags 1 to h\n"
+        printf "%6s%14s%8s%10s\n", "Lag", "LM-Stat", "df", "Prob."
+        loop i = 1..rows(R)
+            if R[i, 2] == 2
+                printf "%6d%14.6f%8d%10.4f\n", R[i, 1], R[i, 3], R[i, 4], R[i, 5]
+            endif
+        endloop
+        printf "*LM statistic, chi-square distribution\n"
+    endif
+    return R
+end function
+
+function bundle ev_varnorm (bundle v "ev_varest result", bool quiet[0])
+    # Jarque-Bera normality tests on Cholesky-orthogonalised residuals (Lutkepohl)
+    matrix U = v.sys.uhat
+    scalar T = rows(U)
+    scalar n = cols(U)
+    matrix Uc = U .- meanc(U)
+    matrix S = Uc'Uc / T
+    matrix P = cholesky(S)
+    matrix W = Uc * inv(P')
+    matrix sk = meanc(W.^3)
+    matrix ku = meanc(W.^4)
+    matrix ls = T * sk.^2 / 6
+    matrix lk = T * (ku - 3).^2 / 24
+    bundle r
+    r.skew = sk'
+    r.kurt = ku'
+    r.skew_chi = ls'
+    r.kurt_chi = lk'
+    r.jb = ls' + lk'
+    r.skew_joint = sumr(ls)
+    r.kurt_joint = sumr(lk)
+    r.jb_joint = r.skew_joint + r.kurt_joint
+    r.skew_p = pvalue(c, n, r.skew_joint)
+    r.kurt_p = pvalue(c, n, r.kurt_joint)
+    r.jb_p = pvalue(c, 2 * n, r.jb_joint)
+    if !quiet
+        printf "\nVAR Residual Normality Tests\nOrthogonalization: Cholesky (Lutkepohl)\n"
+        printf "Null Hypothesis: Residuals are multivariate normal\nIncluded observations: %d\n\n", T
+        printf "%-12s%14s%14s%8s%10s\n", "Component", "Skewness", "Chi-sq", "df", "Prob."
+        loop i = 1..n
+            printf "%-12d%14.6f%14.6f%8d%10.4f\n", i, sk[i], ls[i], 1, pvalue(c, 1, ls[i])
+        endloop
+        printf "%-12s%14s%14.6f%8d%10.4f\n\n", "Joint", "", r.skew_joint, n, r.skew_p
+        printf "%-12s%14s%14s%8s%10s\n", "Component", "Kurtosis", "Chi-sq", "df", "Prob."
+        loop i = 1..n
+            printf "%-12d%14.6f%14.6f%8d%10.4f\n", i, ku[i], lk[i], 1, pvalue(c, 1, lk[i])
+        endloop
+        printf "%-12s%14s%14.6f%8d%10.4f\n\n", "Joint", "", r.kurt_joint, n, r.kurt_p
+        printf "%-12s%14s%8s%10s\n", "Component", "Jarque-Bera", "df", "Prob."
+        loop i = 1..n
+            printf "%-12d%14.6f%8d%10.4f\n", i, r.jb[i], 2, pvalue(c, 2, r.jb[i])
+        endloop
+        printf "%-12s%14.6f%8d%10.4f\n", "Joint", r.jb_joint, 2 * n, r.jb_p
+    endif
+    return r
+end function
+
+function bundle ev_varfcast (bundle v "ev_varest result",
+                             list vars "Series used (e.g. dataset)",
+                             bool dynamic[1] "Dynamic (1) or static (0)",
+                             bool quiet[0])
+    # forecasts of every endogenous variable over the current sample, with S.E.
+    scalar n = v.n
+    matrix lg = v.lags
+    scalar p = maxr(lg)
+    matrix C = v.coeff                     # k x n, rows as in v.clab
+    set skip_missing off
+    series evf_o = obs
+    matrix tob = {evf_o}
+    scalar T = rows(tob)
+    # actual values and actual lags (pre-sample data included)
+    matrix Ya = {}
+    matrices YL = array(p)
+    loop j = 1..p
+        YL[j] = {}
+    endloop
+    loop i = 1..n
+        series evf_y = ev_gen(v.ytok[i], vars)
+        Ya ~= {evf_y}
+        loop j = 1..p
+            series evf_l = ev_gen(ev__lagx(v.ytok[i], j, vars), vars)
+            matrix M = YL[j]
+            YL[j] = M ~ {evf_l}
+        endloop
+    endloop
+    matrix XE = {}
+    loop i = 1..nelem(v.xtok)
+        if tolower(v.xtok[i]) != "c"
+            series evf_x = ev_gen(v.xtok[i], vars)
+            XE ~= {evf_x}
+        endif
+    endloop
+    matrix F = zeros(T, n)
+    loop t = 1..T
+        # regressor row in the order of v.clab: C, then each variable with its lags, then exogenous
+        matrix row = {}
+        if v.hasc
+            row ~= 1
+        endif
+        loop i = 1..n
+            loop jj = 1..cols(lg)
+                scalar j = lg[jj]
+                if dynamic && t - j >= 1
+                    row ~= F[t - j, i]
+                else
+                    matrix M = YL[j]
+                    row ~= M[t, i]
+                endif
+            endloop
+        endloop
+        if cols(XE) > 0
+            row ~= XE[t,]
+        endif
+        F[t,] = row * C
+    endloop
+    # forecast standard errors from the MA representation (dynamic) or one step (static)
+    matrix A = v.sys.A
+    matrix Sg = v.sys.sigma
+    scalar np = rows(A)
+    matrix J = I(n) ~ zeros(n, np - n)
+    matrix SE = zeros(T, n)
+    matrix Mse = zeros(n, n)
+    matrix Ap = I(np)
+    loop h = 1..T
+        matrix Phi = J * Ap * J'
+        Mse += Phi * Sg * Phi'
+        SE[h,] = sqrt(diag(dynamic ? Mse : Sg))'
+        Ap = Ap * A
+    endloop
+    bundle r
+    r.fcast = F
+    r.se = SE
+    r.actual = Ya
+    r.tobs = tob
+    r.names = v.ylab
+    r.dynamic = dynamic
+    if !quiet
+        printf "\nVAR %s forecast, %s - %s\n", dynamic ? "dynamic" : "static", obslabel(minc(tob)), obslabel(maxc(tob))
+        printf "%-12s", "obs"
+        loop i = 1..n
+            printf "%16s%12s", v.ylab[i], "S.E."
+        endloop
+        printf "\n"
+        loop t = 1..T
+            printf "%-12s", obslabel(tob[t])
+            loop i = 1..n
+                printf "%16.6f%12.6f", F[t, i], SE[t, i]
+            endloop
+            printf "\n"
+        endloop
+    endif
+    return r
+end function
+
+function series ev_varfseries (bundle r "ev_varfcast result", int i[1::1] "Variable number",
+                               bool se[0] "Return the S.E. instead of the forecast")
+    return ev__toseries(se ? r.se[, i] : r.fcast[, i], r.tobs)
+end function
+
+# -------------------------------------------------------------------
 # Panel least squares on a panel page: ls(cx=f|r, per=f)
 # -------------------------------------------------------------------
 
