@@ -135,8 +135,9 @@ class RealPrograms(unittest.TestCase):
         self.assertEqual(translate_line("g1.line", c), ["gnuplot g1 --time-series --with-lines --output=display"])
         self.assertEqual(translate_line("graph p.line y ytrend", c),
                          ["gnuplot y ytrend --time-series --with-lines --output=display"])
+        self.assertEqual(translate_line('p.addtext(t) "Title"', c), ['# graph p: set title "Title"'])
         with self.assertRaises(Ignored):
-            translate_line('p.addtext(t) "Title"', c)
+            translate_line("p.options gridnone", c)
         translate_line("group g2 dly du", c)
         self.assertEqual(translate_line("freeze(gr) g2.scat", c), ["gnuplot du dly --output=display"])
 
@@ -453,6 +454,40 @@ class Phase2Data(unittest.TestCase):
         self.assertEqual(translate_expr("@nas(x)", c), "sum(missing(x))")
         self.assertEqual(translate_expr('@wfind("a b c", "b")', c), 'ev_wfind("a b c", "b")')
         self.assertEqual(translate_expr("@toc", c), "$stopwatch")
+
+
+class Phase2Objects(unittest.TestCase):
+    def test_graph_formatting(self):
+        c = Ctx()
+        translate_line("graph g1.line gdp cons", c)
+        translate_line('g1.addtext(t) "GDP"', c)
+        translate_line("g1.axis(left) range(0, 100)", c)
+        translate_line("g1.setelem(2) lcolor(@rgb(255,0,0)) lwidth(2)", c)
+        out = translate_line("g1.save(t=pdf) fig", c)
+        self.assertEqual(out, ['gnuplot gdp cons --time-series --with-lines --output="fig.pdf" '
+                               '{ set title "GDP"; set yrange [0:100]; set linetype 2 lc rgb "#ff0000" lw 2; }'])
+
+    def test_logl_sspace(self):
+        from evprg2hansl import translate_full
+        prg = """param c(1) 0 c(2) 0 c(3) 1
+logl ll
+ll.append @logl l1
+ll.append res = y - c(1) - c(2)*x
+ll.append l1 = log(@dnorm(res/c(3))) - log(c(3))
+ll.ml
+sspace ss
+ss.append @signal y = lev + [var = exp(c(1))]
+ss.append @state lev = lev(-1) + [var = exp(c(2))]
+ss.ml
+"""
+        h, todos, _ = translate_full(prg)
+        self.assertEqual(todos, [])
+        self.assertIn("mle ev_ll = l1", h)
+        self.assertIn("scalar ev_c3 = 1", h)
+        self.assertIn("    series res = y - ev_c1 - ev_c2*x", h)
+        self.assertIn("function matrices ev_ssm_ss (const matrix c)", h)
+        self.assertIn("    R[1, 1] = exp(c[1])", h)
+        self.assertIn("    T[1, 1] = 0 + (1)", h)
 
 
 class Structure(unittest.TestCase):

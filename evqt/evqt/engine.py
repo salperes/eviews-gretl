@@ -417,10 +417,11 @@ class GretlEngine:
         self.plot_counter += 1
         return os.path.join(self.tmpdir, f"plot{self.plot_counter:03d}.png")
 
-    def plot(self, cmd_without_output: str) -> str:
-        """Run a gnuplot command into a PNG file and return its path."""
+    def plot(self, cmd_without_output: str, settings: list | None = None) -> str:
+        """Run a gnuplot command into a PNG file and return its path (settings: gnuplot 'set' lines)."""
         path = self.tmp_png()
-        self.run(f'{cmd_without_output} --output="{path}"', check=True)
+        block = (" { " + "; ".join(settings) + "; }") if settings else ""
+        self.run(f'{cmd_without_output} --output="{path}"{block}', check=True)
         if not os.path.exists(path):
             raise GretlError("graph was not produced")
         return path

@@ -77,6 +77,11 @@ class Ctx:
     samples: dict = field(default_factory=dict)     # sample objects: name -> smpl arguments
     svectors: set = field(default_factory=set)      # string vectors
     need_dbnomics: bool = False
+    logls: dict = field(default_factory=dict)      # logl objects: name -> appended lines
+    sspaces: dict = field(default_factory=dict)    # sspace objects: name -> appended lines
+    cvals: dict = field(default_factory=dict)      # starting values of c(i) (param, c(i) = v)
+    graph_cmds: dict = field(default_factory=dict) # graph name -> commands that draw it
+    graph_opts: dict = field(default_factory=dict) # graph name -> gnuplot settings
     args_used: set = field(default_factory=set)     # program arguments %0 %1 ...
 
 
@@ -1227,6 +1232,24 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         return [f"ev_svar(&{o}, {translate_name(a, ctx)}, {translate_name(b, ctx)})"]
     if o in ctx.tables:
         return _table_method(o, ml, opts, args, ctx)
+    if o in ctx.logls:
+        if ml == "append":
+            ctx.logls[o].append(args.strip())
+            return [f"# logl {o}: {args.strip()}"]
+        if ml == "ml":
+            return _logl_ml(o, ctx)
+        if ml in ("output", "results"):
+            return [f"ev_coefprint(&{o})"]
+        raise ValueError(f"logl method .{meth} not supported")
+    if o in ctx.sspaces:
+        if ml == "append":
+            ctx.sspaces[o].append(args.strip())
+            return [f"# sspace {o}: {args.strip()}"]
+        if ml == "ml":
+            return _sspace_ml(o, ctx)
+        if ml in ("output", "results"):
+            return [f"ev_coefprint(&{o})"]
+        raise ValueError(f"sspace method .{meth} not supported")
     if o in ctx.samples and ml == "set":
         ctx.samples[o] = args.strip() or "@all"
         return [f"# sample object {o}: {ctx.samples[o]}"]
@@ -1523,6 +1546,8 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
     if ml in GRAPH_KINDS:
         if o in ctx.groups or not args:
             return _graph_cmd("scat" if ml.startswith("scat") else ml, [o], ctx)
+    if o.lower() in ctx.graph_cmds:
+        return _graph_method(o.lower(), ml, opts, args, ctx)
     if ml in GRAPH_STYLING or o in ctx.graphs:
         raise Ignored("graph styling")
     raise ValueError(f"method .{meth} not supported")
@@ -1731,6 +1756,21 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         return [f"bundle {name} = ev_table({translate_expr(r or '1', ctx)}, {translate_expr(c or '1', ctx)})"]
     if word == "copy":
         return _copy(cmd_opts, rest, ctx)
+    if word in ("logl", "sspace"):
+        name = translate_name(rest.split()[0], ctx) if rest.strip() else f"{word}01"
+        (ctx.logls if word == "logl" else ctx.sspaces)[name] = []
+        ctx.equations[name] = word
+        return [f"# {word} object {name} declared"]
+    if word == "param":
+        toks = rest.split()
+        out = []
+        for k in range(0, len(toks) - 1, 2):
+            m = re.fullmatch(r"(?i)c\((\d+)\)", toks[k])
+            if not m:
+                raise ValueError("param: use param c(1) value c(2) value ...")
+            ctx.cvals[int(m.group(1))] = translate_expr(toks[k + 1], ctx)
+            out.append(f"# starting value c({m.group(1)}) = {toks[k + 1]}")
+        return out
     if word == "text":
         name = translate_name(rest.split()[0], ctx)
         ctx.texts[name] = []
@@ -1875,6 +1915,9 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             if n in ctx.tables:
                 res.append(f"ev_tprint({n})")
                 continue
+            if n.lower() in ctx.graph_cmds and ctx.graph_opts.get(n.lower()):
+                res += _graph_method(n.lower(), "show", None, "", ctx)
+                continue
             if n in ctx.equations or n in ctx.graphs:
                 continue        # already printed / drawn when created
             else:
@@ -1891,8 +1934,11 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         kind = kind.lower()
         if kind not in GRAPH_KINDS:
             raise ValueError(f"graph type {kind} not supported")
-        return _graph_cmd("scat" if kind.startswith("scat") else kind,
-                          [translate_name(a, ctx) for a in args.split()], ctx)
+        out = _graph_cmd("scat" if kind.startswith("scat") else kind,
+                         [translate_name(a, ctx) for a in args.split()], ctx)
+        ctx.graph_cmds[gname.lower()] = out
+        ctx.graph_opts[gname.lower()] = []
+        return out
 
     m = re.fullmatch(r"equation\s+([\w{}!%$]+)(?:\.(\w+)(?:\(([^)]*)\))?\s+(.+))?", s, flags=re.IGNORECASE)
     if m:
@@ -1925,7 +1971,10 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
             raise ValueError("freeze of this object not supported")
         if view.lower() in GRAPH_KINDS or view.lower() == "scat":
             ctx.graphs.add(tabn)
-            return _object_method(obj, view, opts, args, ctx)
+            out = _object_method(obj, view, opts, args, ctx)
+            ctx.graph_cmds[tabn.lower()] = out
+            ctx.graph_opts[tabn.lower()] = []
+            return out
         inner = _object_method(obj, view, opts, args, ctx)
         ctx.graphs.add(tabn)        # frozen table: later .save etc. are ignored
         return [f'outfile "{tabn}.txt" --quiet'] + ["    " + x for x in inner] + ["end outfile"]
@@ -1935,6 +1984,11 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
     if m:
         return _object_method(*m.groups(), ctx)
 
+    # coefficient vector element: c(3) = 0.5 (starting values for logl, sspace, nls)
+    m = re.fullmatch(r"(?i)c\s*\(\s*(\d+)\s*\)\s*=\s*(.+)", s)
+    if m and "c" not in ctx.groups and "c" not in ctx.matrices:
+        ctx.cvals[int(m.group(1))] = translate_expr(m.group(2), ctx)
+        return [f"# c({m.group(1)}) = {m.group(2).strip()} (starting value)"]
     # assignments: !x = ..., %s = "...", g(!i) = ..., y = ...
     m = re.fullmatch(r"([!%]?)([\w{}!%$]+)\s*(?:\(([^()]+)\))?\s*=\s*(.+)", s)
     if m:
@@ -2120,6 +2174,239 @@ def _copy(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:
     out += [f"list {g} = {' '.join(m)}" for g, m in ctx.groups.items() if ctx.group_page.get(g) == ctx.page]
     out += ["smpl ev_s1 ev_s2", "scalar ev_N = $nobs"]
     return out
+
+
+def _gp_color(c: str) -> str:
+    c = c.strip().strip('"')
+    m = re.fullmatch(r"(?i)@rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", c)
+    if m:
+        return "#%02x%02x%02x" % tuple(int(x) for x in m.groups())
+    return c.lower()
+
+
+def _graph_method(g: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> list[str]:
+    """Graph formatting becomes gnuplot settings; save/display re-draw the graph with them."""
+    o = (opts or "").strip()
+    a = args.strip()
+    sets = ctx.graph_opts.setdefault(g, [])
+    if ml == "addtext":
+        txt = re.search(r'"([^"]*)"', a)
+        txt = txt.group(1) if txt else a
+        pos = o.lower()
+        if pos in ("", "t", "top"):
+            sets.append(f'set title "{txt}"')
+        elif pos in ("l", "left"):
+            sets.append(f'set ylabel "{txt}"')
+        elif pos in ("b", "bottom"):
+            sets.append(f'set xlabel "{txt}"')
+        else:
+            m = re.fullmatch(r"\s*([-\d.]+)\s*,\s*([-\d.]+)\s*", o)
+            if not m:
+                raise Ignored("text position")
+            sets.append(f'set label "{txt}" at graph {float(m.group(1)) / 6:.3f}, {1 - float(m.group(2)) / 4:.3f}')
+        return [f"# graph {g}: {sets[-1]}"]
+    if ml == "axis":
+        side = o.lower() or "left"
+        ax = "y2" if side.startswith("r") else ("x" if side.startswith("b") else "y")
+        m = re.search(r"(?i)range\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)", a)
+        if m:
+            sets.append(f"set {ax}range [{m.group(1)}:{m.group(2)}]")
+        if re.search(r"(?i)\blog\b", a):
+            sets.append(f"set logscale {ax}")
+        if not sets or not (m or "log" in a.lower()):
+            raise Ignored("axis option")
+        return [f"# graph {g}: {sets[-1]}"]
+    if ml == "setelem":
+        k = re.match(r"\s*(\d+)", o)
+        k = k.group(1) if k else "1"
+        parts = []
+        m = re.search(r"(?i)lcolor\(([^)]*\))?\)?", a)
+        m = re.search(r"(?i)lcolor\((@rgb\([^)]*\)|[^)]*)\)", a)
+        if m:
+            parts.append(f'lc rgb "{_gp_color(m.group(1))}"')
+        m = re.search(r"(?i)lwidth\(\s*([\d.]+)\s*\)", a)
+        if m:
+            parts.append(f"lw {m.group(1)}")
+        m = re.search(r"(?i)lpat(?:tern)?\(\s*(\d+)\s*\)", a)
+        if m:
+            parts.append(f"dt {m.group(1)}")
+        if not parts:
+            raise Ignored("element option")
+        sets.append(f"set linetype {k} {' '.join(parts)}")
+        return [f"# graph {g}: {sets[-1]}"]
+    if ml == "legend":
+        low = (o + " " + a).lower()
+        if "-display" in low:
+            sets.append("set key off")
+        elif "position(" in low or any(w in low for w in ("left", "right", "top", "bottom")):
+            where = [w for w in ("left", "right", "top", "bottom") if w in low]
+            sets.append("set key " + " ".join(where or ["right"]))
+        else:
+            raise Ignored("legend option")
+        return [f"# graph {g}: {sets[-1]}"]
+    if ml in ("save", "display", "show"):
+        out = []
+        block = (" { " + "; ".join(sets) + "; }") if sets else ""
+        dest = None
+        if ml == "save":
+            fmt = _opts(opts).get("t", "png").lower()
+            fmt = {"png": "png", "pdf": "pdf", "eps": "eps", "emf": "png", "gif": "png", "jpg": "png"}.get(fmt, "png")
+            f = a.strip('"') or g
+            dest = f if re.search(r"\.\w+$", f) else f + "." + fmt
+        for c in ctx.graph_cmds.get(g, []):
+            if not c.startswith("gnuplot"):
+                out.append(c)
+                continue
+            c2 = re.sub(r'\s--output=\S+', "", c)
+            target = f'--output="{dest}"' if dest else _plot_out(ctx)
+            out.append(f"{c2} {target}{block}")
+        return out
+    raise Ignored("graph styling")
+
+
+def _cref(expr: str, vec: str = "c") -> str:
+    """c(3) -> c[3] (inside generated functions) on an already translated expression."""
+    return re.sub(r"(?i)(?<![A-Za-z0-9_.])c\s*\(\s*(\d+)\s*\)", rf"{vec}[\1]", expr)
+
+
+def _cnums(texts: list[str]) -> list[int]:
+    found = set()
+    for t in texts:
+        found |= {int(x) for x in re.findall(r"(?i)(?<![A-Za-z0-9_.])c\s*\(\s*(\d+)\s*\)", t)}
+    return sorted(found)
+
+
+def _coef_bundle(o: str, nums: list[int], method: str, dep: str) -> list[str]:
+    labs = ", ".join(f'"C({k})"' for k in nums)
+    return [f"bundle {o} = _(kind = \"{method}\", method = \"{method}\", depvar = \"{dep}\", "
+            f"coeff = ev_cc, vcv = ev_cv, stderr = sqrt(diag(ev_cv)), labels = defarray({labs}), "
+            f"k = rows(ev_cc), T = ev_nT, lnl = ev_ll)",
+            f"{o}.tstat = {o}.coeff ./ {o}.stderr",
+            f"{o}.pval = 2 * cnorm(-abs({o}.tstat))",
+            f"ev_coefprint(&{o})",
+            f'printf "Log likelihood %.6f\\n", {o}.lnl']
+
+
+def _logl_ml(o: str, ctx: Ctx) -> list[str]:
+    """EViews logl object -> gretl mle block: @logl names the series of contributions."""
+    lines = ctx.logls[o]
+    target = None
+    stmts = []
+    for ln in lines:
+        m = re.fullmatch(r"(?i)@logl\s+(\w+)", ln.strip())
+        if m:
+            target = translate_name(m.group(1), ctx)
+        elif ln.strip().startswith("@"):
+            raise ValueError(f"logl: {ln.split()[0]} is not supported (only @logl)")
+        else:
+            stmts.append(ln)
+    if not target or not stmts:
+        raise ValueError("logl needs '@logl series' and the equations that define it")
+    nums = _cnums(stmts)
+    out = [f"scalar ev_c{k} = {ctx.cvals.get(k, '0')}" for k in nums]
+    out.append(f"mle ev_ll = {target}")
+    for ln in stmts:
+        name, _, expr = ln.partition("=")
+        e = re.sub(r"(?i)(?<![A-Za-z0-9_.])c\s*\(\s*(\d+)\s*\)", r"ev_c\1", translate_expr(expr, ctx))
+        out.append(f"    series {translate_name(name, ctx)} = {e}")
+    out += ["    params " + " ".join(f"ev_c{k}" for k in nums), "end mle --quiet",
+            "matrix ev_cc = $coeff", "matrix ev_cv = $vcv", "scalar ev_ll = $lnl", "scalar ev_nT = $T"]
+    ctx.equations[o] = "logl"
+    return out + _coef_bundle(o, nums, "Maximum Likelihood (BFGS)", "@LOGL " + target.upper())
+
+
+def _parse_ss_terms(rhs: str, states: list[str], lagged: bool):
+    """Split the right-hand side of a signal/state equation into coefficients of states and a constant."""
+    coef, const = {}, []
+    for t in _split_terms(rhs):
+        hit = None
+        for st in states:
+            pat = rf"(?i)(?<![A-Za-z0-9_]){re.escape(st)}" + (r"\s*\(\s*-1\s*\)" if lagged else r"(?![A-Za-z0-9_(])")
+            if re.search(pat, t):
+                hit = st
+                c = re.sub(pat, "1", t)
+                break
+        if hit:
+            coef[hit] = coef.get(hit, "0") + f" + ({c})"
+        else:
+            const.append(t)
+    return coef, ("(" + " ".join(const) + ")") if const else "0"
+
+
+def _sspace_ml(o: str, ctx: Ctx) -> list[str]:
+    """EViews sspace object (linear Gaussian) -> gretl Kalman filter, ML by BFGS."""
+    sig, sta = [], []
+    for ln in ctx.sspaces[o]:
+        m = re.fullmatch(r"(?i)@(signal|state|param)\s+(.+)", ln.strip())
+        if not m:
+            raise ValueError(f"sspace: {ln} (use @signal, @state, @param)")
+        kind, body = m.group(1).lower(), m.group(2)
+        if kind == "param":
+            toks = body.split()
+            for k in range(0, len(toks) - 1, 2):
+                mm = re.fullmatch(r"(?i)c\((\d+)\)", toks[k])
+                if mm:
+                    ctx.cvals[int(mm.group(1))] = toks[k + 1]
+            continue
+        vm = re.search(r"\[\s*var\s*=\s*(.+?)\s*\]", body, re.IGNORECASE)
+        var = vm.group(1) if vm else "0"
+        body = re.sub(r"\s*\+?\s*\[[^\]]*\]", "", body)
+        lhs, _, rhs = body.partition("=")
+        (sig if kind == "signal" else sta).append((lhs.strip(), rhs.strip(), var))
+    if not sig or not sta:
+        raise ValueError("sspace needs @signal and @state equations")
+    states = [s_[0] for s_ in sta]
+    n, r = len(sig), len(states)
+    nums = _cnums([x[1] + " " + x[2] for x in sig + sta])
+    fn = f"ev_ssm_{o}"
+    tx = lambda e: _cref(translate_expr(e, ctx))
+    body = [f"function matrices {fn} (const matrix c)",
+            f"    matrix Z = zeros({n}, {r})", f"    matrix T = zeros({r}, {r})",
+            f"    matrix Q = zeros({r}, {r})", f"    matrix R = zeros({n}, {n})", f"    matrix a = zeros(1, {n})"]
+    for i, (lhs, rhs, var) in enumerate(sig, 1):
+        coef, const = _parse_ss_terms(rhs, states, lagged=False)
+        for st, cexp in coef.items():
+            body.append(f"    Z[{i}, {states.index(st) + 1}] = {tx(cexp)}")
+        body.append(f"    a[{i}] = {tx(const)}")
+        body.append(f"    R[{i}, {i}] = {tx(var)}")
+    for i, (lhs, rhs, var) in enumerate(sta, 1):
+        coef, const = _parse_ss_terms(rhs, states, lagged=True)
+        if const != "0":
+            raise ValueError("sspace: constants in state equations are not supported")
+        for st, cexp in coef.items():
+            body.append(f"    T[{i}, {states.index(st) + 1}] = {tx(cexp)}")
+        body.append(f"    Q[{i}, {i}] = {tx(var)}")
+    body += ["    return defarray(Z, T, Q, R, a)", "end function",
+             f"function scalar ev_ssll_{o} (const matrix c, const matrix Y)",
+             f"    matrices M = {fn}(c)",
+             "    bundle kb = ksetup(Y .- M[5], M[1], M[2], M[3], M[4])",
+             "    kb.diffuse = 1",
+             "    scalar err = kfilter(&kb)",
+             "    if err",
+             "        return -1e100",
+             "    endif",
+             "    # log likelihood without the diffuse initial observations (as for exact ML / ARIMA)",
+             "    matrix lt = kb.llt",
+             f"    scalar ll = sumc(lt[{r + 1}:])",
+             "    return ok(ll) ? ll : -1e100",
+             "end function"]
+    sigs = " ".join(translate_name(x[0], ctx) for x in sig)
+    out = body + [f"list ev_ssL = {sigs}", "matrix ev_ssY = {ev_ssL}", "scalar ev_nT = rows(ev_ssY)",
+                  f"matrix ev_cc = zeros({max(nums) if nums else 1}, 1)"]
+    for k, v in ctx.cvals.items():
+        if not nums or k <= max(nums):
+            out.append(f"ev_cc[{k}] = {translate_expr(str(v), ctx)}")
+    out += ["set max_verbose off",
+            "set bfgs_richardson on    # more accurate numerical gradients",
+            f'scalar ev_ll = BFGSmax(&ev_cc, "ev_ssll_{o}(ev_cc, ev_ssY)")',
+            "set bfgs_richardson off",
+            f'matrix ev_H = numhess(ev_cc, "ev_ssll_{o}(ev_cc, ev_ssY)")',
+            "matrix ev_cv = -inv(ev_H)"]
+    ctx.equations[o] = "sspace"
+    # only the c(i) the model uses
+    keep = ", ".join(str(k) for k in nums)
+    out += [f"matrix ev_ix = {{{keep}}}", "ev_cc = ev_cc[ev_ix]", "ev_cv = ev_cv[ev_ix, ev_ix]"]
+    return out + _coef_bundle(o, nums, "Maximum likelihood (BFGS, Kalman filter)", sigs.upper())
 
 
 def _pagestack(cmd_opts: str, rest: str, ctx: Ctx) -> list[str]:

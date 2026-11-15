@@ -1,0 +1,16 @@
+# Runs the translated ml_objects program and checks it against gretl's own estimators
+set verbose off
+run ml_objects.inp
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+ols DC const DG --quiet
+check("logl: slope = OLS", LL1.coeff[2], $coeff[2], 1e-5)
+check("logl: sigma = sqrt(SSR/T)", LL1.coeff[3], sqrt($ess / $T), 1e-4)
+arima 0 1 1 ; LY --nc --quiet
+check("sspace local level: likelihood = ARIMA(0,1,1)", SS1.lnl, $lnl, 1e-5)
+# the formatted graph (ml_objects_graph.png) is checked by looking at it

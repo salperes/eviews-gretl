@@ -28,3 +28,8 @@ irf_test.png
 # example program outputs
 translator/examples/macro.bin
 translator/examples/macro.idx
+
+# example program outputs (Phase 1-2)
+translator/examples/TAB_CONS.txt
+translator/examples/phase1_table.csv
+translator/examples/ml_objects_graph.png

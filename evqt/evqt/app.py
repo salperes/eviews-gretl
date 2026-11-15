@@ -1416,6 +1416,7 @@ class MainWindow(QMainWindow):
         f.addAction("New Page...", self.new_page_dialog)
         f.addSeparator()
         f.addAction("Run Program (.prg)...", self.run_program_dialog)
+        f.addAction("Save Command History as Program...", self.save_history)
         f.addSeparator()
         f.addAction("Exit", self.close)
         q = mb.addMenu("&Quick")
@@ -1505,8 +1506,22 @@ class MainWindow(QMainWindow):
                               lambda m: names.get(m.group(1).lower(), m.group(1)), parts[i])
         return "".join(parts)
 
+    def save_history(self, path: str | None = None):
+        """Write the EViews commands run in this session to a program file."""
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(self, "Save command history", "session.prg", "EViews program (*.prg)")
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("' commands run in evqt\n" + "\n".join(getattr(self, "history", [])) + "\n")
+        self.statusBar().showMessage(f"Saved {len(getattr(self, 'history', []))} commands to {path}")
+
     def execute(self, line: str, hansl: bool = False, quiet: bool = False):
         """Run an EViews command (translated) or, failing that, a gretl command."""
+        if not hansl:
+            if not hasattr(self, "history"):
+                self.history = []
+            self.history.append(line)
         if not quiet:
             self.log_append(f"> {line}")
         self.engine.wf.dirty = True
@@ -1879,13 +1894,50 @@ class MainWindow(QMainWindow):
 
     def graph_window(self, cmd: str, title: str):
         w = ObjectWindow(self, title)
-        w.set_toolbar(_toolbar([("Freeze", w.freeze)]))
+        w.graph_cmd, w.graph_sets = cmd, []
+        w.set_toolbar(_toolbar([("Options", lambda: self.graph_options(w)), ("Freeze", w.freeze)]))
         try:
             w.show_image(self.engine.plot(cmd))
         except GretlError as e:
             self.error(str(e))
             return
         self.add_window(title + str(id(w)), w, (680, 500))
+
+    def graph_options(self, w, values: dict | None = None):
+        """Graph Options: title, axis labels, vertical range, log scale, legend (gnuplot settings)."""
+        if values is None:
+            title, xl, yl, ymin, ymax = QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit()
+            ymin.setPlaceholderText("auto")
+            ymax.setPlaceholderText("auto")
+            logy, legend = QCheckBox("Logarithmic scale"), QCheckBox("Show legend")
+            legend.setChecked(True)
+            d = _form_dialog(self, "Graph Options", [("Title:", title), ("Horizontal axis label:", xl),
+                                                     ("Vertical axis label:", yl), ("Vertical minimum:", ymin),
+                                                     ("Vertical maximum:", ymax), ("", logy), ("", legend)])
+            if not d:
+                return
+            values = {"title": title.text(), "xlabel": xl.text(), "ylabel": yl.text(), "ymin": ymin.text(),
+                      "ymax": ymax.text(), "logy": logy.isChecked(), "legend": legend.isChecked()}
+        sets = []
+        q = lambda t: t.replace('"', "'")
+        if values.get("title"):
+            sets.append(f'set title "{q(values["title"])}"')
+        if values.get("xlabel"):
+            sets.append(f'set xlabel "{q(values["xlabel"])}"')
+        if values.get("ylabel"):
+            sets.append(f'set ylabel "{q(values["ylabel"])}"')
+        lo, hi = values.get("ymin", "").strip(), values.get("ymax", "").strip()
+        if lo or hi:
+            sets.append(f"set yrange [{lo or '*'}:{hi or '*'}]")
+        if values.get("logy"):
+            sets.append("set logscale y")
+        if not values.get("legend", True):
+            sets.append("set key off")
+        w.graph_sets = sets
+        try:
+            w.show_image(self.engine.plot(w.graph_cmd, sets))
+        except GretlError as e:
+            self.error(str(e))
 
     def delete_object(self, name, ask=True):
         if ask and QMessageBox.question(self, "Delete", f"Delete {name}?") != QMessageBox.Yes:

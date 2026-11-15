@@ -452,6 +452,16 @@ w.execute("copy(c=a) usmacro\\gdp gdp_avg")
 check("gdp_avg" in w.engine.wf.series and w.engine.wf.page == "annual", "copy(c=a) quarterly -> annual page")
 w.execute("pageselect usmacro")
 
+# --- graph options and command history
+w.graph_window("gnuplot GDP --time-series --with-lines", "Graph: GDP")
+gwin = [x for x in w.windows.values() if getattr(x, "graph_cmd", None) == "gnuplot GDP --time-series --with-lines"][-1]
+w.graph_options(gwin, {"title": "Real GDP", "ylabel": "billions", "ymin": "0", "legend": False})
+check(gwin.graph_sets[0] == 'set title "Real GDP"' and "set key off" in gwin.graph_sets, "graph options re-draw the graph")
+hist = os.path.join(w.engine.tmpdir, "history.prg")
+w.save_history(hist)
+txt = open(hist).read()
+check("smpl 1985q1 2019q4" in txt and "pagestack" in txt, "command history saved as an EViews program")
+
 w.close()
 print(f"FAILED: {failures}" if failures else "ALL OK")
 if failures:

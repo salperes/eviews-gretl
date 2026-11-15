@@ -1,0 +1,95 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: logl and sspace objects (gap items O7, O6)
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+smpl full
+smpl 1970:1 2019:4
+series DC = ldiff(CONS)
+series DG = ldiff(GDP)
+# custom likelihood: linear regression with normal errors
+# starting value c(1) = 0
+# starting value c(2) = 0
+# starting value c(3) = 0.01
+# logl object LL1 declared
+# logl LL1: @logl lc
+# logl LL1: res = dc - c(1) - c(2)*dg
+# logl LL1: lc = log(@dnorm(res/c(3))) - log(c(3))
+scalar ev_c1 = 0
+scalar ev_c2 = 0
+scalar ev_c3 = 0.01
+mle ev_ll = LC
+    series RES = DC - ev_c1 - ev_c2*DG
+    series LC = log(dnorm(RES/ev_c3)) - log(ev_c3)
+    params ev_c1 ev_c2 ev_c3
+end mle --quiet
+matrix ev_cc = $coeff
+matrix ev_cv = $vcv
+scalar ev_ll = $lnl
+scalar ev_nT = $T
+bundle LL1 = _(kind = "Maximum Likelihood (BFGS)", method = "Maximum Likelihood (BFGS)", depvar = "@LOGL LC", coeff = ev_cc, vcv = ev_cv, stderr = sqrt(diag(ev_cv)), labels = defarray("C(1)", "C(2)", "C(3)"), k = rows(ev_cc), T = ev_nT, lnl = ev_ll)
+LL1.tstat = LL1.coeff ./ LL1.stderr
+LL1.pval = 2 * cnorm(-abs(LL1.tstat))
+ev_coefprint(&LL1)
+printf "Log likelihood %.6f\n", LL1.lnl
+# state space: local level model for log GDP
+series LY = log(GDP)
+# sspace object SS1 declared
+# sspace SS1: @signal ly = lev + [var = exp(c(1))]
+# sspace SS1: @state lev = lev(-1) + [var = exp(c(2))]
+# sspace SS1: @param c(1) -9 c(2) -9
+function matrices ev_ssm_SS1 (const matrix c)
+    matrix Z = zeros(1, 1)
+    matrix T = zeros(1, 1)
+    matrix Q = zeros(1, 1)
+    matrix R = zeros(1, 1)
+    matrix a = zeros(1, 1)
+    Z[1, 1] = 0 + (1)
+    a[1] = 0
+    R[1, 1] = exp(c[1])
+    T[1, 1] = 0 + (1)
+    Q[1, 1] = exp(c[2])
+    return defarray(Z, T, Q, R, a)
+end function
+function scalar ev_ssll_SS1 (const matrix c, const matrix Y)
+    matrices M = ev_ssm_SS1(c)
+    bundle kb = ksetup(Y .- M[5], M[1], M[2], M[3], M[4])
+    kb.diffuse = 1
+    scalar err = kfilter(&kb)
+    if err
+            return -1e100
+    endif
+    # log likelihood without the diffuse initial observations (as for exact ML / ARIMA)
+    matrix lt = kb.llt
+    scalar ll = sumc(lt[2:])
+    return ok(ll) ? ll : -1e100
+end function
+list ev_ssL = LY
+matrix ev_ssY = {ev_ssL}
+scalar ev_nT = rows(ev_ssY)
+matrix ev_cc = zeros(2, 1)
+ev_cc[1] = -9
+ev_cc[2] = -9
+set max_verbose off
+set bfgs_richardson on    # more accurate numerical gradients
+scalar ev_ll = BFGSmax(&ev_cc, "ev_ssll_SS1(ev_cc, ev_ssY)")
+set bfgs_richardson off
+matrix ev_H = numhess(ev_cc, "ev_ssll_SS1(ev_cc, ev_ssY)")
+matrix ev_cv = -inv(ev_H)
+matrix ev_ix = {1, 2}
+ev_cc = ev_cc[ev_ix]
+ev_cv = ev_cv[ev_ix, ev_ix]
+bundle SS1 = _(kind = "Maximum likelihood (BFGS, Kalman filter)", method = "Maximum likelihood (BFGS, Kalman filter)", depvar = "LY", coeff = ev_cc, vcv = ev_cv, stderr = sqrt(diag(ev_cv)), labels = defarray("C(1)", "C(2)"), k = rows(ev_cc), T = ev_nT, lnl = ev_ll)
+SS1.tstat = SS1.coeff ./ SS1.stderr
+SS1.pval = 2 * cnorm(-abs(SS1.tstat))
+ev_coefprint(&SS1)
+printf "Log likelihood %.6f\n", SS1.lnl
+# a formatted graph saved to a file
+gnuplot DC DG --time-series --with-lines --output=display
+# graph gr1: set title "Consumption and GDP growth"
+# graph gr1: set linetype 1 lc rgb "blue" lw 2
+gnuplot DC DG --time-series --with-lines --output="ml_objects_graph.png" { set title "Consumption and GDP growth"; set linetype 1 lc rgb "blue" lw 2; }
+
