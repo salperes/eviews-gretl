@@ -404,7 +404,12 @@ class Phase2Series(unittest.TestCase):
         c = Ctx()
         self.assertEqual(translate_line("y.uroot(dfgls)", c), ["adf 4 y --gls --c"])
         self.assertEqual(translate_line("y.uroot(np, trend)", c), ['bundle y_np = ev_ngperron("y", dataset, 1)'])
-        self.assertEqual(translate_line("y.buroot(break=trend)", c), ['bundle y_buroot = ev_zivot("y", dataset, "b")'])
+        self.assertEqual(translate_line("y.buroot(break=trend)", c),
+                         ['bundle y_buroot = ev_breakur("y", dataset, "trendconst", "trend", "innov", "dfuller", null, -1, "sic", -1, 0.15)'])
+        self.assertEqual(translate_line("y.buroot(trend=const, breaktype=ao, method=maxabsint, date=1990q2, lag=1, trim=10)", c),
+                         ['bundle y_buroot = ev_breakur("y", dataset, "const", "const", "outlier", "maxabsint", "1990:2", 1, "sic", -1, 0.1)'])
+        with self.assertRaises(ValueError):
+            translate_line("y.buroot(method=nonsense)", c)
         self.assertEqual(translate_line("y.bpf(type=bk, low=6, high=32, lag=12) yc", c),
                          ["series yc = bkfilt(y, 6, 32, 12)"])
         self.assertEqual(translate_line("y.smooth(s) ys", c), ['series ys = ev_smooth(y, "s", NA, NA, NA)'])
@@ -873,6 +878,53 @@ class Phase3Objects(unittest.TestCase):
         out = translate_line("ss.makestates(t=smooth) *_sm", c)
         self.assertIn("ksmooth(&ev_kb)", out)
         self.assertEqual(out[-1], "series sv1_sm = ev_kb.state[, 1]")
+
+
+class Phase3LastP2(unittest.TestCase):
+    def test_alpha_expressions(self):
+        c = Ctx()
+        translate_line('alpha a = "x"', c)
+        out = translate_line('alpha b = @upper(a) + "-" + @str(gdp)', c)
+        self.assertEqual(out[2], 'ev_as[ev_t] = toupper(ev_strat(a, ev_t)) ~ "-" ~ sprintf("%g", gdp[ev_t])')
+        self.assertEqual(out[-1], "series b = ev_alpha(ev_as)")
+        out = translate_line('series n = (a = "x") + @len(b)', c)
+        self.assertEqual(out[2], 'ev_tmp[ev_t] = (ev_strat(a, ev_t) == "x") + strlen(ev_strat(b, ev_t))')
+        out = translate_line('alpha a = "y"', c)          # existing alpha: observation by observation
+        self.assertEqual(out[-1], "series a = ev_alpha(ev_as)")
+        out = translate_line('alpha d = @str(@year) + @str(@trend)', c)
+        self.assertEqual(out[2], 'ev_as[ev_t] = sprintf("%g", $obsmajor[ev_t]) ~ sprintf("%g", (ev_t - 1))')
+        self.assertEqual(translate_line("series g = gdp * 2", c), ["series g = gdp * 2"])
+
+    def test_graph_formatting(self):
+        c = Ctx()
+        translate_line("group g2 a b", c)
+        translate_line("freeze(gp) g2.line", c)
+        self.assertIn("set object rect from first 2007.75, graph 0 to first 2009.25",
+                      translate_line("gp.draw(shade, bottom, 2007q4, 2009q2)", c)[0])
+        self.assertIn('lc rgb "red" dt 2', translate_line("gp.draw(dashline, bottom, 1980q1, red)", c)[0])
+        self.assertIn("set arrow from graph 0, first 0.5", translate_line("gp.draw(line, left, 0.5)", c)[0])
+        self.assertEqual(translate_line("gp.axis(left) zeroline grid", c), ["# graph gp: set xzeroaxis lt -1; set grid ytics"])
+        self.assertEqual(translate_line("gp.scale(left, linearzero)", c), ["# graph gp: set yrange [0:*]"])
+        self.assertEqual(translate_line("gp.axis(bottom) angle(45)", c), ["# graph gp: set xtics rotate by 45"])
+        self.assertEqual(translate_line("gp.datelabel interval(year, 5)", c), ["# graph gp: set xtics 5"])
+        self.assertEqual(translate_line("gp.legend columns(2) inbox", c), ["# graph gp: set key maxcols 2; set key box"])
+        self.assertEqual(translate_line("gp.options size(8,4) -frame", c), ["# graph gp: set size ratio 0.5000; unset border"])
+        translate_line("gp.setelem(2) symbol(circle)", c)
+        out = translate_line("gp.save(t=png) f", c)
+        self.assertIn("--with-lp", out[-1])
+        self.assertIn('set termoption font ",12"', translate_line("gp.setfont(12)", c)[0])
+        translate_line("freeze(gq) g2.line", c)
+        out = translate_line("graph gm.merge gp gq", c)
+        self.assertTrue(out[0].endswith("--outbuf=ev_gb1" + out[0].split("--outbuf=ev_gb1", 1)[1]) or "--outbuf=ev_gb1" in out[0])
+        self.assertIn("strings ev_gbs = defarray(ev_gb1, ev_gb2)", out)
+        self.assertTrue(out[-1].startswith("gridplot ev_gbs --output="))
+
+    def test_pie(self):
+        c = Ctx()
+        translate_line("group comp a b c", c)
+        out = translate_line("freeze(p1) comp.pie", c)
+        self.assertEqual(out, ["list ev_pl = a b c", "ev_pie(ev_pl)"])
+        self.assertEqual(translate_line("p1.save(t=png) pie", c)[-1], 'ev_pie(ev_pl, "pie.png")')
 
 
 if __name__ == "__main__":

@@ -174,7 +174,7 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_fprint(f)
   ev_depbase(b, vars)  -&gt; string
       the series Y when the dependent variable is log(Y), d(Y) or dlog(Y); &quot;&quot; otherwise
-  ev_nls(spec, vars, [cov], or, [quiet])  -&gt; bundle
+  ev_nls(spec, vars, [cov], [quiet])  -&gt; bundle
   ev_arma(spec, vars, [quiet])  -&gt; bundle
   ev_sysprint(b)
   ev_sysresid(b, [i])  -&gt; series
@@ -183,10 +183,10 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_tsls(spec, vars, [cov], [quiet], [liml])  -&gt; bundle
   ev_binary(spec, vars, [dist], [quiet])  -&gt; bundle
   ev_binaryprint(b)
-  ev_ardl(spec, vars, [deplags], [reglags], [ic], or, [trend], linear, [quiet])  -&gt; bundle
+  ev_ardl(spec, vars, [deplags], [reglags], [ic], [trend], [quiet])  -&gt; bundle
   ev_ardlprint(b)
   ev_boundsprint(b)
-  ev_hettest(b, [htype], or, [nlag], [quiet])  -&gt; bundle
+  ev_hettest(b, [htype], [nlag], [quiet])  -&gt; bundle
   ev_reset(b, [nfit], [quiet])  -&gt; bundle
   ev_chow(b, dates, [forecast], [quiet])  -&gt; bundle
   ev_testadd(b, vars, adds, [quiet])  -&gt; bundle
@@ -218,7 +218,7 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_word(s, n)  -&gt; string
   ev_dateval(s, [fmt])  -&gt; scalar
       EViews date number (days since 1 Jan 1 AD, starting at 0)
-  ev_datestr(d, [fmt], YYYY)  -&gt; string
+  ev_datestr(d, [fmt])  -&gt; string
   ev_date()  -&gt; series
       EViews @date: date number of each observation
   ev_table([r], [c])  -&gt; bundle
@@ -226,13 +226,13 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_tsetnum(t, [i], [j], v)
   ev_tget(t, i, j)  -&gt; string
   ev_twidth(t, [j], [w])
-  ev_ttext(t, [fmt], or)  -&gt; string
+  ev_ttext(t, [fmt])  -&gt; string
   ev_tprint(t)
-  ev_tsave(t, fname, [fmt], or)
-  ev_mlreg(spec, vars, method, or, [p1], [p2], [quiet])  -&gt; bundle
+  ev_tsave(t, fname, [fmt])
+  ev_mlreg(spec, vars, method, [p1], [p2], [quiet])  -&gt; bundle
   ev_mlprint(b)
-  ev_wls(spec, vars, wexpr, [wtype], or, [quiet])  -&gt; bundle
-  ev_cointreg(spec, vars, [method], or, [nlead], [nlag], [trend], or, [quiet])  -&gt; bundle
+  ev_wls(spec, vars, wexpr, [wtype], [quiet])  -&gt; bundle
+  ev_cointreg(spec, vars, [method], [nlead], [nlag], [trend], [quiet])  -&gt; bundle
   ev_dpanel(y, [xs], vars, [p], [twostep], [timedum], [quiet])  -&gt; bundle
   ev_coefprint(b)
       generic coefficient table (cointegrating regressions, dynamic panels)
@@ -255,7 +255,9 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       ERS point-optimal P_T and Ng-Perron MZa, MZt, MSB, MPT (AR spectral, GLS-detrended, SIC lags)
   ev_zivot(expr, vars, [model], [lag], [trim], [quiet])  -&gt; bundle
       Zivot-Andrews (1992) unit root test with one endogenous break: minimum t over break dates
-  ev_panelur(x, [test], or, [trend], [lag], [quiet])  -&gt; bundle
+  ev_breakur(expr, vars, [trend], [brk], [btype], [method], [bdate], [lag], [lagmethod], [maxlag], [trim], [nrep], [quiet])  -&gt; bundle
+      EViews breakpoint unit root test (Perron; Vogelsang and Perron 1998): innovational or additive
+  ev_panelur(x, [test], [trend], [lag], [quiet])  -&gt; bundle
       Maddala-Wu / Choi Fisher-type tests and Hadri's stationarity test
   ev_cf(x, [low], [high])  -&gt; series
       Christiano-Fitzgerald asymmetric full-sample filter (random-walk assumption, drift removed)
@@ -267,8 +269,8 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_pcscore(r, [j])  -&gt; series
   ev_kdplot(x, [out])
       kernel density estimate (Epanechnikov in EViews; gretl's default Gaussian kernel here)
-  ev_dateadd(d, n, [unit], or)  -&gt; scalar
-  ev_datediff(d1, d2, [unit], or)  -&gt; scalar
+  ev_dateadd(d, n, [unit])  -&gt; scalar
+  ev_datediff(d1, d2, [unit])  -&gt; scalar
       d1 - d2 in whole units
   ev_makedate(v, fmt)  -&gt; scalar
   ev_wfind(s, w)  -&gt; scalar
@@ -299,9 +301,9 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       Bai-Perron global minimisation of the SSR (dynamic programming) for 0..maxbreaks breaks;
   ev_midaslags(S, [K])  -&gt; matrix
       for each observation of the current (low-frequency) page: the last K high-frequency values
-  ev_midas(spec, vars, L, [poly], or, [deg], [quiet])  -&gt; bundle
-  ev_glm(spec, vars, [family], or, [link], or, [quiet])  -&gt; bundle
-  ev_enet(spec, vars, [alpha], between, [lfrac], [quiet])  -&gt; bundle
+  ev_midas(spec, vars, L, [poly], [deg], [quiet])  -&gt; bundle
+  ev_glm(spec, vars, [family], [link], [quiet])  -&gt; bundle
+  ev_enet(spec, vars, [alpha], [lfrac], [quiet])  -&gt; bundle
   ev_paneliv(spec, vars, [cx], [quiet])  -&gt; bundle
   ev_panelre2(spec, vars, [period], [quiet])  -&gt; bundle
       Swamy-Arora random effects for a balanced panel: cross-section (and period) components
@@ -314,7 +316,7 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_gradients(b, [quiet])  -&gt; matrix
       gradients of the sum of squares at the estimates (-2 X'e): zero at an interior optimum
   ev_breitung(x, [lag], [quiet])  -&gt; bundle
-  ev_ets(x, [model], or, [quiet])  -&gt; bundle
+  ev_ets(x, [model], [quiet])  -&gt; bundle
   ev_testequal(names, vars, [quiet])  -&gt; bundle
       equality of means (ANOVA F), medians (Kruskal-Wallis) and variances (Bartlett, Levene) across series
   ev_vratio(x, [periods], [quiet])  -&gt; matrix
@@ -328,15 +330,19 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       residual correlation matrix and Cholesky-orthogonalised normality test (as VAR)
   ev_modelfit(ms, [quiet])  -&gt; matrix
       RMSE, MAE, MAPE and Theil U of the solution against the actual values
-  ev_bvar(v, terms, [mu1], [L1], [L2], [L3], [quiet])  -&gt; bundle
+  ev_bvar(v, [mu1], [L1], [L2], [L3], [quiet])  -&gt; bundle
       Litterman / Minnesota prior, equation by equation (EViews BVAR, Litterman prior):
   ev_bvarprint(b)
       Bayesian VAR coefficient table (posterior means, s.d. in parentheses)
   ev_stop(msg)
       stop the program with an error message (translated setmaxerrs)
+  ev_strat(x, t)  -&gt; string
+      value of observation t as text: the label of a string-valued (alpha) series, else %g (&quot;&quot; for NA)
+  ev_alpha(S)  -&gt; series
+      string-valued series from an array of texts; &quot;&quot; becomes missing (EViews alpha series)
   ev_fred(id, [agg])  -&gt; series
       FRED (St. Louis Fed) public CSV download; observations are matched to the workfile by date and
-  ev_uiprompt(msg, [kind], or)  -&gt; scalar
+  ev_uiprompt(msg, [kind])  -&gt; scalar
       EViews @uiprompt in a script: print the prompt and answer OK / Yes (1)
   ev_uiskip([what])  -&gt; scalar
       EViews @uiedit, @uilist, @uiradio, @uidialog in a script: keep the current values, return 0 (OK)
@@ -350,6 +356,8 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       factor analysis of the correlation matrix: maximum likelihood or iterated principal factors
   ev_seasplot(x, [out])
       seasonal subseries graph: one line per quarter / month across the years
+  ev_pie(L, [out], [title])
+      EViews pie graph: one pie per observation of the sample (at most 12), slices = the series
   ev_ls_gui(spec, [spec2], [spec3], vars, [cov])  -&gt; bundle
       optional parts may arrive empty or as the literal text &quot;null&quot;
   ev_ls_gui(spec, [spec2], [spec3], vars, [cov])  -&gt; bundle
@@ -6785,6 +6793,120 @@ endif
 return r
 </code>
 </gretl-function>
+<gretl-function name="ev_breakur" type="bundle">
+ <params count="13">
+  <param name="expr" type="string">
+<description>Series or expression</description>
+  </param>
+  <param name="vars" type="list">
+<description>Series used (e.g. dataset)</description>
+  </param>
+  <param name="trend" type="string" optional="true">
+<description>Basic model: const or trendconst (default)</description>
+  </param>
+  <param name="brk" type="string" optional="true">
+<description>Break in: const (default), trend or trendconst</description>
+  </param>
+  <param name="btype" type="string" optional="true">
+<description>innov (innovational outlier, default) or outlier (additive)</description>
+  </param>
+  <param name="method" type="string" optional="true">
+<description>dfuller (default), minint, maxint, maxabsint, mintrend, maxtrend, maxabstrend or user</description>
+  </param>
+  <param name="bdate" type="string" optional="true">
+<description>Break date for method user, e.g. 1990:1</description>
+  </param>
+  <param name="lag" type="int" min="-1" default="-1">
+<description>Fixed lag (-1: chosen by the criterion)</description>
+  </param>
+  <param name="lagmethod" type="string" optional="true">
+<description>sic (default), aic or hq</description>
+  </param>
+  <param name="maxlag" type="int" min="-1" default="-1">
+<description>Maximum lag (-1: 12 (T/100)^(1/4))</description>
+  </param>
+  <param name="trim" type="scalar" default="0.15"/>
+  <param name="nrep" type="int" min="0" default="1000">
+<description>Replications for the p-values (0: none)</description>
+  </param>
+  <param name="quiet" type="bool" default="0"/>
+ </params>
+<code># EViews breakpoint unit root test (Perron; Vogelsang and Perron 1998): innovational or additive
+# outlier models, break date chosen by the Dickey-Fuller t or by the t-statistic of a break term.
+# The p-values and critical values are simulated (random walk of the same length, same procedure).
+string tr = exists(trend) ? tolower(trend) : &quot;trendconst&quot;
+string bk = exists(brk) ? tolower(brk) : &quot;const&quot;
+string bt = exists(btype) ? tolower(btype) : &quot;innov&quot;
+string me = exists(method) ? tolower(method) : &quot;dfuller&quot;
+string ic = exists(lagmethod) ? tolower(lagmethod) : &quot;sic&quot;
+errorif(tr != &quot;const&quot; &amp;&amp; tr != &quot;trendconst&quot;, &quot;trend must be const or trendconst&quot;)
+errorif(bk != &quot;const&quot; &amp;&amp; bk != &quot;trend&quot; &amp;&amp; bk != &quot;trendconst&quot;, &quot;break must be const, trend or trendconst&quot;)
+errorif(tr == &quot;const&quot; &amp;&amp; bk != &quot;const&quot;, &quot;a model without trend can only have an intercept break&quot;)
+errorif(bt != &quot;innov&quot; &amp;&amp; bt != &quot;outlier&quot;, &quot;breaktype must be innov or outlier&quot;)
+errorif(ic != &quot;sic&quot; &amp;&amp; ic != &quot;aic&quot; &amp;&amp; ic != &quot;hq&quot;, &quot;lagmethod must be sic, aic or hq&quot;)
+errorif(instrings(defarray(&quot;dfuller&quot;, &quot;minint&quot;, &quot;maxint&quot;, &quot;maxabsint&quot;, &quot;mintrend&quot;, &quot;maxtrend&quot;, &quot;maxabstrend&quot;, &quot;user&quot;), me) == 0, &quot;unknown break selection method &quot; ~ me)
+scalar bi = bk != &quot;trend&quot;
+scalar btr = bk != &quot;const&quot;
+errorif(!bi &amp;&amp; strstr(me, &quot;int&quot;) != &quot;&quot;, &quot;intercept-break selection needs an intercept break&quot;)
+errorif(!btr &amp;&amp; strstr(me, &quot;trend&quot;) != &quot;&quot;, &quot;trend-break selection needs a trend break&quot;)
+scalar ao = bt == &quot;outlier&quot;
+set skip_missing off
+series evb_x = ev_gen(expr, vars)
+series evb_o = obs
+matrix D = {evb_x} ~ {evb_o}
+D = selifr(D, ok(D[, 1]))
+matrix y = D[, 1]
+matrix tob = D[, 2]
+scalar T = rows(y)
+scalar pmax = maxlag &gt;= 0 ? maxlag : floor(12 * (T / 100)^(1 / 4))
+scalar t1 = max(pmax + 3, ceil(trim * T))
+scalar t2 = min(T - pmax - 2, floor((1 - trim) * T))
+scalar ubd = 0
+if me == &quot;user&quot;
+  errorif(!exists(bdate), &quot;method user needs a break date (bdate)&quot;)
+  scalar ubd = 0
+  loop i = 1..T
+    if obslabel(tob[i]) == bdate
+      ubd = i
+    endif
+  endloop
+  errorif(ubd == 0, &quot;break date &quot; ~ bdate ~ &quot; is not in the sample&quot;)
+endif
+matrix r0 = ev__burstat(y, tr == &quot;trendconst&quot;, bi, btr, ao, me, lag, pmax, ic, t1, t2, ubd)
+bundle r
+r.stat = r0[1]
+r.break = obslabel(tob[r0[2]])
+r.lag = r0[3]
+r.model = sprintf(&quot;trend=%s, break=%s, breaktype=%s, method=%s&quot;, tr, bk, bt, me)
+if nrep &gt; 0
+  # simulated null distribution: random walk, lag 0, same model and selection rule
+  matrix sims = zeros(nrep, 1)
+  scalar ub = me == &quot;user&quot; ? ubd : 0
+  loop i = 1..nrep
+    matrix ys = cum(mnormal(T, 1))
+    matrix rs = ev__burstat(ys, tr == &quot;trendconst&quot;, bi, btr, ao, me, 0, 0, ic, t1, t2, ub)
+    sims[i] = rs[1]
+  endloop
+  r.pvalue = meanc(sims .&lt;= r.stat)
+  r.cv = quantile(sims, {0.01, 0.05, 0.10})
+  r.nrep = nrep
+endif
+if !quiet
+  printf &quot;\nNull Hypothesis: %s has a unit root\n&quot;, toupper(expr)
+  printf &quot;Trend Specification: %s\nBreak Specification: %s\nBreak Type: %s\n&quot;, tr == &quot;const&quot; ? &quot;Intercept only&quot; : &quot;Trend and intercept&quot;, bk == &quot;const&quot; ? &quot;Intercept only&quot; : (bk == &quot;trend&quot; ? &quot;Trend only&quot; : &quot;Trend and intercept&quot;), ao ? &quot;Additive outlier&quot; : &quot;Innovational outlier&quot;
+  printf &quot;Break Date: %s\nBreak Selection: %s\nLag Length: %d (%s)\n\n&quot;, r.break, me == &quot;dfuller&quot; ? &quot;Minimize Dickey-Fuller t-statistic&quot; : (me == &quot;user&quot; ? &quot;User-specified&quot; : &quot;Break term t-statistic (&quot; ~ me ~ &quot;)&quot;), r.lag, lag &gt;= 0 ? &quot;fixed&quot; : sprintf(&quot;automatic, %s, maxlag=%d&quot;, toupper(ic), pmax)
+  printf &quot;%-40s%14s%10s\n&quot;, &quot;&quot;, &quot;t-Statistic&quot;, &quot;Prob.*&quot;
+  if nrep &gt; 0
+    printf &quot;%-40s%14.6f%10.4f\n&quot;, &quot;Augmented Dickey-Fuller test statistic&quot;, r.stat, r.pvalue
+    printf &quot;%-40s%14.6f\n%-40s%14.6f\n%-40s%14.6f\n&quot;, &quot;Test critical values:   1% level&quot;, r.cv[1], &quot;                        5% level&quot;, r.cv[2], &quot;                        10% level&quot;, r.cv[3]
+    printf &quot;\n*Simulated one-sided p-values (%d replications of a random walk with T = %d).\n&quot;, nrep, T
+  else
+    printf &quot;%-40s%14.6f\n&quot;, &quot;Augmented Dickey-Fuller test statistic&quot;, r.stat
+  endif
+endif
+return r
+</code>
+</gretl-function>
 <gretl-function name="ev_panelur" type="bundle">
  <params count="5">
   <param name="x" type="series">
@@ -9238,6 +9360,51 @@ endloop
 funcerr msg
 </code>
 </gretl-function>
+<gretl-function name="ev_strat" type="string">
+ <params count="2">
+  <param name="x" type="series" const="true"/>
+  <param name="t" type="int"/>
+ </params>
+<code># value of observation t as text: the label of a string-valued (alpha) series, else %g (&quot;&quot; for NA)
+if nelem(strvals(x)) &gt; 0
+  string s = x[t]
+  return s
+endif
+if !ok(x[t])
+  return &quot;&quot;
+endif
+return sprintf(&quot;%g&quot;, x[t])
+</code>
+</gretl-function>
+<gretl-function name="ev_alpha" type="series">
+ <params count="1">
+  <param name="S" type="strings">
+<description>Text of each observation (index = observation number)</description>
+  </param>
+ </params>
+<code># string-valued series from an array of texts; &quot;&quot; becomes missing (EViews alpha series)
+series x = NA
+strings u = array(0)
+loop t = $t1..min($t2, nelem(S))
+  if S[t] != &quot;&quot;
+    matrix m = instrings(u, S[t])
+    scalar k = 0
+    if rows(m) &gt; 0
+      k = m[1]
+    endif
+    if k == 0
+      u += S[t]
+      k = nelem(u)
+    endif
+    x[t] = k
+  endif
+endloop
+if nelem(u) &gt; 0
+  stringify(x, u)
+endif
+return x
+</code>
+</gretl-function>
 <gretl-function name="ev_fred" type="series">
  <params count="2">
   <param name="id" type="string">
@@ -9657,6 +9824,68 @@ string o = exists(out) ? out : &quot;display&quot;
 plot M
   options with-lines
 end plot --output=&quot;@o&quot;
+</code>
+</gretl-function>
+<gretl-function name="ev_pie" type="void">
+ <params count="3">
+  <param name="L" type="list">
+<description>Series of the group (non-negative)</description>
+  </param>
+  <param name="out" type="string" optional="true">
+<description>Graph file (default: display)</description>
+  </param>
+  <param name="title" type="string" optional="true"/>
+ </params>
+<code># EViews pie graph: one pie per observation of the sample (at most 12), slices = the series
+set skip_missing off
+matrix X = {L}
+matrix ob = seq($t1, $t2)'
+scalar n = rows(X)
+errorif(n &gt; 12, &quot;Pie graphs: at most 12 observations (set a smaller sample)&quot;)
+errorif(minc(minr(X)) &lt; 0, &quot;Pie graphs need non-negative values&quot;)
+scalar k = cols(X)
+strings col = defarray(&quot;#1f77b4&quot;, &quot;#ff7f0e&quot;, &quot;#2ca02c&quot;, &quot;#d62728&quot;, &quot;#9467bd&quot;, &quot;#8c564b&quot;, &quot;#e377c2&quot;, &quot;#7f7f7f&quot;, &quot;#bcbd22&quot;, &quot;#17becf&quot;)
+string f = sprintf(&quot;%s/ev_pie.plt&quot;, $dotdir)
+scalar w = 2.6
+# legend entries per row so that they fit in the plot width
+scalar per = max(1, floor(((n - 1) * w + 2.4) / 1.1))
+scalar nrow = ceil(k / per)
+outfile &quot;@f&quot; --quiet
+  printf &quot;unset border\nunset tics\nunset key\nset size ratio -1\n&quot;
+  printf &quot;set xrange [-1.3:%g]\nset yrange [-1.7:%g]\n&quot;, (n - 1) * w + 1.3, 1.5 + 0.3 * nrow
+  if exists(title)
+    printf &quot;set title \&quot;%s\&quot;\n&quot;, title
+  endif
+  scalar obj = 0
+  loop i = 1..n
+    scalar tot = sumr(X[i, ])
+    scalar a0 = 90
+    if ok(tot) &amp;&amp; tot &gt; 0
+      loop j = 1..k
+        scalar a1 = a0 - 360 * X[i, j] / tot
+        obj++
+        printf &quot;set object %d circle at %g,0 size 1 arc [%g:%g] fc rgb \&quot;%s\&quot; fs solid 1.0 border lc rgb \&quot;white\&quot;\n&quot;, obj, (i - 1) * w, a1, a0, col[1 + (j - 1) % 10]
+        if X[i, j] / tot &gt;= 0.04
+          scalar am = (a0 + a1) / 2 * $pi / 180
+          printf &quot;set label \&quot;%.0f%%\&quot; at %g,%g center tc rgb \&quot;white\&quot; front\n&quot;, 100 * X[i, j] / tot, (i - 1) * w + 0.62 * cos(am), 0.62 * sin(am)
+        endif
+        a0 = a1
+      endloop
+    endif
+    printf &quot;set label \&quot;%s\&quot; at %g,-1.35 center\n&quot;, obslabel(ob[i]), (i - 1) * w
+  endloop
+  # legend: coloured boxes and series names above the pies
+  loop j = 1..k
+    scalar lx = -1.2 + ((j - 1) % per) * 1.1
+    scalar ly = 1.3 + 0.3 * floor((j - 1) / per)
+    obj++
+    printf &quot;set object %d rect from %g,%g to %g,%g fc rgb \&quot;%s\&quot; fs solid 1.0 noborder\n&quot;, obj, lx, ly - 0.08, lx + 0.16, ly + 0.08, col[1 + (j - 1) % 10]
+    printf &quot;set label \&quot;%s\&quot; at %g,%g left\n&quot;, varname(L[j]), lx + 0.22, ly
+  endloop
+  printf &quot;plot NaN notitle\n&quot;
+end outfile
+string o = exists(out) ? out : &quot;display&quot;
+gnuplot --input=&quot;@f&quot; --output=&quot;@o&quot;
 </code>
 </gretl-function>
 <gretl-function name="ev_ls_gui" type="bundle" pkg-role="gui-main">
@@ -10869,6 +11098,147 @@ loop k = 0..maxlag
   endif
 endloop
 return f0
+</code>
+</gretl-function>
+<gretl-function name="ev__burstat" type="matrix" private="1">
+ <params count="12">
+  <param name="y" type="matrix" const="true"/>
+  <param name="tr" type="int">
+<description>0: intercept only, 1: trend and intercept</description>
+  </param>
+  <param name="bi" type="int">
+<description>intercept break</description>
+  </param>
+  <param name="bt" type="int">
+<description>trend break</description>
+  </param>
+  <param name="ao" type="int"/>
+  <param name="meth" type="string"/>
+  <param name="pfix" type="int">
+<description>lag (-1: chosen per break date)</description>
+  </param>
+  <param name="pmax" type="int"/>
+  <param name="ic" type="string"/>
+  <param name="t1" type="int"/>
+  <param name="t2" type="int"/>
+  <param name="ubd" type="int">
+<description>user break date (index) or 0</description>
+  </param>
+ </params>
+<code># one pass over the candidate break dates; returns {stat, break index, lag, selection value}
+scalar T = rows(y)
+matrix dy = y[2:T] - y[1:T-1]
+scalar best = 1e300
+matrix res = {NA, NA, NA, NA}
+scalar lo = ubd &gt; 0 ? ubd : t1
+scalar hi = ubd &gt; 0 ? ubd : t2
+loop bk = lo..hi
+  matrix tt = seq(1, T)'
+  matrix DU = tt .&gt;= bk
+  matrix DT = DU .* (tt - bk + 1)
+  matrix DB = tt .= bk
+  matrix C = ones(T, 1)
+  if tr
+    C ~= tt
+  endif
+  scalar idu = 0
+  scalar idt = 0
+  if bi
+    C ~= DU
+    idu = cols(C)
+  endif
+  if bt
+    C ~= DT
+    idt = cols(C)
+  endif
+  # AO: detrend first (break included), then ADF on the residuals
+  matrix z = y
+  matrix tb1 = {}
+  if ao
+    matrix u = {}
+    matrix b1 = mols(y, C, &amp;u)
+    matrix V1 = (u'u / (T - cols(C))) * inv(C'C)
+    if idu
+      tb1 |= b1[idu] / sqrt(V1[idu, idu])
+    endif
+    if idt
+      tb1 |= b1[idt] / sqrt(V1[idt, idt])
+    endif
+    z = u
+  endif
+  matrix dz = z[2:T] - z[1:T-1]
+  scalar plo = pfix &gt;= 0 ? pfix : 0
+  scalar phi = pfix &gt;= 0 ? pfix : pmax
+  scalar icbest = 1e300
+  matrix keep = {}
+  loop p = plo..phi
+    # common estimation sample t = pmax+2..T so that criteria are comparable
+    scalar s0 = (pfix &gt;= 0 ? p : pmax) + 2
+    matrix X = z[s0 - 1:T - 1]
+    scalar ka = 1
+    if !ao
+      X = C[s0:T, ] ~ X
+      ka = cols(X)
+      if bi
+        X ~= DB[s0:T]
+      endif
+    elif bi
+      loop j = 0..p
+        X ~= DB[s0 - j:T - j]
+      endloop
+    endif
+    loop j = 1..p
+      X ~= dz[s0 - 1 - j:T - 1 - j]
+    endloop
+    matrix e = {}
+    matrix b = mols(dz[s0 - 1:T - 1], X, &amp;e)
+    scalar n = rows(e)
+    scalar k = cols(X)
+    scalar s2 = e'e / n
+    scalar crit = ic == &quot;aic&quot; ? log(s2) + 2 * k / n : (ic == &quot;hq&quot; ? log(s2) + 2 * k * log(log(n)) / n : log(s2) + k * log(n) / n)
+    if pfix &gt;= 0
+      crit = 0
+    endif
+    if crit &lt; icbest
+      icbest = crit
+      matrix V = (e'e / (n - k)) * inv(X'X)
+      scalar ta = b[ka] / sqrt(V[ka, ka])
+      matrix tbr = tb1
+      if !ao
+        tbr = {}
+        if idu
+          tbr |= b[idu] / sqrt(V[idu, idu])
+        endif
+        if idt
+          tbr |= b[idt] / sqrt(V[idt, idt])
+        endif
+      endif
+      keep = {ta, p} ~ (rows(tbr) ? tbr' : {})
+    endif
+  endloop
+  # selection value: smaller is better
+  scalar sv = keep[1]
+  scalar ti = idu ? keep[3] : NA
+  scalar tt2 = idt ? keep[cols(keep)] : NA
+  if meth == &quot;minint&quot;
+    sv = ti
+  elif meth == &quot;maxint&quot;
+    sv = -ti
+  elif meth == &quot;maxabsint&quot;
+    sv = -abs(ti)
+  elif meth == &quot;mintrend&quot;
+    sv = tt2
+  elif meth == &quot;maxtrend&quot;
+    sv = -tt2
+  elif meth == &quot;maxabstrend&quot;
+    sv = -abs(tt2)
+  endif
+  if ok(sv) &amp;&amp; sv &lt; best
+    best = sv
+    res = {keep[1], bk, keep[2], sv}
+  endif
+endloop
+return res
 </code>
 </gretl-function>
 <gretl-function name="ev__smooth_ssr" type="scalar" private="1">

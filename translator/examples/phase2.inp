@@ -84,7 +84,7 @@ smpl full
 smpl 1960:1 2019:4
 adf 4 LGD --gls --c
 bundle LGD_np = ev_ngperron("LGD", dataset, 0)
-bundle LGD_buroot = ev_zivot("LGD", dataset, "a")
+bundle LGD_buroot = ev_breakur("LGD", dataset, "trendconst", "const", "innov", "dfuller", null, -1, "sic", -1, 0.15)
 series LGD_CYC = ev_cf(LGD, 6, 32)
 smpl full
 smpl 1970:1 2019:4

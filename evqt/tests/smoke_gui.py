@@ -497,6 +497,12 @@ check("LR test for binding restrictions" in w.windows["vect"].text.toPlainText()
 gw.run_text('bundle ev_fa = ev_factor("GDP CONS INV", dataset, 1, "ml")')
 check("Factor Analysis" in gw.text.toPlainText(), "group view: factor analysis")
 sw.run_plot_cmd('ev_seasplot(GDP, "@PNG")')
+w.execute("smpl 2019q1 2019q4")
+gw.run_plot_cmd('ev_pie(macro, "@PNG")')
+check(gw.stack.currentWidget() is gw._scroll, "group view: pie graph")
+w.execute("smpl 1960q1 2019q4")
+gw.run_text('bundle ev_bu = ev_breakur("log(GDP)", dataset, null, null, null, null, null, -1, null, -1, 0.15, 100)')
+check("Innovational outlier" in gw.text.toPlainText(), "breakpoint unit root test output")
 check(sw.stack.currentWidget() is sw._scroll, "series view: seasonal graph")
 
 

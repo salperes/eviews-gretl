@@ -74,7 +74,8 @@ add factors (and initialising them so the equations fit), stochastic simulation
 
 Phase 3: the equation dialog has all estimation methods of the package (PARCH and component
 ARCH among the ARCH models); VAR dialog: Bayesian VAR; VAR window > Proc > Cointegration
-Restrictions (VEC); group view: Factor Analysis; series view: seasonal graph. Workfile window:
+Restrictions (VEC); group view: Factor Analysis and pie graph; series view: seasonal graph and
+the breakpoint unit root test (Vogelsang-Perron, innovational or additive outlier). Workfile window:
 Copy / Paste objects (Cmd+C / Cmd+V; another page receives series with frequency conversion),
 spreadsheet cells copy as tab-separated text, File > Print prints the active output, table or
 graph.

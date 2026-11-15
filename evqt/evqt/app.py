@@ -245,6 +245,15 @@ class ObjectWindow(QWidget):
         except GretlError as e:
             self.main.error(str(e))
 
+    def run_plot_cmd(self, cmd):
+        """Run a command that writes a graph to @PNG and show it."""
+        png = self.main.engine.tmp_png()
+        try:
+            self.main.engine.run(cmd.replace("@PNG", png), check=True)
+            self.show_image(png)
+        except GretlError as e:
+            self.main.error(str(e))
+
     def run_plot(self, cmd: str):
         try:
             self.show_image(self.main.engine.plot(cmd))
@@ -333,7 +342,9 @@ class SeriesWindow(ObjectWindow):
         """EViews Unit Root Test dialog: ADF, Phillips-Perron or KPSS."""
         test, level, det, lags = QComboBox(), QComboBox(), QComboBox(), QSpinBox()
         test.addItems(["Augmented Dickey-Fuller", "Phillips-Perron", "Kwiatkowski-Phillips-Schmidt-Shin",
-                       "Dickey-Fuller GLS (ERS)", "Ng-Perron / ERS Point-Optimal", "Breakpoint (Zivot-Andrews)"])
+                       "Dickey-Fuller GLS (ERS)", "Ng-Perron / ERS Point-Optimal", "Breakpoint (Zivot-Andrews)",
+                       "Breakpoint Unit Root (Vogelsang-Perron, innovational)",
+                       "Breakpoint Unit Root (Vogelsang-Perron, additive)"])
         level.addItems(["Level", "1st difference"])
         det.addItems(["Intercept", "Trend and intercept", "None"])
         lags.setRange(0, 60)
@@ -357,18 +368,16 @@ class SeriesWindow(ObjectWindow):
             self.run_text(f'bundle ev_ur = ev_ngperron("{x}", dataset, {int(det.currentIndex() == 1)})')
         elif test.currentIndex() == 5:
             self.run_text(f'bundle ev_ur = ev_zivot("{x}", dataset, "{"b" if det.currentIndex() == 1 else "a"}")')
+        elif test.currentIndex() in (6, 7):
+            # intercept only -> intercept break; trend and intercept -> breaks in both
+            tr, bk = ("const", "const") if det.currentIndex() != 1 else ("trendconst", "trendconst")
+            bt = "innov" if test.currentIndex() == 6 else "outlier"
+            src = f"diff({x})" if dif else x
+            self.run_text(f'bundle ev_ur = ev_breakur("{src}", dataset, "{tr}", "{bk}", "{bt}")')
         else:
             src = f"diff({x})" if dif else x
             self.run_text(f"series ev_kx = {src}\nscalar ev_kl = int(4 * ($nobs / 100)^0.25)\n"
                           f"kpss ev_kl ev_kx" + (" --trend" if det.currentIndex() == 1 else ""))
-
-    def run_plot_cmd(self, cmd):
-        png = self.main.engine.tmp_png()
-        try:
-            self.main.engine.run(cmd.replace("@PNG", png), check=True)
-            self.show_image(png)
-        except GretlError as e:
-            self.main.error(str(e))
 
     def bpf(self):
         ty, ok = QInputDialog.getItem(self, "Frequency Filter", "Filter type:",
@@ -408,6 +417,7 @@ class GroupWindow(ObjectWindow):
             ("View", [("Spreadsheet", self.spreadsheet),
                       ("Graph: Line", lambda: self.run_plot(f"gnuplot {name} --time-series --with-lines")),
                       ("Graph: Scatter", self.scatter),
+                      ("Graph: Pie (each observation of the sample, at most 12)", lambda: self.run_plot_cmd(f'ev_pie({name}, "@PNG")')),
                       ("-", None),
                       ("Descriptive Stats", lambda: self.run_text(f"summary {name}")),
                       ("Covariance / Correlation", lambda: self.run_text(f"corr {name}")),

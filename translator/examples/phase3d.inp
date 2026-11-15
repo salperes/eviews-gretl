@@ -1,0 +1,86 @@
+# Translated from EViews by evprg2hansl.py
+# Requires the EViewsCompat gretl package
+set verbose off
+include EViewsCompat.gfn
+
+# EViews program: the last P2 items of the gap analysis (docs/GAP_ANALIZI.md)
+open "../../data/usmacro.gdt"
+scalar ev_N = $nobs
+smpl full
+smpl 1960:1 2019:4
+series LGD = log(GDP)
+series OTH = GDP - CONS - INV
+
+# W14: alpha series from expressions
+strings ev_as = array($t2)
+loop ev_t = $t1..$t2 --quiet
+    ev_as[ev_t] = ev_left(sprintf("%g", $obsmajor[ev_t]), 3) ~ "0s"
+endloop
+series DECADE = ev_alpha(ev_as)
+series REGIME = 1
+stringify(REGIME, defarray("low"))
+smpl full
+smpl FFR > 5 --restrict
+strings ev_as = array($t2)
+loop ev_t = $t1..$t2 --quiet
+    ev_as[ev_t] = "high"
+endloop
+series REGIME = ev_alpha(ev_as)
+smpl full
+smpl 1960:1 2019:4
+strings ev_as = array($t2)
+loop ev_t = $t1..$t2 --quiet
+    ev_as[ev_t] = toupper(ev_strat(REGIME, ev_t)) ~ "-" ~ ev_strat(DECADE, ev_t)
+endloop
+series TAG = ev_alpha(ev_as)
+series ev_tmp = NA
+loop ev_t = $t1..$t2 --quiet
+    ev_tmp[ev_t] = strlen(ev_strat(TAG, ev_t))
+endloop
+series TAGLEN = ev_tmp
+series ev_tmp = NA
+loop ev_t = $t1..$t2 --quiet
+    ev_tmp[ev_t] = (ev_strat(REGIME, ev_t) == "high")
+endloop
+series ISHIGH = ev_tmp
+
+# S6: breakpoint unit root tests (innovational and additive outlier models)
+bundle LGD_buroot = ev_breakur("LGD", dataset, "trendconst", "const", "innov", "dfuller", null, -1, "sic", -1, 0.15)
+bundle LGD_buroot = ev_breakur("LGD", dataset, "trendconst", "trendconst", "outlier", "maxabsint", null, -1, "aic", -1, 0.15)
+bundle FFR_buroot = ev_breakur("FFR", dataset, "const", "const", "innov", "user", "1980:1", 2, "sic", -1, 0.15)
+
+# O4: graph formatting
+list GL = LGD
+gnuplot GL --time-series --with-lines --output=display
+# graph gp: set title "Log real GDP"
+# graph gp: set object rect from first 2007.75, graph 0 to first 2009.25, graph 1 behind fc rgb "gray85" fs solid 0.5 noborder
+# graph gp: set arrow from first 1980, graph 0 to first 1980, graph 1 nohead lc rgb "red" dt 2
+# graph gp: set arrow from graph 0, first 9.5 to graph 1, first 9.5 nohead lc rgb "black"
+# graph gp: set xzeroaxis lt -1; set grid ytics
+# graph gp: set xtics rotate by 45
+# graph gp: set xtics 10
+# graph gp: set key maxcols 1; set key box
+# graph gp: set linetype 1 lc rgb "blue" lw 2
+gnuplot GL --time-series --with-lines --output="phase3d_lines.png" { set title "Log real GDP"; set object rect from first 2007.75, graph 0 to first 2009.25, graph 1 behind fc rgb "gray85" fs solid 0.5 noborder; set arrow from first 1980, graph 0 to first 1980, graph 1 nohead lc rgb "red" dt 2; set arrow from graph 0, first 9.5 to graph 1, first 9.5 nohead lc rgb "black"; set xzeroaxis lt -1; set grid ytics; set xtics rotate by 45; set xtics 10; set linetype 1 lc rgb "blue" lw 2; }
+list GF = FFR
+gnuplot GF --time-series --with-lines --output=display
+# graph gr: set size ratio 0.3750; unset border
+# graph gr: set linetype 1 pt 7
+gnuplot GL --time-series --with-lines --outbuf=ev_gb1 { set title "Log real GDP"; set object rect from first 2007.75, graph 0 to first 2009.25, graph 1 behind fc rgb "gray85" fs solid 0.5 noborder; set arrow from first 1980, graph 0 to first 1980, graph 1 nohead lc rgb "red" dt 2; set arrow from graph 0, first 9.5 to graph 1, first 9.5 nohead lc rgb "black"; set xzeroaxis lt -1; set grid ytics; set xtics rotate by 45; set xtics 10; set linetype 1 lc rgb "blue" lw 2; }
+gnuplot GF --time-series --with-lp --outbuf=ev_gb2 { set size ratio 0.3750; unset border; set linetype 1 pt 7; }
+strings ev_gbs = defarray(ev_gb1, ev_gb2)
+gridplot ev_gbs --output=display
+gnuplot GL --time-series --with-lines --outbuf=ev_gb1 { set title "Log real GDP"; set object rect from first 2007.75, graph 0 to first 2009.25, graph 1 behind fc rgb "gray85" fs solid 0.5 noborder; set arrow from first 1980, graph 0 to first 1980, graph 1 nohead lc rgb "red" dt 2; set arrow from graph 0, first 9.5 to graph 1, first 9.5 nohead lc rgb "black"; set xzeroaxis lt -1; set grid ytics; set xtics rotate by 45; set xtics 10; set linetype 1 lc rgb "blue" lw 2; }
+gnuplot GF --time-series --with-lp --outbuf=ev_gb2 { set size ratio 0.3750; unset border; set linetype 1 pt 7; }
+strings ev_gbs = defarray(ev_gb1, ev_gb2)
+gridplot ev_gbs --output="phase3d_merged.png"
+
+# O5: pie graph of the GDP components
+list COMP = CONS INV OTH
+smpl full
+smpl 2019:1 2019:4
+list ev_pl = CONS INV OTH
+ev_pie(ev_pl)
+list ev_pl = CONS INV OTH
+ev_pie(ev_pl, "phase3d_pie.png")
+

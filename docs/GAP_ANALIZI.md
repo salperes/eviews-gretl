@@ -30,20 +30,20 @@ karşılaştırıldı. EViews'in kendisiyle sayısal karşılaştırma yapılmad
 
 | Alan | ✅ | 🟡 | ❌ | ⛔ | Kalem |
 |---|---|---|---|---|---|
-| W · Workfile, sayfalar, veri | 12 | 2 | 0 | 2 | 16 |
+| W · Workfile, sayfalar, veri | 13 | 1 | 0 | 2 | 16 |
 | F · İfadeler ve @-fonksiyonlar | 9 | 0 | 0 | 0 | 9 |
 | E · Denklem tahmincileri | 22 | 0 | 0 | 0 | 22 |
 | T · Denklem testleri ve görünümleri | 16 | 1 | 0 | 0 | 17 |
-| S · Seri görünümleri ve işlemleri | 15 | 1 | 0 | 0 | 16 |
+| S · Seri görünümleri ve işlemleri | 16 | 0 | 0 | 0 | 16 |
 | G · Grup | 8 | 1 | 0 | 0 | 9 |
 | V · VAR / VEC | 12 | 0 | 0 | 0 | 12 |
 | Y · Sistem ve Model | 7 | 1 | 0 | 0 | 8 |
-| O · Diğer nesneler | 8 | 3 | 0 | 0 | 11 |
+| O · Diğer nesneler | 10 | 1 | 0 | 0 | 11 |
 | P · Programlama dili | 12 | 2 | 0 | 0 | 14 |
 | U · Arayüz (evqt) | 13 | 2 | 1 | 1 | 17 |
-| **Toplam** | **134** | **13** | **1** | **3** | **151** |
+| **Toplam** | **138** | **9** | **1** | **3** | **151** |
 
-Kabaca kapsama: kalemlerin **%89'u tam, %9'u kısmi**; açık P1 kalemi yok, kısmi kalan P2 kalemi 4 (W14, S6, O4, O5). Kapsanan kalemler EViews
+Kabaca kapsama: kalemlerin **%91'i tam, %6'sı kısmi**; açık P1 ve P2 kalemi yok (kalan kısmiler P3 veya önceliksiz). Kapsanan kalemler EViews
 programlarında en sık kullanılanlar olduğu için (ls, ARCH, VAR, sistemler, modeller,
 döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 gerçek programın
 6'sı da çevrilip çalışıyor.
@@ -67,7 +67,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | W11 | Veritabanı .bin fetch/store, `dbopen` | ✅ | | store --database | – | – |
 | W12 | EViews `.edb` veritabanı | ⛔ | kapalı format | – | – | – |
 | W13 | Çevrimiçi veritabanları (`dbopen(type=fred)`, DBnomics) | ✅ | DBnomics ve FRED (halka açık CSV, API anahtarı gerekmez; tarih eşleştirme, yüksek frekans ortalama/toplam/ilk/son); ikisi de canlı denendi | dbnomics paketi | M | P2 |
-| W14 | Alfa (metin) seriler | 🟡 | metin sabitli alfa seriler; ifadelerden alfa seri yok | string-valued series | M | P2 |
+| W14 | Alfa (metin) seriler | ✅ | metin sabitleri ve ifadeler (@left, @upper, @str, +, başka alfa seriler, @year ...) gözlem gözlem; alfa serilerden sayılar (@len, @val, karşılaştırmalar); örneklem dışı değerler korunur | string-valued series | M | P2 |
 | W15 | Değer eşlemeleri (`valmap`) | 🟡 | valmap + x.map: pozitif tamsayı kodlar gretl değer etiketlerine (stringify) çevrilir; metin değerli ve sıfır/negatif kodlu eşlemeler yok | string-valued series | M | P3 |
 | W16 | Örnek nesneleri (`sample s1 ...`, `smpl s1`) | ✅ | sample s1 …, smpl s1, s1.set | smpl + kaydedilmiş koşul | S | P2 |
 
@@ -143,7 +143,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | S3 | Birim kök: ADF (bilgi kriteriyle), KPSS, LLC, IPS | ✅ | | adf, kpss, levinlin | – | – |
 | S4 | **Phillips-Perron** | ✅ | ev_pp: Bartlett, Newey-West otomatik bant, MacKinnon p-değerleri | kendi kodu | M | **P1** |
 | S5 | DF-GLS / ERS / Ng-Perron | ✅ | DF-GLS (gretl), ERS P_T ve Ng-Perron (kritik değerler: ERS 1996 / NP 2001) | adf --gls | S | P2 |
-| S6 | Kırılmalı birim kök (Zivot-Andrews vb.) | 🟡 | Zivot-Andrews (a/b/c) var; EViews'in diğer kırılmalı birim kök seçenekleri yok | kendi kodu | M | P2 |
+| S6 | Kırılmalı birim kök (Zivot-Andrews vb.) | ✅ | Zivot-Andrews ve EViews buroot: trend/kırılma türleri, innovational ve additive outlier, kırılma seçimi (DF min-t, kırılma terimi t'leri, kullanıcı tarihi), gecikme seçimi (SIC/AIC/HQ); p-değerleri ve kritik değerler simülasyonla (yayımlanmış ZA değerleriyle uyumlu) | kendi kodu | M | P2 |
 | S7 | Panel birim kök: Breitung, Hadri, Fisher-ADF/PP | ✅ | Fisher-ADF/PP, Choi, Hadri ve Breitung | adf (Choi zaten basıyor), kendi kodu | M | P2 |
 | S8 | HP filtresi | ✅ | | hpfilt | – | – |
 | S9 | Bant geçiren filtreler BK, CF | ✅ | BK (gretl bkfilt), CF asimetrik tam örneklem | bkfilt, kendi kodu (CF) | S | P2 |
@@ -206,8 +206,8 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | O1 | Matris/vektör/sym/coef, skaler, string | ✅ | | | – | – |
 | O2 | Text nesnesi | ✅ | yalnız SVAR kısıtları için | | – | – |
 | O3 | **Table nesnesi**: `freeze` tabloya, `setcell`, `setwidth`, `t(i,j)`, csv/rtf/html kaydı | ✅ | ev_table: `table(r,c)`, `t(i,j)=`, setcell, setwidth, save(csv/txt/html), show; biçimlendirme komutları yok sayılır | outfile, matrix | M | **P1** |
-| O4 | Graph nesnesi biçimlendirme (`addtext`, `axis`, `setelem`) ve `save(t=png/pdf)` | 🟡 | başlık, eksen, çizgi biçimi, lejant, name(n) lejant metni, ızgara; diğer biçimlendirme yok sayılır | gnuplot seçenekleri | M | P2 |
-| O5 | Graph türleri: histogram, boxplot, kernel, QQ, pie, dot, seasonal | 🟡 | hist, boxplot, QQ, kernel, dot, seasonal (ev_seasplot); pie yok | gnuplot, boxplot | S | P2 |
+| O4 | Graph nesnesi biçimlendirme (`addtext`, `axis`, `setelem`) ve `save(t=png/pdf)` | ✅ | başlık/metin, eksen (aralık, log, ters, sıfır çizgisi, ızgara, açı, etiketsiz), scale, datelabel (biçim, aralık), draw (çizgi, kesikli, gölge), setelem (renk, kalınlık, desen, sembol, dolgu), lejant (konum, sütun, kutu, font), options (boyut, çerçeve, arka plan, ızgara), setfont, name, merge (gridplot); template ve align yok sayılır | gnuplot seçenekleri | M | P2 |
+| O5 | Graph türleri: histogram, boxplot, kernel, QQ, pie, dot, seasonal | ✅ | hist, boxplot, QQ, kernel, dot, seasonal (ev_seasplot), pie (ev_pie: örneklemin her gözlemi için bir pasta, en çok 12) | gnuplot, boxplot | S | P2 |
 | O6 | State space (`sspace`, Kalman) | ✅ | doğrusal Gauss modeller ML ile (Kalman), durum sabitleri, makestates (filtre/düzleştirilmiş); bağımsız sinyal ve durum hataları | kalman | L | P2 |
 | O7 | LogL (özel olabilirlik) | ✅ | logl nesnesi → gretl mle (@logl, param / c(i) başlangıç değerleri) | mle | M | P2 |
 | O8 | Pool nesnesi (`pool`, `?` serileri ile tahmin) | 🟡 | pool ls: ortak katsayılar, sabit etkiler (ev_poolls); rastgele etkiler ve kesite özgü katsayılar yok | | L | P3 |
@@ -315,6 +315,22 @@ Testler: paket 404 kontrol (21 dosya), çevirici 74 birim testi, evqt 124 ekran 
 11 örnek program (hepsi gretlcli ile çalışıyor); `translator/examples/phase3c_check.inp`
 sürüklenmeli durum-uzay modelini ARIMA(0,1,0)'a, model control'ü hedef patikaya ve kısıtlı VEC'i
 denetler. FRED ve DBnomics canlı denendi (otomatik testte değil, internet gerekir).
+
+### Faz 3 ek: son P2 kalemleri
+
+W14, S6, O4 ve O5 tamamlandı; toplam 138 tam, 9 kısmi, 1 yok, 3 mümkün değil. Açık P1 ve P2 kalemi kalmadı.
+- **W14:** alfa seri ifadeleri gözlem gözlem hesaplanıp gretl'in metin değerli serisine çevriliyor
+  (`ev_alpha`, `ev_strat`).
+- **S6:** EViews `buroot` (Vogelsang-Perron) `ev_breakur` ile. gretl'de Vogelsang tabloları
+  olmadığı için p-değerleri ve kritik değerler aynı uzunlukta rassal yürüyüş simülasyonundan
+  geliyor (1000 tekrar, birkaç saniye). Üç IO modelinde simüle edilen değerler Zivot-Andrews (1992)
+  tablolarıyla uyumlu.
+- **O4, O5:** grafik biçimlendirme gnuplot ayarlarına çevriliyor. `merge`, gretl'in `gridplot`
+  komutuyla; pasta grafiği EViewsCompat'ın gnuplot betiğiyle (`ev_pie`).
+
+Bu adımda bulunan hata: alfa ifadelerinde `@year`, `@trend` ve `@obsnum` gözlem yerine tüm seriyi
+veriyordu (düzeltildi). Testler: paket 413 kontrol (22 dosya), çevirici 77, evqt 126 kontrol;
+`translator/examples/phase3d.prg` dört kalemi birlikte kullanır.
 
 ## Önerilen yol haritası
 

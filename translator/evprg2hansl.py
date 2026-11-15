@@ -87,8 +87,10 @@ class Ctx:
     vec_info: dict = field(default_factory=dict)   # VEC name -> (spec, case, rank) once estimated
     pools: dict = field(default_factory=dict)      # pool name -> identifiers
     valmaps: dict = field(default_factory=dict)    # valmap name -> {value: label}
+    alphas: set = field(default_factory=set)       # alpha (string-valued) series
     spools: dict = field(default_factory=dict)     # spool name -> object names
     graph_names: dict = field(default_factory=dict)  # graph -> {element: legend text}
+    graph_lp: set = field(default_factory=set)     # graphs drawn with lines and symbols
     args_used: set = field(default_factory=set)     # program arguments %0 %1 ...
 
 
@@ -317,6 +319,45 @@ def _ui_calls(expr: str) -> str:
                 depth -= 1
             i += 1
         expr = expr[:m.start()] + f'ev_uiskip("{m.group(1).lower()}")' + expr[i:]
+
+
+_IDENT_RX = re.compile(r"(?<![@%!\w.{}])([A-Za-z_]\w*)(?!\w)(?!\s*\()")
+_EXPR_WORDS = {"and", "or", "not", "na", "c"}
+
+
+def _uses_alpha(expr: str, ctx: Ctx) -> bool:
+    if not ctx.alphas:
+        return False
+    return any(translate_name(m.group(1), ctx) in ctx.alphas
+               for lit, part in _split_strings(expr) if not lit for m in _IDENT_RX.finditer(part))
+
+
+def _obs_expr(expr: str, ctx: Ctx) -> str:
+    """An expression evaluated at observation ev_t: alpha series give their text, others their value."""
+    out = []
+    for lit, part in _split_strings(expr):
+        if lit:
+            out.append(part)
+            continue
+
+        def sub(m):
+            w = m.group(1)
+            if w.lower() in _EXPR_WORDS:
+                return w
+            tn = translate_name(w, ctx)
+            if tn in ctx.alphas:
+                return f"EVSV{w}EVSV"
+            if tn in ctx.scalars or tn in ctx.strings:
+                return w
+            return f"EVOB{w}EVOB"
+        out.append(_IDENT_RX.sub(sub, part))
+    e = translate_expr("".join(out), ctx, condition=True)
+    e = re.sub(r"(?i)EVSV(\w+?)EVSV", lambda m: f"ev_strat({translate_name(m.group(1), ctx)}, ev_t)", e)
+    e = re.sub(r"(?i)EVOB(\w+?)EVOB", lambda m: f"{translate_name(m.group(1), ctx)}[ev_t]", e)
+    # @year, @quarter, @obsnum, @trend at observation ev_t
+    e = re.sub(r"(\$obs(?:major|minor|micro))(?!\s*\[)", r"\1[ev_t]", e)
+    e = re.sub(r"(?<![\w$.])obs(?![\w(\[])", "ev_t", e)
+    return e.replace("ev_trend()", "(ev_t - 1)")
 
 
 def translate_expr(expr: str, ctx: Ctx, condition: bool = False) -> str:
@@ -872,7 +913,9 @@ def _graph_cmd(kind: str, members: list[str], ctx: Ctx) -> list[str]:
         members = members[1:] + members[:1]   # gretl: x variable last
         return [f"gnuplot {' '.join(members)} {_plot_out(ctx)}"]
     if kind == "pie":
-        raise ValueError("pie graphs are not available in gretl")
+        mem = ctx.groups.get(members[0], members) if len(members) == 1 else members
+        f = _plot_out(ctx).split("=", 1)[1]
+        return [f"list ev_pl = {' '.join(mem)}", "ev_pie(ev_pl" + ("" if f == "display" else f", {f}") + ")"]
     if kind == "seasplot":
         outs = []
         for mbr in (ctx.groups.get(members[0], members) if len(members) == 1 else members):
@@ -1607,10 +1650,39 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
             return [f"series {outs[1]} = NA", f'series {outs[0]} = ev_seasadj({o}, "{k}", &{outs[1]})']
         return [f'series {outs[0]} = ev_seasadj({o}, "{k}")']
     if ml == "buroot":
+        # EViews breakpoint unit root test (Vogelsang-Perron); p-values simulated
         op = _opts(opts)
-        brk = op.get("break", op.get("breaktype", "intercept")).lower()
-        md = {"intercept": "a", "int": "a", "trend": "b", "both": "c", "inttrend": "c"}.get(brk, "a")
-        return [f'bundle {o}_buroot = ev_zivot("{o}", dataset, "{md}")']
+
+        def pick(val, table, what):
+            v = (val or "").lower()
+            for k, keys in table.items():
+                if v in keys:
+                    return k
+            raise ValueError(f"buroot: {what}={val} not understood")
+        tr = pick(op.get("trend", "trendconst"), {"const": ("const", "c", "int", "intercept", "none"),
+                                                   "trendconst": ("trendconst", "trend", "ct", "both", "inttrend")}, "trend")
+        bk = pick(op.get("break", "const"), {"const": ("const", "c", "int", "intercept"), "trend": ("trend",),
+                                             "trendconst": ("trendconst", "both", "inttrend", "ct")}, "break")
+        bt = pick(op.get("breaktype", "innov"), {"innov": ("innov", "io", "innovational"),
+                                                 "outlier": ("outlier", "ao", "additive")}, "breaktype")
+        me = (op.get("method") or op.get("breakmethod") or "dfuller").lower()
+        if me not in ("dfuller", "minint", "maxint", "maxabsint", "mintrend", "maxtrend", "maxabstrend", "user"):
+            raise ValueError(f"buroot: method={me} not supported")
+        date = op.get("date") or op.get("bdate") or op.get("break_date")
+        bd = f'"{translate_date(date) or date}"' if date else "null"
+        if date and me == "dfuller":
+            me = "user"
+        lag = op.get("lag", "-1") if (op.get("lag", "") or "").isdigit() else "-1"
+        lm = (op.get("lagmethod") or op.get("info") or "sic").lower()
+        if lm not in ("sic", "aic", "hq"):
+            if lm in ("fixed", "user"):
+                lm = "sic"
+            else:
+                raise ValueError(f"buroot: lagmethod={lm} not supported (sic, aic, hq, or lag=n)")
+        mx = op.get("maxlag", "-1") if (op.get("maxlag", "") or "").isdigit() else "-1"
+        trim = op.get("trim", "15")
+        trim = f"{float(trim) / 100 if float(trim) > 1 else float(trim):g}"
+        return [f'bundle {o}_buroot = ev_breakur("{o}", dataset, "{tr}", "{bk}", "{bt}", "{me}", {bd}, {lag}, "{lm}", {mx}, {trim})']
     if ml == "bpf":
         op = _opts(opts)
         ty = op.get("type", "bk").lower()
@@ -2010,11 +2082,16 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         name, _, expr = rest.partition("=")
         name = translate_name(name, ctx)
         e = expr.strip()
+        known = name in ctx.alphas
+        ctx.alphas.add(name)
         if not e:
             return [f"series {name} = NA    # alpha series (string-valued)"]
-        if re.fullmatch(r'"[^"]*"', e):
+        if re.fullmatch(r'"[^"]*"', e) and not known:
             return [f"series {name} = 1", f"stringify({name}, defarray({e}))"]
-        raise ValueError("alpha series from expressions are not supported (only text constants)")
+        # text of each observation in the sample, then a string-valued series
+        return ["strings ev_as = array($t2)", "loop ev_t = $t1..$t2 --quiet",
+                f"ev_as[ev_t] = {_string_plus(_obs_expr(e, ctx))}", "endloop",
+                f"series {name} = ev_alpha(ev_as)"]
     if word == "sample":
         toks = rest.split(None, 1)
         if not toks:
@@ -2296,6 +2373,10 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         name = translate_name(name, ctx)
         if not expr:
             return [f"series {name} = NA"]
+        if _uses_alpha(expr, ctx):
+            # numbers from alpha series (@len, @val, comparisons ...): observation by observation
+            return ["series ev_tmp = NA", "loop ev_t = $t1..$t2 --quiet",
+                    f"ev_tmp[ev_t] = {_obs_expr(expr, ctx)}", "endloop", f"series {name} = ev_tmp"]
         return [f"series {name} = {translate_expr(expr, ctx)}"]
     if word == "scalar":
         name, _, expr = rest.partition("=")
@@ -2344,6 +2425,14 @@ def translate_line(line: str, ctx: Ctx) -> list[str]:
         gname, kind, args = m.groups()
         ctx.graphs.add(gname)
         kind = kind.lower()
+        if kind == "merge":
+            mems = [a.lower() for a in args.split()]
+            miss = [x for x in mems if x not in ctx.graph_cmds]
+            if not mems or miss:
+                raise ValueError("merge: graphs not found: " + " ".join(miss or ["(none)"]))
+            ctx.graph_cmds[gname.lower()] = ["__merge__ " + " ".join(mems)]
+            ctx.graph_opts[gname.lower()] = []
+            return _graph_method(gname.lower(), "show", None, "", ctx)
         if kind not in GRAPH_KINDS:
             raise ValueError(f"graph type {kind} not supported")
         out = _graph_cmd("scat" if kind.startswith("scat") else kind,
@@ -2597,11 +2686,137 @@ def _gp_color(c: str) -> str:
     return c.lower()
 
 
+def _x_of_date(v: str) -> str:
+    """EViews date -> x coordinate of gretl's time-series graphs (decimal year)."""
+    t = v.strip().strip('"')
+    m = re.fullmatch(r"(\d{4})[qQ:](\d)", t)
+    if m:
+        return f"{int(m.group(1)) + (int(m.group(2)) - 1) / 4:g}"
+    m = re.fullmatch(r"(\d{4})[mM](\d{1,2})", t)
+    if m:
+        return f"{int(m.group(1)) + (int(m.group(2)) - 1) / 12:.4f}"
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", t)
+    if m:
+        d = dt.date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+        return f"{d.year + (d.timetuple().tm_yday - 1) / 365.25:.4f}"
+    if re.fullmatch(r"-?[\d.]+", t):
+        return t
+    raise ValueError(f"draw: date {t} not understood")
+
+
+def _retarget(c: str, target: str) -> str:
+    """Point a graph drawn by a command or package function (hist, boxplot, ev_pie ...) at another output."""
+    f = target.split("=", 1)[1]
+    if re.search(r"--output=\S+", c):
+        return re.sub(r"--output=\S+", target, c)
+    if re.search(r"--plot=\S+", c):
+        return re.sub(r"--plot=\S+", "--plot=" + f.strip('"'), c)
+    m = re.fullmatch(r"(ev_\w+)\((.*)\)", c.strip())
+    if m:
+        args = [x.strip() for x in re.split(r",(?![^()]*\))", m.group(2))]
+        if len(args) > 1 and args[1].startswith('"'):
+            args[1] = f
+        elif f != "display":
+            args.insert(1, f)
+        return f"{m.group(1)}({', '.join(args)})"
+    return c
+
+
+def _graph_render(g: str, target: str, ctx: Ctx) -> list[str]:
+    """Commands that draw graph g (with its settings) to target (--output=... or --outbuf=...)."""
+    sets = ctx.graph_opts.get(g, [])
+    block = (" { " + "; ".join(sets) + "; }") if sets else ""
+    out = []
+    cmds = ctx.graph_cmds.get(g, [])
+    if cmds and cmds[0].startswith("__merge__"):
+        mems = cmds[0].split()[1:]
+        for k, m_ in enumerate(mems, 1):
+            out += _graph_render(m_, f"--outbuf=ev_gb{k}", ctx)
+        out.append(f"strings ev_gbs = defarray({', '.join(f'ev_gb{k}' for k in range(1, len(mems) + 1))})")
+        out.append(f"gridplot ev_gbs {target}")
+        return out
+    names = ctx.graph_names.get(g, {})
+    for c in cmds:
+        if not c.startswith("gnuplot"):
+            if target.startswith("--outbuf"):
+                raise ValueError(f"merge: graph {g} is not a line, bar or scatter graph")
+            out.append(_retarget(c, target))
+            continue
+        mems = [x for m_ in c.split("--")[0].split()[1:] for x in ctx.groups.get(m_, [m_])]
+        for k, txt in names.items():
+            if 1 <= k <= len(mems):
+                out.append(f'setinfo {mems[k - 1]} --graph-name="{txt}"')
+        c2 = re.sub(r'\s--output=\S+', "", c)
+        if g in ctx.graph_lp:
+            c2 = c2.replace("--with-lines", "--with-lp")
+        blk = block
+        if len(mems) == 1 and "--time-series" in c:
+            # gretl draws no legend for a single series: legend settings would leave an empty box
+            keep = [x for x in sets if not x.startswith("set key") or x == "set key off"]
+            blk = (" { " + "; ".join(keep) + "; }") if keep else ""
+        out.append(f"{c2} {target}{blk}")
+    return out
+
+
 def _graph_method(g: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> list[str]:
     """Graph formatting becomes gnuplot settings; save/display re-draw the graph with them."""
     o = (opts or "").strip()
     a = args.strip()
     sets = ctx.graph_opts.setdefault(g, [])
+    low = (o + " " + a).lower()
+    if ml in ("setfont", "textdefault"):
+        m = re.search(r"(\d+(?:\.\d+)?)", low)
+        if not m:
+            raise Ignored("font option")
+        sets.append(f'set termoption font ",{m.group(1)}"')
+        return [f"# graph {g}: {sets[-1]}"]
+    if ml == "datelabel":
+        done = []
+        if "format(" in low:
+            sets.append('set format x "%.0f"')
+            done.append(sets[-1])
+        m = re.search(r"interval\(\s*(\w+)\s*,\s*([\d.]+)\s*\)", low)
+        if m:
+            step = float(m.group(2))
+            unit = m.group(1)
+            step = {"y": step, "yr": step, "year": step, "q": step / 4, "m": step / 12, "obs": step}.get(unit, step)
+            sets.append(f"set xtics {step:g}")
+            done.append(sets[-1])
+        if not done:
+            raise Ignored("datelabel option")
+        return [f"# graph {g}: " + "; ".join(done)]
+    if ml == "draw":
+        # draw(line|dashline|shade, left|right|bottom, v1 [, v2] [, color])
+        parts = [x.strip() for x in re.split(r",(?![^()]*\))", o + ("," + a if a else "")) if x.strip()]
+        if len(parts) < 3:
+            raise ValueError("draw: give the type, the axis and a position")
+        typ, axis = parts[0].lower(), parts[1].lower()
+        color = next((p for p in parts[2:] if p.lower().startswith("@rgb") or re.fullmatch(r"[a-z]+", p.lower())
+                      and p.lower() not in ("top", "bottom")), None)
+        vals = [p for p in parts[2:] if p is not color]
+        col = _gp_color(color) if color else ("gray85" if typ == "shade" else "black")
+        bottom = axis.startswith("b")
+        conv = (lambda v: _x_of_date(v)) if bottom else (lambda v: v)
+        ax = "y2" if axis.startswith("r") else "y"
+        if typ in ("line", "dashline"):
+            v = conv(vals[0])
+            dt = " dt 2" if typ == "dashline" else ""
+            if bottom:
+                sets.append(f'set arrow from first {v}, graph 0 to first {v}, graph 1 nohead lc rgb "{col}"{dt}')
+            else:
+                sets.append(f'set arrow from graph 0, {"second" if ax == "y2" else "first"} {v} to graph 1, '
+                            f'{"second" if ax == "y2" else "first"} {v} nohead lc rgb "{col}"{dt}')
+        elif typ == "shade":
+            if len(vals) < 2:
+                raise ValueError("draw(shade): give the start and the end")
+            v1, v2 = conv(vals[0]), conv(vals[1])
+            if bottom:
+                sets.append(f'set object rect from first {v1}, graph 0 to first {v2}, graph 1 behind fc rgb "{col}" fs solid 0.5 noborder')
+            else:
+                sets.append(f'set object rect from graph 0, first {v1} to graph 1, first {v2} behind fc rgb "{col}" fs solid 0.5 noborder')
+        else:
+            raise Ignored(f"draw({typ})")
+        return [f"# graph {g}: {sets[-1]}"]
     if ml == "addtext":
         txt = re.search(r'"([^"]*)"', a)
         txt = txt.group(1) if txt else a
@@ -2618,17 +2833,35 @@ def _graph_method(g: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> lis
                 raise Ignored("text position")
             sets.append(f'set label "{txt}" at graph {float(m.group(1)) / 6:.3f}, {1 - float(m.group(2)) / 4:.3f}')
         return [f"# graph {g}: {sets[-1]}"]
-    if ml == "axis":
-        side = o.lower() or "left"
+    if ml in ("axis", "scale"):
+        side = (o.split(",")[0].strip().lower() if o else "") or "left"
+        rest_ = (o.split(",", 1)[1] if "," in o else "") + " " + a
         ax = "y2" if side.startswith("r") else ("x" if side.startswith("b") else "y")
-        m = re.search(r"(?i)range\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)", a)
+        done = []
+        m = re.search(r"(?i)range\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)", rest_)
         if m:
-            sets.append(f"set {ax}range [{m.group(1)}:{m.group(2)}]")
-        if re.search(r"(?i)\blog\b", a):
-            sets.append(f"set logscale {ax}")
-        if not sets or not (m or "log" in a.lower()):
+            done.append(f"set {ax}range [{m.group(1)}:{m.group(2)}]")
+        if re.search(r"(?i)(?<!-)\blog\b", rest_):
+            done.append(f"set logscale {ax}")
+        if re.search(r"(?i)\blinearzero\b", rest_):
+            done.append(f"set {ax}range [0:*]")
+        if re.search(r"(?i)\binvert\b", rest_):
+            done.append(f"set {ax}range [*:*] reverse")
+        if re.search(r"(?i)(?<!-)\bzeroline\b", rest_):
+            done.append("set xzeroaxis lt -1" if ax != "x" else "set yzeroaxis lt -1")
+        if re.search(r"(?i)(?<!-)\bgrid\b", rest_):
+            done.append(f"set grid {ax}tics")
+        if re.search(r"(?i)-grid\b", rest_):
+            done.append(f"unset grid")
+        m = re.search(r"(?i)angle\(\s*(-?[\d.]+|auto)\s*\)", rest_)
+        if m and m.group(1) != "auto":
+            done.append(f"set {ax}tics rotate by {m.group(1)}")
+        if re.search(r"(?i)-label\b|\bticksnone\b", rest_):
+            done.append(f'set format {ax} ""')
+        if not done:
             raise Ignored("axis option")
-        return [f"# graph {g}: {sets[-1]}"]
+        sets.extend(done)
+        return [f"# graph {g}: " + "; ".join(done)]
     if ml == "setelem":
         k = re.match(r"\s*(\d+)", o)
         k = k.group(1) if k else "1"
@@ -2643,6 +2876,15 @@ def _graph_method(g: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> lis
         m = re.search(r"(?i)lpat(?:tern)?\(\s*(\d+)\s*\)", a)
         if m:
             parts.append(f"dt {m.group(1)}")
+        m = re.search(r"(?i)fillcolor\((@rgb\([^)]*\)|[^)]*)\)", a)
+        if m and not any(x.startswith("lc ") for x in parts):
+            parts.append(f'lc rgb "{_gp_color(m.group(1))}"')
+        m = re.search(r"(?i)symbol\(\s*(\w+)\s*\)", a)
+        if m and m.group(1).lower() not in ("none", "nosymbol"):
+            pt = {"circle": 6, "filledcircle": 7, "square": 4, "filledsquare": 5, "triangle": 8,
+                  "filledtriangle": 9, "diamond": 12, "filleddiamond": 13, "x": 2, "plus": 1, "star": 3}.get(m.group(1).lower(), 7)
+            parts.append(f"pt {pt}")
+            ctx.graph_lp.add(g)
         if not parts:
             raise Ignored("element option")
         sets.append(f"set linetype {k} {' '.join(parts)}")
@@ -2655,24 +2897,49 @@ def _graph_method(g: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> lis
         ctx.graph_names.setdefault(g, {})[int(k.group(1))] = txt.group(1)
         return [f"# graph {g}: legend {k.group(1)} = {txt.group(1)}"]
     if ml == "options":
-        low = (o + " " + a).lower()
+        done = []
         if "-grid" in low or "gridnone" in low:
-            sets.append("unset grid")
-        elif "grid" in low:
-            sets.append("set grid")
-        else:
+            done.append("unset grid")
+        elif re.search(r"(?<![-\w])grid", low):
+            done.append("set grid")
+        m = re.search(r"size\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)", low)
+        if m:
+            done.append(f"set size ratio {float(m.group(2)) / float(m.group(1)):.4f}")
+        if re.search(r"-frame\b", low):
+            done.append("unset border")
+        elif re.search(r"(?<!-)\bframe\b", low):
+            done.append("set border")
+        m = re.search(r"(?:fillcolor|backcolor)\((@rgb\([^)]*\)|[^)]*)\)", low)
+        if m:
+            done.append(f'set object rect from screen 0,0 to screen 1,1 behind fc rgb "{_gp_color(m.group(1))}" fs solid noborder')
+        if re.search(r"(?<!-)\bsymbols?\b", low) or "linesymbol" in low:
+            ctx.graph_lp.add(g)
+            done.append("(lines and symbols)")
+        if not done:
             raise Ignored("graph option")
-        return [f"# graph {g}: {sets[-1]}"]
+        sets.extend(x for x in done if not x.startswith("("))
+        return [f"# graph {g}: " + "; ".join(done)]
     if ml == "legend":
-        low = (o + " " + a).lower()
+        done = []
         if "-display" in low:
-            sets.append("set key off")
+            done.append("set key off")
         elif "position(" in low or any(w in low for w in ("left", "right", "top", "bottom")):
             where = [w for w in ("left", "right", "top", "bottom") if w in low]
-            sets.append("set key " + " ".join(where or ["right"]))
-        else:
+            done.append("set key " + " ".join(where or ["right"]))
+        m = re.search(r"columns\(\s*(\d+)\s*\)", low)
+        if m:
+            done.append(f"set key maxcols {m.group(1)}")
+        if "-inbox" in low:
+            done.append("set key nobox")
+        elif "inbox" in low:
+            done.append("set key box")
+        m = re.search(r"font\(\s*(\d+)", low)
+        if m:
+            done.append(f'set key font ",{m.group(1)}"')
+        if not done:
             raise Ignored("legend option")
-        return [f"# graph {g}: {sets[-1]}"]
+        sets.extend(done)
+        return [f"# graph {g}: " + "; ".join(done)]
     if ml in ("save", "display", "show"):
         out = []
         block = (" { " + "; ".join(sets) + "; }") if sets else ""
@@ -2682,19 +2949,8 @@ def _graph_method(g: str, ml: str, opts: str | None, args: str, ctx: Ctx) -> lis
             fmt = {"png": "png", "pdf": "pdf", "eps": "eps", "emf": "png", "gif": "png", "jpg": "png"}.get(fmt, "png")
             f = a.strip('"') or g
             dest = f if re.search(r"\.\w+$", f) else f + "." + fmt
-        names = ctx.graph_names.get(g, {})
-        for c in ctx.graph_cmds.get(g, []):
-            if not c.startswith("gnuplot"):
-                out.append(c)
-                continue
-            mems = [x for m_ in c.split("--")[0].split()[1:] for x in ctx.groups.get(m_, [m_])]
-            for k, txt in names.items():
-                if 1 <= k <= len(mems):
-                    out.append(f'setinfo {mems[k - 1]} --graph-name="{txt}"')
-            c2 = re.sub(r'\s--output=\S+', "", c)
-            target = f'--output="{dest}"' if dest else _plot_out(ctx)
-            out.append(f"{c2} {target}{block}")
-        return out
+        target = f'--output="{dest}"' if dest else _plot_out(ctx)
+        return _graph_render(g, target, ctx)
     raise Ignored("graph styling")
 
 

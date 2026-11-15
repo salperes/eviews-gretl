@@ -6467,6 +6467,220 @@ function bundle ev_zivot (string expr "Series or expression", list vars "Series 
     return r
 end function
 
+function matrix ev__burstat (const matrix y, int tr "0: intercept only, 1: trend and intercept",
+                              int bi "intercept break", int bt "trend break", int ao, string meth,
+                              int pfix "lag (-1: chosen per break date)", int pmax, string ic, int t1, int t2,
+                              int ubd "user break date (index) or 0")
+    # one pass over the candidate break dates; returns {stat, break index, lag, selection value}
+    scalar T = rows(y)
+    matrix dy = y[2:T] - y[1:T-1]
+    scalar best = 1e300
+    matrix res = {NA, NA, NA, NA}
+    scalar lo = ubd > 0 ? ubd : t1
+    scalar hi = ubd > 0 ? ubd : t2
+    loop bk = lo..hi
+        matrix tt = seq(1, T)'
+        matrix DU = tt .>= bk
+        matrix DT = DU .* (tt - bk + 1)
+        matrix DB = tt .= bk
+        matrix C = ones(T, 1)
+        if tr
+            C ~= tt
+        endif
+        scalar idu = 0
+        scalar idt = 0
+        if bi
+            C ~= DU
+            idu = cols(C)
+        endif
+        if bt
+            C ~= DT
+            idt = cols(C)
+        endif
+        # AO: detrend first (break included), then ADF on the residuals
+        matrix z = y
+        matrix tb1 = {}
+        if ao
+            matrix u = {}
+            matrix b1 = mols(y, C, &u)
+            matrix V1 = (u'u / (T - cols(C))) * inv(C'C)
+            if idu
+                tb1 |= b1[idu] / sqrt(V1[idu, idu])
+            endif
+            if idt
+                tb1 |= b1[idt] / sqrt(V1[idt, idt])
+            endif
+            z = u
+        endif
+        matrix dz = z[2:T] - z[1:T-1]
+        scalar plo = pfix >= 0 ? pfix : 0
+        scalar phi = pfix >= 0 ? pfix : pmax
+        scalar icbest = 1e300
+        matrix keep = {}
+        loop p = plo..phi
+            # common estimation sample t = pmax+2..T so that criteria are comparable
+            scalar s0 = (pfix >= 0 ? p : pmax) + 2
+            matrix X = z[s0 - 1:T - 1]
+            scalar ka = 1
+            if !ao
+                X = C[s0:T, ] ~ X
+                ka = cols(X)
+                if bi
+                    X ~= DB[s0:T]
+                endif
+            elif bi
+                loop j = 0..p
+                    X ~= DB[s0 - j:T - j]
+                endloop
+            endif
+            loop j = 1..p
+                X ~= dz[s0 - 1 - j:T - 1 - j]
+            endloop
+            matrix e = {}
+            matrix b = mols(dz[s0 - 1:T - 1], X, &e)
+            scalar n = rows(e)
+            scalar k = cols(X)
+            scalar s2 = e'e / n
+            scalar crit = ic == "aic" ? log(s2) + 2 * k / n : (ic == "hq" ? log(s2) + 2 * k * log(log(n)) / n : log(s2) + k * log(n) / n)
+            if pfix >= 0
+                crit = 0
+            endif
+            if crit < icbest
+                icbest = crit
+                matrix V = (e'e / (n - k)) * inv(X'X)
+                scalar ta = b[ka] / sqrt(V[ka, ka])
+                matrix tbr = tb1
+                if !ao
+                    tbr = {}
+                    if idu
+                        tbr |= b[idu] / sqrt(V[idu, idu])
+                    endif
+                    if idt
+                        tbr |= b[idt] / sqrt(V[idt, idt])
+                    endif
+                endif
+                keep = {ta, p} ~ (rows(tbr) ? tbr' : {})
+            endif
+        endloop
+        # selection value: smaller is better
+        scalar sv = keep[1]
+        scalar ti = idu ? keep[3] : NA
+        scalar tt2 = idt ? keep[cols(keep)] : NA
+        if meth == "minint"
+            sv = ti
+        elif meth == "maxint"
+            sv = -ti
+        elif meth == "maxabsint"
+            sv = -abs(ti)
+        elif meth == "mintrend"
+            sv = tt2
+        elif meth == "maxtrend"
+            sv = -tt2
+        elif meth == "maxabstrend"
+            sv = -abs(tt2)
+        endif
+        if ok(sv) && sv < best
+            best = sv
+            res = {keep[1], bk, keep[2], sv}
+        endif
+    endloop
+    return res
+end function
+
+function bundle ev_breakur (string expr "Series or expression", list vars "Series used (e.g. dataset)",
+                            string trend[null] "Basic model: const or trendconst (default)",
+                            string brk[null] "Break in: const (default), trend or trendconst",
+                            string btype[null] "innov (innovational outlier, default) or outlier (additive)",
+                            string method[null] "dfuller (default), minint, maxint, maxabsint, mintrend, maxtrend, maxabstrend or user",
+                            string bdate[null] "Break date for method user, e.g. 1990:1",
+                            int lag[-1::-1] "Fixed lag (-1: chosen by the criterion)",
+                            string lagmethod[null] "sic (default), aic or hq",
+                            int maxlag[-1::-1] "Maximum lag (-1: 12 (T/100)^(1/4))",
+                            scalar trim[0.15], int nrep[0::1000] "Replications for the p-values (0: none)",
+                            bool quiet[0])
+    # EViews breakpoint unit root test (Perron; Vogelsang and Perron 1998): innovational or additive
+    # outlier models, break date chosen by the Dickey-Fuller t or by the t-statistic of a break term.
+    # The p-values and critical values are simulated (random walk of the same length, same procedure).
+    string tr = exists(trend) ? tolower(trend) : "trendconst"
+    string bk = exists(brk) ? tolower(brk) : "const"
+    string bt = exists(btype) ? tolower(btype) : "innov"
+    string me = exists(method) ? tolower(method) : "dfuller"
+    string ic = exists(lagmethod) ? tolower(lagmethod) : "sic"
+    errorif(tr != "const" && tr != "trendconst", "trend must be const or trendconst")
+    errorif(bk != "const" && bk != "trend" && bk != "trendconst", "break must be const, trend or trendconst")
+    errorif(tr == "const" && bk != "const", "a model without trend can only have an intercept break")
+    errorif(bt != "innov" && bt != "outlier", "breaktype must be innov or outlier")
+    errorif(ic != "sic" && ic != "aic" && ic != "hq", "lagmethod must be sic, aic or hq")
+    errorif(instrings(defarray("dfuller", "minint", "maxint", "maxabsint", "mintrend", "maxtrend", "maxabstrend", "user"), me) == 0, \
+      "unknown break selection method " ~ me)
+    scalar bi = bk != "trend"
+    scalar btr = bk != "const"
+    errorif(!bi && strstr(me, "int") != "", "intercept-break selection needs an intercept break")
+    errorif(!btr && strstr(me, "trend") != "", "trend-break selection needs a trend break")
+    scalar ao = bt == "outlier"
+    set skip_missing off
+    series evb_x = ev_gen(expr, vars)
+    series evb_o = obs
+    matrix D = {evb_x} ~ {evb_o}
+    D = selifr(D, ok(D[, 1]))
+    matrix y = D[, 1]
+    matrix tob = D[, 2]
+    scalar T = rows(y)
+    scalar pmax = maxlag >= 0 ? maxlag : floor(12 * (T / 100)^(1 / 4))
+    scalar t1 = max(pmax + 3, ceil(trim * T))
+    scalar t2 = min(T - pmax - 2, floor((1 - trim) * T))
+    scalar ubd = 0
+    if me == "user"
+        errorif(!exists(bdate), "method user needs a break date (bdate)")
+        scalar ubd = 0
+        loop i = 1..T
+            if obslabel(tob[i]) == bdate
+                ubd = i
+            endif
+        endloop
+        errorif(ubd == 0, "break date " ~ bdate ~ " is not in the sample")
+    endif
+    matrix r0 = ev__burstat(y, tr == "trendconst", bi, btr, ao, me, lag, pmax, ic, t1, t2, ubd)
+    bundle r
+    r.stat = r0[1]
+    r.break = obslabel(tob[r0[2]])
+    r.lag = r0[3]
+    r.model = sprintf("trend=%s, break=%s, breaktype=%s, method=%s", tr, bk, bt, me)
+    if nrep > 0
+        # simulated null distribution: random walk, lag 0, same model and selection rule
+        matrix sims = zeros(nrep, 1)
+        scalar ub = me == "user" ? ubd : 0
+        loop i = 1..nrep
+            matrix ys = cum(mnormal(T, 1))
+            matrix rs = ev__burstat(ys, tr == "trendconst", bi, btr, ao, me, 0, 0, ic, t1, t2, ub)
+            sims[i] = rs[1]
+        endloop
+        r.pvalue = meanc(sims .<= r.stat)
+        r.cv = quantile(sims, {0.01, 0.05, 0.10})
+        r.nrep = nrep
+    endif
+    if !quiet
+        printf "\nNull Hypothesis: %s has a unit root\n", toupper(expr)
+        printf "Trend Specification: %s\nBreak Specification: %s\nBreak Type: %s\n", \
+          tr == "const" ? "Intercept only" : "Trend and intercept", \
+          bk == "const" ? "Intercept only" : (bk == "trend" ? "Trend only" : "Trend and intercept"), \
+          ao ? "Additive outlier" : "Innovational outlier"
+        printf "Break Date: %s\nBreak Selection: %s\nLag Length: %d (%s)\n\n", r.break, \
+          me == "dfuller" ? "Minimize Dickey-Fuller t-statistic" : (me == "user" ? "User-specified" : "Break term t-statistic (" ~ me ~ ")"), \
+          r.lag, lag >= 0 ? "fixed" : sprintf("automatic, %s, maxlag=%d", toupper(ic), pmax)
+        printf "%-40s%14s%10s\n", "", "t-Statistic", "Prob.*"
+        if nrep > 0
+            printf "%-40s%14.6f%10.4f\n", "Augmented Dickey-Fuller test statistic", r.stat, r.pvalue
+            printf "%-40s%14.6f\n%-40s%14.6f\n%-40s%14.6f\n", "Test critical values:   1% level", r.cv[1], \
+              "                        5% level", r.cv[2], "                        10% level", r.cv[3]
+            printf "\n*Simulated one-sided p-values (%d replications of a random walk with T = %d).\n", nrep, T
+        else
+            printf "%-40s%14.6f\n", "Augmented Dickey-Fuller test statistic", r.stat
+        endif
+    endif
+    return r
+end function
+
 function bundle ev_panelur (series x "Series of a panel page", string test[null] "fisher (ADF, default), fisherpp or hadri",
                             bool trend[0], int lag[0::1] "ADF lag for the Fisher test", bool quiet[0])
     # Maddala-Wu / Choi Fisher-type tests and Hadri's stationarity test
@@ -8769,6 +8983,42 @@ function series ev_fred (string id "FRED series code, e.g. GDPC1",
     return x
 end function
 
+function string ev_strat (const series x, int t)
+    # value of observation t as text: the label of a string-valued (alpha) series, else %g ("" for NA)
+    if nelem(strvals(x)) > 0
+        string s = x[t]
+        return s
+    endif
+    if !ok(x[t])
+        return ""
+    endif
+    return sprintf("%g", x[t])
+end function
+
+function series ev_alpha (strings S "Text of each observation (index = observation number)")
+    # string-valued series from an array of texts; "" becomes missing (EViews alpha series)
+    series x = NA
+    strings u = array(0)
+    loop t = $t1..min($t2, nelem(S))
+        if S[t] != ""
+            matrix m = instrings(u, S[t])
+            scalar k = 0
+            if rows(m) > 0
+                k = m[1]
+            endif
+            if k == 0
+                u += S[t]
+                k = nelem(u)
+            endif
+            x[t] = k
+        endif
+    endloop
+    if nelem(u) > 0
+        stringify(x, u)
+    endif
+    return x
+end function
+
 function scalar ev_uiprompt (string msg "Prompt text", string kind[null] "O, OC, YN or YNC")
     # EViews @uiprompt in a script: print the prompt and answer OK / Yes (1)
     printf "[prompt] %s -> answered %s (no dialogs in a script)\n", msg, exists(kind) && strstr(toupper(kind), "Y") != "" ? "Yes" : "OK"
@@ -9158,6 +9408,64 @@ function scalar ev__faml (const matrix th, const matrix R, scalar nf)
     matrix rest = lam[nf + 1:p]
     scalar f = sumc(log(rest)) - sumc(rest) + (p - nf)
     return ok(f) ? f : -1e100
+end function
+
+function void ev_pie (list L "Series of the group (non-negative)", string out[null] "Graph file (default: display)",
+                      string title[null])
+    # EViews pie graph: one pie per observation of the sample (at most 12), slices = the series
+    set skip_missing off
+    matrix X = {L}
+    matrix ob = seq($t1, $t2)'
+    scalar n = rows(X)
+    errorif(n > 12, "Pie graphs: at most 12 observations (set a smaller sample)")
+    errorif(minc(minr(X)) < 0, "Pie graphs need non-negative values")
+    scalar k = cols(X)
+    strings col = defarray("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", \
+      "#bcbd22", "#17becf")
+    string f = sprintf("%s/ev_pie.plt", $dotdir)
+    scalar w = 2.6
+    # legend entries per row so that they fit in the plot width
+    scalar per = max(1, floor(((n - 1) * w + 2.4) / 1.1))
+    scalar nrow = ceil(k / per)
+    outfile "@f" --quiet
+        printf "unset border\nunset tics\nunset key\nset size ratio -1\n"
+        printf "set xrange [-1.3:%g]\nset yrange [-1.7:%g]\n", (n - 1) * w + 1.3, 1.5 + 0.3 * nrow
+        if exists(title)
+            printf "set title \"%s\"\n", title
+        endif
+        scalar obj = 0
+        loop i = 1..n
+            scalar tot = sumr(X[i, ])
+            scalar a0 = 90
+            if ok(tot) && tot > 0
+                loop j = 1..k
+                    scalar a1 = a0 - 360 * X[i, j] / tot
+                    obj++
+                    printf "set object %d circle at %g,0 size 1 arc [%g:%g] fc rgb \"%s\" fs solid 1.0 border lc rgb \"white\"\n", \
+                      obj, (i - 1) * w, a1, a0, col[1 + (j - 1) % 10]
+                    if X[i, j] / tot >= 0.04
+                        scalar am = (a0 + a1) / 2 * $pi / 180
+                        printf "set label \"%.0f%%\" at %g,%g center tc rgb \"white\" front\n", 100 * X[i, j] / tot, \
+                          (i - 1) * w + 0.62 * cos(am), 0.62 * sin(am)
+                    endif
+                    a0 = a1
+                endloop
+            endif
+            printf "set label \"%s\" at %g,-1.35 center\n", obslabel(ob[i]), (i - 1) * w
+        endloop
+        # legend: coloured boxes and series names above the pies
+        loop j = 1..k
+            scalar lx = -1.2 + ((j - 1) % per) * 1.1
+            scalar ly = 1.3 + 0.3 * floor((j - 1) / per)
+            obj++
+            printf "set object %d rect from %g,%g to %g,%g fc rgb \"%s\" fs solid 1.0 noborder\n", obj, lx, ly - 0.08, lx + 0.16, ly + 0.08, \
+              col[1 + (j - 1) % 10]
+            printf "set label \"%s\" at %g,%g left\n", varname(L[j]), lx + 0.22, ly
+        endloop
+        printf "plot NaN notitle\n"
+    end outfile
+    string o = exists(out) ? out : "display"
+    gnuplot --input="@f" --output="@o"
 end function
 
 function void ev_seasplot (series x "Quarterly or monthly series", string out[null] "Graph file (default: display)")

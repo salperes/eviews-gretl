@@ -82,7 +82,10 @@ MIDAS, GLM, elastic net, Heckman, truncated regression, panel 2SLS and two-way r
 restricted VECs (`append(coint)` with B(i,j) and, for rank 1, A(i,1)), Bayesian VARs
 (`var v.bvar`), `m.control`, `pool p1 _us _uk` + `p1.ls(cx=f) y? c x?`, `spool`, `factor`,
 `sspace` state constants and `makestates`, `valmap`, `write`, `fetch(d=fred)` (FRED's public
-CSV, no API key). `examples/phase3.prg` and `examples/phase3c.prg` use them;
+CSV, no API key), alpha series from expressions (`alpha t = @upper(a) + @str(@year)`), the
+breakpoint unit root test `x.buroot(...)` (innovational / additive outlier, break selection,
+simulated p-values), graph `draw`, `scale`, `datelabel`, `merge` and `pie`.
+`examples/phase3.prg`, `examples/phase3c.prg` and `examples/phase3d.prg` use them;
 `examples/phase3c_check.inp` checks results against gretl's own estimators.
 
 What is still partial or missing, item by item: [`docs/GAP_ANALIZI.md`](../docs/GAP_ANALIZI.md).

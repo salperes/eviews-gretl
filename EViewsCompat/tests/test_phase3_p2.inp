@@ -1,0 +1,54 @@
+# Last P2 items: breakpoint unit root test, alpha series from expressions, pie graphs
+set verbose off
+include gig.gfn
+include ../EViewsCompat.inp
+open ../../data/usmacro.gdt --quiet
+
+function void check (string what, scalar a, scalar b, scalar tol[1e-6])
+    if abs(a - b) > tol * (1 + abs(b)) || !ok(a)
+        printf "FAIL  %-52s %.10g vs %.10g\n", what, a, b
+    else
+        printf "ok    %s\n", what
+    endif
+end function
+
+series lg = log(GDP)
+set seed 101
+# S6: simulated critical values agree with Zivot and Andrews (1992) for the IO models
+bundle a = ev_breakur("lg", dataset, "trendconst", "const", "innov", null, null, -1, null, -1, 0.15, 1000, 1)
+check("IO intercept break: 5% cv near ZA -4.80", a.cv[2], -4.80, 0.03)
+bundle b = ev_breakur("lg", dataset, "trendconst", "trend", "innov", null, null, -1, null, -1, 0.15, 1000, 1)
+check("IO trend break: 5% cv near ZA -4.42", b.cv[2], -4.42, 0.03)
+bundle c = ev_breakur("lg", dataset, "trendconst", "trendconst", "innov", null, null, -1, null, -1, 0.15, 1000, 1)
+check("IO both: 5% cv near ZA -5.08", c.cv[2], -5.08, 0.03)
+# with a fixed lag and a user break date, the statistic is the ADF t of the IO regression
+smpl 1960:1 2019:4
+bundle u = ev_breakur("lg", dataset, "trendconst", "const", "innov", "user", "1980:1", 1, null, -1, 0.15, 0, 1)
+series du = obs >= obsnum("1980:1")
+series db = obs == obsnum("1980:1")
+series tr = time
+smpl 1960:3 2019:4      # the function uses lags from within the sample only
+ols diff(lg) const tr du db lg(-1) diff(lg(-1)) --quiet
+check("user break date: t = OLS t of the lagged level", u.stat, $coeff(lg_1) / $stderr(lg_1), 1e-6)
+smpl full
+bundle o = ev_breakur("lg", dataset, "trendconst", "trend", "outlier", "maxabstrend", null, -1, "aic", 8, 0.15, 100, 1)
+check("AO trend break runs and gives a p-value", ok(o.pvalue) && o.pvalue >= 0 && o.pvalue <= 1, 1)
+# W14: alpha series from texts, text of an observation
+nulldata 5 --preserve
+series v = obs * 2
+strings S = array(5)
+loop t = 1..5
+    S[t] = t <= 2 ? "lo" : "hi" ~ ev_strat(v, t)
+endloop
+series a2 = ev_alpha(S)
+check("alpha series: distinct labels", nelem(strvals(a2)), 4)
+check("ev_strat of an alpha series", ev_strat(a2, 4) == "hi8", 1)
+check("ev_strat of a numeric series", ev_strat(v, 3) == "6", 1)
+# O5: pie graph to a file
+open ../../data/usmacro.gdt --quiet
+series oth = GDP - CONS - INV
+list L = CONS INV oth
+smpl 2019:1 2019:4
+string pf = sprintf("%s/ev_pie_test.png", $dotdir)
+catch ev_pie(L, pf)
+check("pie graph drawn without error", $error, 0)

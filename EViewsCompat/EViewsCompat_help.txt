@@ -163,7 +163,7 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_fprint(f)
   ev_depbase(b, vars)  -> string
       the series Y when the dependent variable is log(Y), d(Y) or dlog(Y); "" otherwise
-  ev_nls(spec, vars, [cov], or, [quiet])  -> bundle
+  ev_nls(spec, vars, [cov], [quiet])  -> bundle
   ev_arma(spec, vars, [quiet])  -> bundle
   ev_sysprint(b)
   ev_sysresid(b, [i])  -> series
@@ -172,10 +172,10 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_tsls(spec, vars, [cov], [quiet], [liml])  -> bundle
   ev_binary(spec, vars, [dist], [quiet])  -> bundle
   ev_binaryprint(b)
-  ev_ardl(spec, vars, [deplags], [reglags], [ic], or, [trend], linear, [quiet])  -> bundle
+  ev_ardl(spec, vars, [deplags], [reglags], [ic], [trend], [quiet])  -> bundle
   ev_ardlprint(b)
   ev_boundsprint(b)
-  ev_hettest(b, [htype], or, [nlag], [quiet])  -> bundle
+  ev_hettest(b, [htype], [nlag], [quiet])  -> bundle
   ev_reset(b, [nfit], [quiet])  -> bundle
   ev_chow(b, dates, [forecast], [quiet])  -> bundle
   ev_testadd(b, vars, adds, [quiet])  -> bundle
@@ -207,7 +207,7 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_word(s, n)  -> string
   ev_dateval(s, [fmt])  -> scalar
       EViews date number (days since 1 Jan 1 AD, starting at 0)
-  ev_datestr(d, [fmt], YYYY)  -> string
+  ev_datestr(d, [fmt])  -> string
   ev_date()  -> series
       EViews @date: date number of each observation
   ev_table([r], [c])  -> bundle
@@ -215,13 +215,13 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_tsetnum(t, [i], [j], v)
   ev_tget(t, i, j)  -> string
   ev_twidth(t, [j], [w])
-  ev_ttext(t, [fmt], or)  -> string
+  ev_ttext(t, [fmt])  -> string
   ev_tprint(t)
-  ev_tsave(t, fname, [fmt], or)
-  ev_mlreg(spec, vars, method, or, [p1], [p2], [quiet])  -> bundle
+  ev_tsave(t, fname, [fmt])
+  ev_mlreg(spec, vars, method, [p1], [p2], [quiet])  -> bundle
   ev_mlprint(b)
-  ev_wls(spec, vars, wexpr, [wtype], or, [quiet])  -> bundle
-  ev_cointreg(spec, vars, [method], or, [nlead], [nlag], [trend], or, [quiet])  -> bundle
+  ev_wls(spec, vars, wexpr, [wtype], [quiet])  -> bundle
+  ev_cointreg(spec, vars, [method], [nlead], [nlag], [trend], [quiet])  -> bundle
   ev_dpanel(y, [xs], vars, [p], [twostep], [timedum], [quiet])  -> bundle
   ev_coefprint(b)
       generic coefficient table (cointegrating regressions, dynamic panels)
@@ -244,7 +244,9 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       ERS point-optimal P_T and Ng-Perron MZa, MZt, MSB, MPT (AR spectral, GLS-detrended, SIC lags)
   ev_zivot(expr, vars, [model], [lag], [trim], [quiet])  -> bundle
       Zivot-Andrews (1992) unit root test with one endogenous break: minimum t over break dates
-  ev_panelur(x, [test], or, [trend], [lag], [quiet])  -> bundle
+  ev_breakur(expr, vars, [trend], [brk], [btype], [method], [bdate], [lag], [lagmethod], [maxlag], [trim], [nrep], [quiet])  -> bundle
+      EViews breakpoint unit root test (Perron; Vogelsang and Perron 1998): innovational or additive
+  ev_panelur(x, [test], [trend], [lag], [quiet])  -> bundle
       Maddala-Wu / Choi Fisher-type tests and Hadri's stationarity test
   ev_cf(x, [low], [high])  -> series
       Christiano-Fitzgerald asymmetric full-sample filter (random-walk assumption, drift removed)
@@ -256,8 +258,8 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_pcscore(r, [j])  -> series
   ev_kdplot(x, [out])
       kernel density estimate (Epanechnikov in EViews; gretl's default Gaussian kernel here)
-  ev_dateadd(d, n, [unit], or)  -> scalar
-  ev_datediff(d1, d2, [unit], or)  -> scalar
+  ev_dateadd(d, n, [unit])  -> scalar
+  ev_datediff(d1, d2, [unit])  -> scalar
       d1 - d2 in whole units
   ev_makedate(v, fmt)  -> scalar
   ev_wfind(s, w)  -> scalar
@@ -288,9 +290,9 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       Bai-Perron global minimisation of the SSR (dynamic programming) for 0..maxbreaks breaks;
   ev_midaslags(S, [K])  -> matrix
       for each observation of the current (low-frequency) page: the last K high-frequency values
-  ev_midas(spec, vars, L, [poly], or, [deg], [quiet])  -> bundle
-  ev_glm(spec, vars, [family], or, [link], or, [quiet])  -> bundle
-  ev_enet(spec, vars, [alpha], between, [lfrac], [quiet])  -> bundle
+  ev_midas(spec, vars, L, [poly], [deg], [quiet])  -> bundle
+  ev_glm(spec, vars, [family], [link], [quiet])  -> bundle
+  ev_enet(spec, vars, [alpha], [lfrac], [quiet])  -> bundle
   ev_paneliv(spec, vars, [cx], [quiet])  -> bundle
   ev_panelre2(spec, vars, [period], [quiet])  -> bundle
       Swamy-Arora random effects for a balanced panel: cross-section (and period) components
@@ -303,7 +305,7 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
   ev_gradients(b, [quiet])  -> matrix
       gradients of the sum of squares at the estimates (-2 X'e): zero at an interior optimum
   ev_breitung(x, [lag], [quiet])  -> bundle
-  ev_ets(x, [model], or, [quiet])  -> bundle
+  ev_ets(x, [model], [quiet])  -> bundle
   ev_testequal(names, vars, [quiet])  -> bundle
       equality of means (ANOVA F), medians (Kruskal-Wallis) and variances (Bartlett, Levene) across series
   ev_vratio(x, [periods], [quiet])  -> matrix
@@ -317,15 +319,19 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       residual correlation matrix and Cholesky-orthogonalised normality test (as VAR)
   ev_modelfit(ms, [quiet])  -> matrix
       RMSE, MAE, MAPE and Theil U of the solution against the actual values
-  ev_bvar(v, terms, [mu1], [L1], [L2], [L3], [quiet])  -> bundle
+  ev_bvar(v, [mu1], [L1], [L2], [L3], [quiet])  -> bundle
       Litterman / Minnesota prior, equation by equation (EViews BVAR, Litterman prior):
   ev_bvarprint(b)
       Bayesian VAR coefficient table (posterior means, s.d. in parentheses)
   ev_stop(msg)
       stop the program with an error message (translated setmaxerrs)
+  ev_strat(x, t)  -> string
+      value of observation t as text: the label of a string-valued (alpha) series, else %g ("" for NA)
+  ev_alpha(S)  -> series
+      string-valued series from an array of texts; "" becomes missing (EViews alpha series)
   ev_fred(id, [agg])  -> series
       FRED (St. Louis Fed) public CSV download; observations are matched to the workfile by date and
-  ev_uiprompt(msg, [kind], or)  -> scalar
+  ev_uiprompt(msg, [kind])  -> scalar
       EViews @uiprompt in a script: print the prompt and answer OK / Yes (1)
   ev_uiskip([what])  -> scalar
       EViews @uiedit, @uilist, @uiradio, @uidialog in a script: keep the current values, return 0 (OK)
@@ -339,6 +345,8 @@ Optional arguments are in [ ]; the first comment line of each function is shown.
       factor analysis of the correlation matrix: maximum likelihood or iterated principal factors
   ev_seasplot(x, [out])
       seasonal subseries graph: one line per quarter / month across the years
+  ev_pie(L, [out], [title])
+      EViews pie graph: one pie per observation of the sample (at most 12), slices = the series
   ev_ls_gui(spec, [spec2], [spec3], vars, [cov])  -> bundle
       optional parts may arrive empty or as the literal text "null"
   ev_ls_gui(spec, [spec2], [spec3], vars, [cov])  -> bundle
