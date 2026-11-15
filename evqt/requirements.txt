@@ -1,0 +1,4 @@
+# evqt needs only the Qt essentials (Widgets, PrintSupport). Do not use Qt 6.8.x: it crashes on macOS
+# when accessibility tools drive the command window (see evqt/README.md).
+PySide6-Essentials==6.12.0
+shiboken6==6.12.0

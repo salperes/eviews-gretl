@@ -15,9 +15,15 @@ import tempfile
 import threading
 from dataclasses import dataclass, field
 
+import shutil
+
+# gretlcli: $EVQT_GRETLCLI, else the macOS app bundle, else gretlcli on the PATH (Linux packages).
+# The macOS bundle's gretlcli needs GRETL_HOME; elsewhere it is taken from the environment if set.
 GRETL_APP = "/Applications/Gretl.app"
-GRETLCLI = os.path.join(GRETL_APP, "Contents/Resources/bin/gretlcli")
-GRETL_HOME = os.path.join(GRETL_APP, "Contents/Resources/share/gretl/")
+_MAC_CLI = os.path.join(GRETL_APP, "Contents/Resources/bin/gretlcli")
+GRETLCLI = os.environ.get("EVQT_GRETLCLI") or (_MAC_CLI if os.path.exists(_MAC_CLI) else (shutil.which("gretlcli") or _MAC_CLI))
+GRETL_HOME = os.environ.get("GRETL_HOME") or (
+    os.path.join(GRETL_APP, "Contents/Resources/share/gretl/") if GRETLCLI == _MAC_CLI else "")
 
 _MARK = "__EVQT_END__"
 
@@ -65,7 +71,7 @@ EQ_KINDS = {"ls", "nls", "arma", "garch", "panel", "tsls", "binary", "ardl", "ml
 
 class GretlEngine:
     def __init__(self, gretlcli: str = GRETLCLI):
-        env = dict(os.environ, GRETL_HOME=GRETL_HOME)
+        env = dict(os.environ, GRETL_HOME=GRETL_HOME) if GRETL_HOME else dict(os.environ)
         self.tmpdir = tempfile.mkdtemp(prefix="evqt_")
         self.proc = subprocess.Popen(
             [gretlcli], stdin=subprocess.PIPE, stdout=subprocess.PIPE,

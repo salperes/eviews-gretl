@@ -16,8 +16,8 @@ information criteria, Wald, Breusch-Godfrey, White, Jarque-Bera, HAC/White covar
 ## Requirements
 - macOS or Linux with gretl 2026a or newer (developed on gretl 2026d, Apple Silicon).
 - Python 3.10+ for the translator (standard library only).
-- PySide6 for `evqt` (`pip install PySide6==6.8.1`, preferably in a virtual
-  environment outside any cloud-synced folder).
+- PySide6 6.12 for `evqt` (`evqt/requirements.txt`), in a virtual environment outside any
+  cloud-synced folder.
 
 On macOS the bundled `gretlcli` needs `GRETL_HOME` set:
 ```bash
@@ -26,9 +26,8 @@ export GRETL_HOME=/Applications/Gretl.app/Contents/Resources/share/gretl/
 
 ## Quick start
 ```bash
-# 1. build and install the gretl package
-cd EViewsCompat && gretlcli -b "$PWD/build.inp"
-# then in gretl: File › Function packages › On local machine › install EViewsCompat.gfn
+# 1. build and install the gretl package (add --evqt for the interface, --test to run the tests)
+tools/install.sh --evqt
 
 # 2. translate an EViews program
 python3 translator/evprg2hansl.py translator/examples/usmacro.prg
@@ -37,6 +36,8 @@ python3 translator/evprg2hansl.py translator/examples/usmacro.prg
 python -m evqt data/usmacro.gdt        # from the evqt/ folder
 ```
 Each folder's README has details, tests and the list of what is not done yet.
+Step-by-step installation for automated agents (and anyone installing from git):
+[AGENTS.md](AGENTS.md).
 
 ## Not affiliated
 This project is not affiliated with or endorsed by EViews or S&P Global. "EViews" is
