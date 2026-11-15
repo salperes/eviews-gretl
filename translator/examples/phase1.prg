@@ -85,3 +85,9 @@ for !i = 1 to 10
   !n = !n + 1
 next
 show !n
+
+' S10: Census X-13 seasonal adjustment (needs the x13as program set up in gretl)
+pageselect usmacro
+smpl 1960q1 2019q4
+cons.x13(save="d10 d11")
+show cons_d11

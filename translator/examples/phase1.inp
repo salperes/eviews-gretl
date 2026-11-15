@@ -135,3 +135,16 @@ loop i = 1..10
 endloop
 print n
 
+# S10: Census X-13 seasonal adjustment (needs the x13as program set up in gretl)
+string ev_pagedir = $dotdir
+smpl full
+store "@ev_pagedir/usmacro.gdtb"
+open "@ev_pagedir/usmacro.gdtb" --quiet --preserve
+scalar ev_N = $nobs
+list GC = LCONS LGDP
+smpl full
+smpl 1960:1 2019:4
+series CONS_D11 = deseas(CONS)
+series CONS_D10 = min(CONS) > 0 ? CONS / CONS_D11 : CONS - CONS_D11
+print CONS_D11
+

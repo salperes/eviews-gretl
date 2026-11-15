@@ -264,8 +264,11 @@ class Phase1Series(unittest.TestCase):
                          ['bundle g_coint = ev_cointeg("y x", dataset, "po", "ct", -1, -1)'])
         self.assertEqual(translate_line("x.seas(a) xsa xsf", c),
                          ["series xsf = NA", 'series xsa = ev_seasadj(x, "a", &xsf)'])
+        self.assertEqual(translate_line("x.x13", c), ["series x_d11 = deseas(x)"])
+        self.assertEqual(translate_line('x.x13(save="d10 d11")', c),
+                         ["series x_d11 = deseas(x)", "series x_d10 = min(x) > 0 ? x / x_d11 : x - x_d11"])
         with self.assertRaises(ValueError):
-            translate_line("x.x13", c)
+            translate_line('x.x13(save="d12")', c)
 
 
 class Phase1Var(unittest.TestCase):

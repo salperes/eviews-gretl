@@ -405,6 +405,9 @@ check("Engle-Granger" in w.windows["gcoint"].text.toPlainText(), "group view: En
 w.execute("smpl @all")
 w.execute("cons.seas(m) cons_sa cons_sf")
 check("cons_sa" in w.engine.wf.series, "seasonal adjustment by moving averages")
+w.execute('cons.x13(save="d10 d11")')
+_low = [x.lower() for x in w.engine.wf.series]
+check("cons_d11" in _low and "cons_d10" in _low, "seasonal adjustment by X-13 (x13as)")
 w.execute("table(2,2) tab1")
 w.execute('tab1(1,1) = "Mean"')
 w.execute("tab1(2,1) = @mean(gdp)")

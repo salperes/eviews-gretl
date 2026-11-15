@@ -1147,9 +1147,22 @@ def _object_method(obj: str, meth: str, opts: str | None, args: str, ctx: Ctx) -
         if len(outs) > 1:
             return [f"series {outs[1]} = NA", f'series {outs[0]} = ev_seasadj({o}, "{k}", &{outs[1]})']
         return [f'series {outs[0]} = ev_seasadj({o}, "{k}")']
-    if ml in ("x13", "x12", "tramoseats"):
-        raise ValueError("X-13/TRAMO-SEATS need the x13as program (not installed with gretl on macOS); "
-                         "use x.seas(m) for moving-average adjustment")
+    if ml in ("x13", "x12"):
+        # X-13ARIMA-SEATS through gretl's deseas() (needs the x13as program set up in gretl)
+        op = opts or ""
+        m = re.search(r'(?i)save\s*=\s*"?([^",)]*)"?', op)
+        want = [w.lower() for w in (m.group(1).split() if m else ["d11"])]
+        bad = [w for w in want if w not in ("d10", "d11")]
+        if bad:
+            raise ValueError(f"x13 save={bad[0]}: only d11 (adjusted) and d10 (seasonal factors) are available")
+        base = translate_name(args.strip(), ctx) if args.strip() else o
+        d11, d10 = apply_case(f"{base}_d11", ctx), apply_case(f"{base}_d10", ctx)
+        out = [f"series {d11} = deseas({o})"]
+        if "d10" in want:
+            out.append(f"series {d10} = min({o}) > 0 ? {o} / {d11} : {o} - {d11}")
+        return out
+    if ml == "tramoseats":
+        raise ValueError("TRAMO-SEATS needs the tramo program, which is not installed; use x.x13 or x.seas(m)")
     if ml == "coint":
         case, lag = "c", "4"
         for x in (opts or "").replace(",", " ").split():

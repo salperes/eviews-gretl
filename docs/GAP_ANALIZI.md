@@ -34,16 +34,16 @@ karşılaştırıldı. EViews'in kendisiyle sayısal karşılaştırma yapılmad
 | F · İfadeler ve @-fonksiyonlar | 5 | 2 | 2 | 0 | 9 |
 | E · Denklem tahmincileri | 6 | 1 | 15 | 0 | 22 |
 | T · Denklem testleri ve görünümleri | 9 | 1 | 7 | 0 | 17 |
-| S · Seri görünümleri ve işlemleri | 5 | 1 | 10 | 0 | 16 |
+| S · Seri görünümleri ve işlemleri | 6 | 0 | 10 | 0 | 16 |
 | G · Grup | 4 | 2 | 3 | 0 | 9 |
 | V · VAR / VEC | 7 | 2 | 3 | 0 | 12 |
 | Y · Sistem ve Model | 4 | 1 | 3 | 0 | 8 |
 | O · Diğer nesneler | 3 | 1 | 7 | 0 | 11 |
 | P · Programlama dili | 9 | 1 | 4 | 0 | 14 |
 | U · Arayüz (evqt) | 9 | 2 | 5 | 1 | 17 |
-| **Toplam** | **67** | **17** | **64** | **3** | **151** |
+| **Toplam** | **68** | **16** | **64** | **3** | **151** |
 
-Kabaca kapsama: kalemlerin **%44'i tam, %11'i kısmi**; açık P1 kalemi 5 (W7, F5, F6, S10, V8). Kapsanan kalemler EViews
+Kabaca kapsama: kalemlerin **%45'i tam, %11'i kısmi**; açık P1 kalemi 4 (W7, F5, F6, V8). Kapsanan kalemler EViews
 programlarında en sık kullanılanlar olduğu için (ls, ARCH, VAR, sistemler, modeller,
 döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 gerçek programın
 6'sı da çevrilip çalışıyor.
@@ -147,7 +147,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 | S7 | Panel birim kök: Breitung, Hadri, Fisher-ADF/PP | ❌ | | adf (Choi zaten basıyor), kendi kodu | M | P2 |
 | S8 | HP filtresi | ✅ | | hpfilt | – | – |
 | S9 | Bant geçiren filtreler BK, CF | ❌ | | bkfilt, kendi kodu (CF) | S | P2 |
-| S10 | **Mevsimsel düzeltme** X-13 / TRAMO-SEATS, `seas` (hareketli ortalama) | 🟡 | hareketli ortalama yöntemi (`seas(m|a)`) var; X-13/TRAMO-SEATS için x13as programı gerekir (gretl macOS paketinde yok) | x13a (gretl ile gelir) | M | **P1** |
+| S10 | **Mevsimsel düzeltme** X-13 / TRAMO-SEATS, `seas` (hareketli ortalama) | ✅ | `seas(m|a)` (hareketli ortalama) ve `x13` (gretl `deseas`, x13as programıyla; save=d10/d11; d12/d13 yok); TRAMO-SEATS programı kurulu değil |a)`) var; X-13/TRAMO-SEATS için x13as programı gerekir (gretl macOS paketinde yok) | x13a (gretl ile gelir) | M | **P1** |
 | S11 | Üstel düzeltme / ETS (`smooth`, `ets`) | ❌ | | kendi kodu | M | P2 |
 | S12 | Ara değer doldurma (`ipolate`) | ❌ | | kendi kodu | S | P2 |
 | S13 | Eşitlik testleri, tek yönlü tablolama | ❌ | | difftest, freq | S | P3 |
@@ -260,7 +260,7 @@ döngüler, sayfalar) gerçek program kapsaması bundan yüksek: elimizdeki 6 ge
 
 ## Faz 1 sonucu (2026-11-15)
 
-25 P1 kaleminin 20'si ✅, 5'i 🟡 (W7, F5, F6, S10, V8). G4 yeni bir eksik olarak 🟡 oldu
+25 P1 kaleminin 21'i ✅, 4'ü 🟡 (W7, F5, F6, V8); S10, x13as kurulduktan sonra tamamlandı. G4 yeni bir eksik olarak 🟡 oldu
 (gruplarda ifade üyeleri). Kısmi kalanlar:
 karesel/kübik frekans dönüştürme, bazı metin/tarih fonksiyonları, X-13 (x13as programı
 gerekiyor), VAR White ortak testi. Bu fazda bulunup düzeltilen hatalar:
